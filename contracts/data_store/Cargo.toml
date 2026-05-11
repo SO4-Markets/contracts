@@ -1,0 +1,24 @@
+[package]
+name = "data-store"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+gmx-types = { path = "../../libs/types" }
+gmx-math = { path = "../../libs/math" }
+gmx-keys = { path = "../../libs/keys" }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true

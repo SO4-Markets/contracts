@@ -1,0 +1,10 @@
+[package]
+name = "gmx-math"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[lib]

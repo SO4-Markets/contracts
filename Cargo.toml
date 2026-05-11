@@ -2,6 +2,9 @@
 resolver = "2"
 members = [
   "contracts/*",
+  "libs/types",
+  "libs/math",
+  "libs/keys",
 ]
 
 [workspace.dependencies]

@@ -1,0 +1,11 @@
+[package]
+name = "gmx-types"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+soroban-token-sdk = { version = "25" }
+
+[lib]
