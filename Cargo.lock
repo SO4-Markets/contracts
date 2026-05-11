@@ -694,6 +694,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gmx-market-utils"
+version = "0.1.0"
+dependencies = [
+ "data-store",
+ "gmx-keys",
+ "gmx-math",
+ "gmx-types",
+ "role-store",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "gmx-math"
 version = "0.1.0"
 dependencies = [
@@ -930,6 +942,29 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "market-factory"
+version = "0.1.0"
+dependencies = [
+ "data-store",
+ "gmx-keys",
+ "gmx-math",
+ "gmx-types",
+ "market-token",
+ "role-store",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "market-token"
+version = "0.1.0"
+dependencies = [
+ "data-store",
+ "gmx-keys",
+ "role-store",
+ "soroban-sdk",
 ]
 
 [[package]]

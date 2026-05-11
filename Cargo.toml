@@ -5,6 +5,7 @@ members = [
   "libs/types",
   "libs/math",
   "libs/keys",
+  "libs/market_utils",
 ]
 
 [workspace.dependencies]

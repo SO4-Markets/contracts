@@ -1,0 +1,18 @@
+[package]
+name = "gmx-market-utils"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+gmx-types = { path = "../types" }
+gmx-math = { path = "../math" }
+gmx-keys = { path = "../keys" }
+
+[lib]
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+role-store = { path = "../../contracts/role_store" }
+data-store = { path = "../../contracts/data_store" }
