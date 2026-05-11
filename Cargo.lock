@@ -450,6 +450,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "deposit-handler"
+version = "0.1.0"
+dependencies = [
+ "data-store",
+ "deposit-vault",
+ "gmx-keys",
+ "gmx-market-utils",
+ "gmx-math",
+ "gmx-types",
+ "market-factory",
+ "market-token",
+ "oracle",
+ "role-store",
+ "soroban-sdk",
+ "withdrawal-vault",
+]
+
+[[package]]
+name = "deposit-vault"
+version = "0.1.0"
+dependencies = [
+ "gmx-keys",
+ "role-store",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1929,6 +1956,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7837d08f69c77cf6b07689544538e017c1bfcf57e34b4c0ff58e6c2cd3b37091"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "withdrawal-handler"
+version = "0.1.0"
+dependencies = [
+ "data-store",
+ "deposit-handler",
+ "deposit-vault",
+ "gmx-keys",
+ "gmx-market-utils",
+ "gmx-math",
+ "gmx-types",
+ "market-token",
+ "oracle",
+ "role-store",
+ "soroban-sdk",
+ "withdrawal-vault",
+]
+
+[[package]]
+name = "withdrawal-vault"
+version = "0.1.0"
+dependencies = [
+ "gmx-keys",
+ "role-store",
+ "soroban-sdk",
 ]
 
 [[package]]

@@ -100,6 +100,27 @@ pub fn market_key(env: &Env, market: &Address) -> BytesN<32> {
     sha256(env, &b)
 }
 
+pub fn market_index_token_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "MARKET_INDEX_TOKEN");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+pub fn market_long_token_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "MARKET_LONG_TOKEN");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+pub fn market_short_token_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "MARKET_SHORT_TOKEN");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
 /// sha256("POOL_AMOUNT" ‖ market ‖ token)
 pub fn pool_amount_key(env: &Env, market: &Address, token: &Address) -> BytesN<32> {
     let mut b = Bytes::new(env);

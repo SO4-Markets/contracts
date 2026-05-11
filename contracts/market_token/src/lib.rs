@@ -204,7 +204,7 @@ impl MarketToken {
         env.events().publish((symbol_short!("burn_from"),), (spender, from, amount));
     }
 
-    // ── Controlled mint (deposit_handler / withdrawal_handler only) ────────────
+    // ── Controlled mint/pool-withdraw (handlers only) ────────────────────────
 
     /// Mint `amount` LP tokens to `to`. Caller must hold CONTROLLER role.
     pub fn mint(env: Env, caller: Address, to: Address, amount: i128) {
@@ -216,6 +216,27 @@ impl MarketToken {
         receive_balance(&env, &to, amount);
         change_total_supply(&env, amount);
         env.events().publish((symbol_short!("mint"),), (caller, to, amount));
+    }
+
+    /// Transfer underlying pool tokens (long/short token) held by this contract
+    /// to a receiver. Called by withdrawal_handler after burning LP tokens.
+    /// Caller must hold CONTROLLER role.
+    pub fn withdraw_from_pool(
+        env: Env,
+        caller: Address,
+        pool_token: Address,
+        receiver: Address,
+        amount: i128,
+    ) {
+        caller.require_auth();
+        if amount <= 0 {
+            panic_with_error!(&env, Error::NegativeAmount);
+        }
+        require_controller(&env, &caller);
+        token::Client::new(&env, &pool_token)
+            .transfer(&env.current_contract_address(), &receiver, &amount);
+        env.events()
+            .publish((symbol_short!("pool_out"),), (pool_token, receiver, amount));
     }
 }
 

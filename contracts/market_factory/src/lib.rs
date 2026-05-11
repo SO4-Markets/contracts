@@ -15,7 +15,10 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, contracterror, panic_with_error,
     symbol_short, Address, Bytes, BytesN, Env, String, Vec,
 };
-use gmx_keys::{market_list_key, market_key, roles, token_decimals_key};
+use gmx_keys::{
+    market_list_key, market_key, roles, token_decimals_key,
+    market_index_token_key, market_long_token_key, market_short_token_key,
+};
 use gmx_types::MarketProps;
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -54,6 +57,7 @@ trait IDataStore {
     fn get_bool(env: Env, key: BytesN<32>) -> bool;
     fn set_bool(env: Env, caller: Address, key: BytesN<32>, value: bool) -> bool;
     fn set_bytes32(env: Env, caller: Address, key: BytesN<32>, value: BytesN<32>) -> BytesN<32>;
+    fn set_address(env: Env, caller: Address, key: BytesN<32>, value: Address) -> Address;
     fn add_address_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: Address);
     fn get_address_set_count(env: Env, set_key: BytesN<32>) -> u32;
     fn get_address_set_at(env: Env, set_key: BytesN<32>, start: u32, end: u32) -> Vec<Address>;
@@ -196,11 +200,15 @@ impl MarketFactory {
         // Register in data_store:
         // 1. Store market existence flag
         ds_client.set_bool(&caller, &market_key(&env, &market_token_address), &true);
-        // 2. Store token decimals (7 for Stellar standard)
+        // 2. Store constituent token addresses (so handlers can reconstruct MarketProps)
+        ds_client.set_address(&caller, &market_index_token_key(&env, &market_token_address), &index_token);
+        ds_client.set_address(&caller, &market_long_token_key(&env, &market_token_address), &long_token);
+        ds_client.set_address(&caller, &market_short_token_key(&env, &market_token_address), &short_token);
+        // 3. Store token decimals (7 for Stellar standard)
         ds_client.set_u128(&caller, &token_decimals_key(&env, &long_token), &7u128);
         ds_client.set_u128(&caller, &token_decimals_key(&env, &short_token), &7u128);
         ds_client.set_u128(&caller, &token_decimals_key(&env, &index_token), &7u128);
-        // 3. Add to market list
+        // 4. Add to market list
         ds_client.add_address_to_set(&caller, &market_list_key(&env), &market_token_address);
 
         env.events().publish(
