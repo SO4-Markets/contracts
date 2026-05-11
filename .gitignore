@@ -1,6 +1,9 @@
-node_modules/
-.next/
-out/
-.env
-.env.local
-.DS_Store
+# Rust's output directory
+target
+
+# Local settings
+.soroban
+.stellar
+
+# Implementation plan (private working doc)
+IMPLEMENTATION_PLAN.md
