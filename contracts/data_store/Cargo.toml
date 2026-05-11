@@ -5,13 +5,17 @@ edition = "2021"
 publish = false
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "lib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
 gmx-types = { path = "../../libs/types" }
 gmx-math = { path = "../../libs/math" }
 gmx-keys = { path = "../../libs/keys" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+role-store = { path = "../role_store" }
 
 [profile.release]
 opt-level = "z"

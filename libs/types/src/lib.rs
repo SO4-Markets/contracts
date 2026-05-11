@@ -1,54 +1,46 @@
 #![no_std]
+#![allow(dependency_on_unit_never_type_fallback)]
 
-use soroban_sdk::Address;
+use soroban_sdk::{contracttype, Address, BytesN, Vec};
 
-/// Price struct with min and max values (30-decimal precision)
-#[derive(Clone, Debug)]
+// ─── Price ───────────────────────────────────────────────────────────────────
+
+/// USD price with min/max spread; 30-decimal FLOAT_PRECISION. Mirrors GMX's Price.Props.
+#[contracttype]
 pub struct PriceProps {
     pub min: i128,
     pub max: i128,
 }
 
 impl PriceProps {
-    /// Check if price is empty/invalid
     pub fn is_empty(&self) -> bool {
         self.min == 0 || self.max == 0
     }
 
-    /// Get midpoint price
     pub fn mid_price(&self) -> i128 {
         (self.max + self.min) / 2
     }
 
-    /// Pick min or max based on maximize flag
     pub fn pick_price(&self, maximize: bool) -> i128 {
-        if maximize {
-            self.max
-        } else {
-            self.min
-        }
+        if maximize { self.max } else { self.min }
     }
 
-    /// Pick price for PnL calculation
+    /// Longs profit from higher prices, shorts from lower.
+    /// maximize=true → worst-case PnL for the LP / best-case for the trader.
     pub fn pick_price_for_pnl(&self, is_long: bool, maximize: bool) -> i128 {
-        if is_long {
-            if maximize {
-                self.max
-            } else {
-                self.min
-            }
-        } else {
-            if maximize {
-                self.min
-            } else {
-                self.max
-            }
+        match (is_long, maximize) {
+            (true, true) => self.max,
+            (true, false) => self.min,
+            (false, true) => self.min,
+            (false, false) => self.max,
         }
     }
 }
 
-/// Market properties
-#[derive(Clone, Debug)]
+// ─── Market ──────────────────────────────────────────────────────────────────
+
+/// Mirrors GMX's Market.Props.
+#[contracttype]
 pub struct MarketProps {
     pub market_token: Address,
     pub index_token: Address,
@@ -56,8 +48,13 @@ pub struct MarketProps {
     pub short_token: Address,
 }
 
-/// Position properties
-#[derive(Clone, Debug)]
+// ─── Position ────────────────────────────────────────────────────────────────
+
+/// Mirrors GMX's Position.Props.
+/// Field name abbreviations (30-char limit in #[contracttype]):
+///   long_claim_fnd_per_size  = longTokenClaimableFundingAmountPerSize
+///   short_claim_fnd_per_size = shortTokenClaimableFundingAmountPerSize
+#[contracttype]
 pub struct PositionProps {
     pub account: Address,
     pub market: Address,
@@ -68,36 +65,39 @@ pub struct PositionProps {
     pub pending_impact_amount: i128,
     pub borrowing_factor: i128,
     pub funding_fee_amount_per_size: i128,
-    pub long_token_claimable_funding_per_size: i128,
-    pub short_token_claimable_funding_per_size: i128,
+    pub long_claim_fnd_per_size: i128,
+    pub short_claim_fnd_per_size: i128,
     pub increased_at_time: u64,
     pub decreased_at_time: u64,
     pub is_long: bool,
 }
 
-/// Order type enum
-#[derive(Clone, Copy, Debug, PartialEq)]
+// ─── Orders ──────────────────────────────────────────────────────────────────
+
+/// Mirrors GMX's Order.OrderType.
+#[contracttype]
 pub enum OrderType {
-    MarketSwap = 0,
-    LimitSwap = 1,
-    MarketIncrease = 2,
-    LimitIncrease = 3,
-    MarketDecrease = 4,
-    LimitDecrease = 5,
-    StopLossDecrease = 6,
-    Liquidation = 7,
-    StopIncrease = 8,
+    MarketSwap,
+    LimitSwap,
+    MarketIncrease,
+    LimitIncrease,
+    MarketDecrease,
+    LimitDecrease,
+    StopLossDecrease,
+    Liquidation,
+    StopIncrease,
 }
 
-/// Order properties
-#[derive(Clone, Debug)]
+/// Mirrors GMX's Order.Props.
+#[contracttype]
 pub struct OrderProps {
     pub account: Address,
     pub receiver: Address,
     pub market: Address,
     pub initial_collateral_token: Address,
+    pub swap_path: Vec<Address>,
     pub size_delta_usd: i128,
-    pub initial_collateral_delta_amount: i128,
+    pub collateral_delta_amount: i128,
     pub trigger_price: i128,
     pub acceptable_price: i128,
     pub execution_fee: i128,
@@ -107,8 +107,10 @@ pub struct OrderProps {
     pub updated_at_time: u64,
 }
 
-/// Deposit properties
-#[derive(Clone, Debug)]
+// ─── Deposits / Withdrawals ───────────────────────────────────────────────────
+
+/// Mirrors GMX's Deposit.Props.
+#[contracttype]
 pub struct DepositProps {
     pub account: Address,
     pub receiver: Address,
@@ -118,11 +120,12 @@ pub struct DepositProps {
     pub long_token_amount: i128,
     pub short_token_amount: i128,
     pub min_market_tokens: i128,
+    pub execution_fee: i128,
     pub updated_at_time: u64,
 }
 
-/// Withdrawal properties
-#[derive(Clone, Debug)]
+/// Mirrors GMX's Withdrawal.Props.
+#[contracttype]
 pub struct WithdrawalProps {
     pub account: Address,
     pub receiver: Address,
@@ -130,23 +133,62 @@ pub struct WithdrawalProps {
     pub market_token_amount: i128,
     pub min_long_token_amount: i128,
     pub min_short_token_amount: i128,
+    pub execution_fee: i128,
     pub updated_at_time: u64,
 }
 
-/// Funding info result
-#[derive(Clone, Debug)]
-pub struct FundingInfo {
-    pub funding_factor_per_second: i128,
-    pub funding_amount_per_size_delta: (i128, i128), // (long, short)
+// ─── Oracle ───────────────────────────────────────────────────────────────────
+
+/// Used by keepers to submit prices to the oracle contract.
+#[contracttype]
+pub struct TokenPrice {
+    pub token: Address,
+    pub min: i128,
+    pub max: i128,
 }
 
-/// Position info for reader
-#[derive(Clone, Debug)]
+// ─── Market utils output types ────────────────────────────────────────────────
+
+/// Full pool value breakdown returned by market_utils::get_pool_value.
+#[contracttype]
+pub struct PoolValueInfo {
+    pub pool_value: i128,
+    pub long_pnl: i128,
+    pub short_pnl: i128,
+    pub net_pnl: i128,
+    pub long_token_amount: i128,
+    pub short_token_amount: i128,
+    pub long_token_usd: i128,
+    pub short_token_usd: i128,
+    pub total_borrowing_fees: i128,
+    pub impact_pool_amount: i128,
+}
+
+/// Aggregate funding information for a market (used by Reader).
+#[contracttype]
+pub struct FundingInfo {
+    pub funding_factor_per_second: i128,
+    pub long_funding_amount_per_size: i128,
+    pub short_funding_amount_per_size: i128,
+}
+
+/// Position fee breakdown.
+#[contracttype]
+pub struct PositionFees {
+    pub borrowing_fee_amount: i128,
+    pub funding_fee_amount: i128,
+    pub position_fee_amount: i128,
+    pub total_cost_amount: i128,
+}
+
+/// Rich position info including computed PnL and fees (returned by Reader).
+#[contracttype]
 pub struct PositionInfo {
     pub position: PositionProps,
     pub pnl_usd: i128,
     pub uncapped_pnl_usd: i128,
-    pub borrowing_fees: i128,
-    pub funding_fees: i128,
-    pub position_fees: i128,
+    pub borrowing_fee_usd: i128,
+    pub funding_fee_usd: i128,
+    pub position_fee_usd: i128,
+    pub liquidation_price: i128,
 }

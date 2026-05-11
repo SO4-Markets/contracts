@@ -445,6 +445,7 @@ dependencies = [
  "gmx-keys",
  "gmx-math",
  "gmx-types",
+ "role-store",
  "soroban-sdk",
 ]
 
