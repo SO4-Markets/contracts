@@ -5,5 +5,6 @@ target
 .soroban
 .stellar
 
-# Implementation plan (private working doc)
+# Private working documents (never commit)
 IMPLEMENTATION_PLAN.md
+issue.md
