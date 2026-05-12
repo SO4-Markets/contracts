@@ -7,7 +7,7 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, symbol_short, token};
-use gmx_keys::recorded_balance_key;
+// recorded balance is stored under a local key derived from token address
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 

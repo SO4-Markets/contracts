@@ -1,0 +1,20 @@
+[package]
+name = "reader"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+soroban-sdk        = { workspace = true }
+gmx-types          = { path = "../../libs/types" }
+gmx-math           = { path = "../../libs/math" }
+gmx-keys           = { path = "../../libs/keys" }
+gmx-market-utils   = { path = "../../libs/market_utils" }
+gmx-position-utils = { path = "../../libs/position_utils" }
+gmx-pricing-utils  = { path = "../../libs/pricing_utils" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

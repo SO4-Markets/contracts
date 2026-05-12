@@ -297,6 +297,15 @@ pub fn claimable_funding_amount_key(
     sha256(env, &b)
 }
 
+/// sha256("CLAIMABLE_FEE_AMOUNT" ‖ market ‖ token)
+pub fn claimable_fee_amount_key(env: &Env, market: &Address, token: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "CLAIMABLE_FEE_AMOUNT");
+    push_addr(&mut b, env, market);
+    push_addr(&mut b, env, token);
+    sha256(env, &b)
+}
+
 /// sha256("FUNDING_UPDATED_AT" ‖ market)
 pub fn funding_updated_at_key(env: &Env, market: &Address) -> BytesN<32> {
     let mut b = Bytes::new(env);
