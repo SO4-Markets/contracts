@@ -1,8 +1,36 @@
-# GMX Synthetics — Soroban
 
-A faithful re-implementation of [GMX Synthetics](https://github.com/gmx-io/gmx-synthetics) on [Stellar](https://stellar.org) using [Soroban](https://soroban.stellar.org) smart contracts (SDK 25, Rust).
+```
+        ◆
+       ╱│╲
+      ╱ │ ╲
+    ◆╱  │  ╲◆
+    │╲  │  ╱│
+    │ ╲ │ ╱ │
+    │  ╲│╱  │
+    │  ╱│╲  │
+    │ ╱ │ ╲ │
+    │╱  │  ╲│
+    ◆╲  │  ╱◆
+      ╲ │ ╱
+       ╲│╱
+        ◆
 
-GMX Synthetics is a decentralised perpetuals and spot exchange. This port preserves the full financial model — isolated markets, LP pools, two-step keeper execution, dynamic funding rates, borrowing fees, price impact, liquidations, and auto-deleveraging — adapted to Soroban's execution environment.
+  ███████╗ ██████╗ ██╗  ██╗
+  ██╔════╝██╔═══██╗██║  ██║
+  ███████╗██║   ██║███████║
+  ╚════██║██║   ██║╚════██║
+  ███████║╚██████╔╝     ██║
+  ╚══════╝ ╚═════╝      ╚═╝
+           · m a r k e t ·
+
+   Perpetuals Exchange on Stellar / Soroban
+```
+
+---
+
+SO4.market is a decentralised perpetuals and spot exchange built on [Stellar](https://stellar.org) using [Soroban](https://soroban.stellar.org) smart contracts (SDK 25, Rust).
+
+The protocol implements an isolated-market LP model with two-step keeper execution, dynamic funding rates, borrowing fees, price impact curves, auto-deleveraging, and on-chain liquidations — all adapted faithfully to Soroban's execution environment.
 
 ---
 
@@ -31,7 +59,7 @@ Reader         ──► stateless views over DataStore (no writes)
 |---|---|
 | `data_store` | Universal typed key-value store. All protocol state lives here. |
 | `role_store` | Role-based access control — CONTROLLER, MARKET_KEEPER, ORDER_KEEPER, etc. |
-| `oracle` | Keeper-fed price store. Prices are temporary (expire per ledger). Ed25519-verified. |
+| `oracle` | Keeper-fed price store. Prices expire per ledger. Ed25519-verified. |
 | `market_token` | SEP-41 LP token deployed per market by `market_factory`. |
 | `market_factory` | Deterministically deploys `market_token` instances and registers markets. |
 | `deposit_vault` | Holds long/short tokens between deposit creation and keeper execution. |
@@ -53,20 +81,20 @@ Reader         ──► stateless views over DataStore (no writes)
 |---|---|
 | `libs/types` | All shared structs: `MarketProps`, `PositionProps`, `OrderProps`, `PriceProps`, `PositionFees`, etc. |
 | `libs/math` | `FLOAT_PRECISION` (10³⁰), `TOKEN_PRECISION` (10⁷), `mul_div_wide` (I256), `pow_factor`, `sqrt_fp`. |
-| `libs/keys` | ~58 deterministic `sha256`-based key derivation functions mirroring GMX's `Keys.sol`. |
+| `libs/keys` | ~58 deterministic `sha256`-based key derivation functions. |
 | `libs/market_utils` | Pool value, open interest, PnL, funding state, borrowing fees, pool/OI validation. |
 | `libs/position_utils` | Per-position PnL, fee breakdown, funding settlement, leverage validation, liquidation check. |
 | `libs/pricing_utils` | Swap and position price impact, execution price, impact pool management. |
 | `libs/swap_utils` | Single-hop and multi-hop token swaps through market pools. |
-| `libs/increase_position_utils` | Open or increase a long/short position (14-step GMX-faithful flow). |
-| `libs/decrease_position_utils` | Partial or full position close with PnL settlement (14-step GMX-faithful flow). |
+| `libs/increase_position_utils` | Open or increase a long/short position (14-step flow). |
+| `libs/decrease_position_utils` | Partial or full position close with PnL settlement (14-step flow). |
 
 ---
 
 ## Key Financial Mechanics
 
 ### Price Precision
-- All USD values use `FLOAT_PRECISION = 10^30` (matching GMX).
+- All USD values use `FLOAT_PRECISION = 10^30`.
 - All token amounts use `TOKEN_PRECISION = 10^7` (Stellar's 7-decimal standard).
 - Wide multiplication via Soroban's `I256` host functions prevents overflow.
 
@@ -196,79 +224,38 @@ stellar contract build
 Each upload returns a `WASM_HASH`. Record each one.
 
 ```bash
-stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/role_store.wasm \
-  --source alice --network testnet
-
-stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/data_store.wasm \
-  --source alice --network testnet
-
-stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/oracle.wasm \
-  --source alice --network testnet
-
-stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/market_token.wasm \
-  --source alice --network testnet
-
-stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/market_factory.wasm \
-  --source alice --network testnet
-
-# Vaults and handlers
-stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/deposit_vault.wasm \
-  --source alice --network testnet
-
-stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/deposit_handler.wasm \
-  --source alice --network testnet
-
-stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/withdrawal_vault.wasm \
-  --source alice --network testnet
-
-stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/withdrawal_handler.wasm \
-  --source alice --network testnet
-
-stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/order_vault.wasm \
-  --source alice --network testnet
-
-stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/order_handler.wasm \
-  --source alice --network testnet
-
-# Risk, periphery, router
+stellar contract upload --wasm target/wasm32-unknown-unknown/release/role_store.wasm        --source alice --network testnet
+stellar contract upload --wasm target/wasm32-unknown-unknown/release/data_store.wasm        --source alice --network testnet
+stellar contract upload --wasm target/wasm32-unknown-unknown/release/oracle.wasm             --source alice --network testnet
+stellar contract upload --wasm target/wasm32-unknown-unknown/release/market_token.wasm      --source alice --network testnet
+stellar contract upload --wasm target/wasm32-unknown-unknown/release/market_factory.wasm    --source alice --network testnet
+stellar contract upload --wasm target/wasm32-unknown-unknown/release/deposit_vault.wasm     --source alice --network testnet
+stellar contract upload --wasm target/wasm32-unknown-unknown/release/deposit_handler.wasm   --source alice --network testnet
+stellar contract upload --wasm target/wasm32-unknown-unknown/release/withdrawal_vault.wasm  --source alice --network testnet
+stellar contract upload --wasm target/wasm32-unknown-unknown/release/withdrawal_handler.wasm --source alice --network testnet
+stellar contract upload --wasm target/wasm32-unknown-unknown/release/order_vault.wasm       --source alice --network testnet
+stellar contract upload --wasm target/wasm32-unknown-unknown/release/order_handler.wasm     --source alice --network testnet
 stellar contract upload --wasm target/wasm32-unknown-unknown/release/liquidation_handler.wasm --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/adl_handler.wasm          --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/fee_handler.wasm          --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/referral_storage.wasm    --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/reader.wasm               --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/exchange_router.wasm     --source alice --network testnet
+stellar contract upload --wasm target/wasm32-unknown-unknown/release/adl_handler.wasm       --source alice --network testnet
+stellar contract upload --wasm target/wasm32-unknown-unknown/release/fee_handler.wasm       --source alice --network testnet
+stellar contract upload --wasm target/wasm32-unknown-unknown/release/referral_storage.wasm  --source alice --network testnet
+stellar contract upload --wasm target/wasm32-unknown-unknown/release/reader.wasm             --source alice --network testnet
+stellar contract upload --wasm target/wasm32-unknown-unknown/release/exchange_router.wasm   --source alice --network testnet
 ```
 
 ### Step 3 — Deploy core contracts
 
 ```bash
-# Role store
 ROLE_STORE=$(stellar contract deploy \
-  --wasm-hash <ROLE_STORE_WASM_HASH> \
-  --source alice --network testnet \
+  --wasm-hash <ROLE_STORE_WASM_HASH> --source alice --network testnet \
   -- --admin <ALICE_ADDRESS>)
 
-# Data store
 DATA_STORE=$(stellar contract deploy \
-  --wasm-hash <DATA_STORE_WASM_HASH> \
-  --source alice --network testnet \
+  --wasm-hash <DATA_STORE_WASM_HASH> --source alice --network testnet \
   -- --role_store $ROLE_STORE)
 
-# Oracle
 ORACLE=$(stellar contract deploy \
-  --wasm-hash <ORACLE_WASM_HASH> \
-  --source alice --network testnet \
+  --wasm-hash <ORACLE_WASM_HASH> --source alice --network testnet \
   -- --admin <ALICE_ADDRESS> --role_store $ROLE_STORE --data_store $DATA_STORE)
 ```
 
@@ -276,8 +263,7 @@ ORACLE=$(stellar contract deploy \
 
 ```bash
 MARKET_FACTORY=$(stellar contract deploy \
-  --wasm-hash <MARKET_FACTORY_WASM_HASH> \
-  --source alice --network testnet \
+  --wasm-hash <MARKET_FACTORY_WASM_HASH> --source alice --network testnet \
   -- --admin <ALICE_ADDRESS> \
      --role_store $ROLE_STORE \
      --data_store $DATA_STORE \
@@ -287,7 +273,6 @@ MARKET_FACTORY=$(stellar contract deploy \
 ### Step 5 — Deploy vaults and handlers
 
 ```bash
-# Deposit
 DEPOSIT_VAULT=$(stellar contract deploy --wasm-hash <DEPOSIT_VAULT_WASM_HASH> \
   --source alice --network testnet -- --admin <ALICE_ADDRESS> --role_store $ROLE_STORE)
 
@@ -296,7 +281,6 @@ DEPOSIT_HANDLER=$(stellar contract deploy --wasm-hash <DEPOSIT_HANDLER_WASM_HASH
   -- --admin <ALICE_ADDRESS> --role_store $ROLE_STORE --data_store $DATA_STORE \
      --oracle $ORACLE --deposit_vault $DEPOSIT_VAULT)
 
-# Withdrawal
 WITHDRAWAL_VAULT=$(stellar contract deploy --wasm-hash <WITHDRAWAL_VAULT_WASM_HASH> \
   --source alice --network testnet -- --admin <ALICE_ADDRESS> --role_store $ROLE_STORE)
 
@@ -305,7 +289,6 @@ WITHDRAWAL_HANDLER=$(stellar contract deploy --wasm-hash <WITHDRAWAL_HANDLER_WAS
   -- --admin <ALICE_ADDRESS> --role_store $ROLE_STORE --data_store $DATA_STORE \
      --oracle $ORACLE --withdrawal_vault $WITHDRAWAL_VAULT)
 
-# Orders
 ORDER_VAULT=$(stellar contract deploy --wasm-hash <ORDER_VAULT_WASM_HASH> \
   --source alice --network testnet -- --admin <ALICE_ADDRESS> --role_store $ROLE_STORE)
 
@@ -384,7 +367,7 @@ stellar contract invoke --id <READER_ADDRESS> \
      --maximize false
 ```
 
-### Create a market increase order (via exchange router)
+### Open a long position via exchange router
 ```bash
 stellar contract invoke --id $EXCHANGE_ROUTER \
   --source alice --network testnet \
@@ -412,23 +395,23 @@ contracts/
 ├── README.md                     # this file
 │
 ├── contracts/
-│   ├── data_store/               # Phase 1 — universal KV store
-│   ├── role_store/               # Phase 1 — access control
-│   ├── market_token/             # Phase 2 — SEP-41 LP token
-│   ├── market_factory/           # Phase 2 — deterministic market deploy
-│   ├── oracle/                   # Phase 3 — keeper-fed prices (ed25519)
-│   ├── deposit_vault/            # Phase 4 — token custody for deposits
-│   ├── deposit_handler/          # Phase 4 — deposit lifecycle
-│   ├── withdrawal_vault/         # Phase 4 — LP custody for withdrawals
-│   ├── withdrawal_handler/       # Phase 4 — withdrawal lifecycle
-│   ├── order_vault/              # Phase 5 — collateral custody for orders
-│   ├── order_handler/            # Phase 5 — full order lifecycle
-│   ├── liquidation_handler/      # Phase 6 — force-close underwater positions
-│   ├── adl_handler/              # Phase 6 — auto-deleverage profitable positions
-│   ├── fee_handler/              # Phase 7 — fee distribution and claims
-│   ├── referral_storage/         # Phase 7 — referral codes and tier rebates
-│   ├── reader/                   # Phase 7 — stateless aggregate views
-│   └── exchange_router/          # Phase 8 — user entry point, multicall
+│   ├── data_store/               # universal KV store
+│   ├── role_store/               # access control
+│   ├── market_token/             # SEP-41 LP token
+│   ├── market_factory/           # deterministic market deploy
+│   ├── oracle/                   # keeper-fed prices (ed25519)
+│   ├── deposit_vault/            # token custody for deposits
+│   ├── deposit_handler/          # deposit lifecycle
+│   ├── withdrawal_vault/         # LP custody for withdrawals
+│   ├── withdrawal_handler/       # withdrawal lifecycle
+│   ├── order_vault/              # collateral custody for orders
+│   ├── order_handler/            # full order lifecycle
+│   ├── liquidation_handler/      # force-close underwater positions
+│   ├── adl_handler/              # auto-deleverage profitable positions
+│   ├── fee_handler/              # fee distribution and claims
+│   ├── referral_storage/         # referral codes and tier rebates
+│   ├── reader/                   # stateless aggregate views
+│   └── exchange_router/          # user entry point, multicall
 │
 └── libs/
     ├── types/                    # shared #[contracttype] structs
@@ -477,7 +460,13 @@ contracts/
 | 7 | Periphery — fee handler, referral storage, reader | 🔧 Scaffolded |
 | 8 | Router — exchange router with multicall | 🔧 Scaffolded |
 
-> **Scaffolded** means all function signatures, parameter types, and detailed implementation TODOs are in place. Logic bodies are the next step.
+> **Scaffolded** means all function signatures, parameter types, and detailed implementation notes are in place. Logic bodies are the next step.
+
+---
+
+## Contributing
+
+SO4.market is being built in the open. The contract architecture is fully scaffolded — every function has a signature and a precise description of what to implement. See the issue tracker to pick up a task.
 
 ---
 
