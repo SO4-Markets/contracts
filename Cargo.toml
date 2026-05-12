@@ -6,6 +6,11 @@ members = [
   "libs/math",
   "libs/keys",
   "libs/market_utils",
+  "libs/position_utils",
+  "libs/pricing_utils",
+  "libs/swap_utils",
+  "libs/increase_position_utils",
+  "libs/decrease_position_utils",
 ]
 
 [workspace.dependencies]

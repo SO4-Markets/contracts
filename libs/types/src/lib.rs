@@ -181,6 +181,17 @@ pub struct PositionFees {
     pub total_cost_amount: i128,
 }
 
+/// Result of executing a position decrease (partial or full close).
+#[contracttype]
+pub struct DecreasePositionResult {
+    pub execution_price:       i128,  // FLOAT_PRECISION per whole token
+    pub pnl_usd:               i128,  // realised PnL (positive = profit, negative = loss)
+    pub output_amount:         i128,  // collateral token amount sent to receiver
+    pub secondary_output_amount: i128, // optional second token (e.g. from swap-on-close)
+    pub remaining_collateral:  i128,  // collateral left in position after fees & pnl
+    pub is_fully_closed:       bool,
+}
+
 /// Rich position info including computed PnL and fees (returned by Reader).
 #[contracttype]
 pub struct PositionInfo {

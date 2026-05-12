@@ -1,0 +1,18 @@
+[package]
+name = "gmx-swap-utils"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+
+[dependencies]
+soroban-sdk       = { workspace = true }
+gmx-types         = { path = "../types" }
+gmx-math          = { path = "../math" }
+gmx-keys          = { path = "../keys" }
+gmx-market-utils  = { path = "../market_utils" }
+gmx-pricing-utils = { path = "../pricing_utils" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
