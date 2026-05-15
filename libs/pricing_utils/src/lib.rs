@@ -31,12 +31,46 @@ trait IDataStore {
     fn apply_delta_to_u128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> u128;
 }
 
+// ─── Internal: core impact formula ───────────────────────────────────────────
+
+/// Compute signed price impact USD given before/after imbalance values and factors.
+///
+/// next_diff < initial_diff → positive impact (caps at pool)
+/// next_diff > initial_diff → negative impact
+fn compute_impact_usd(
+    env: &Env,
+    initial_diff: i128,
+    next_diff: i128,
+    positive_factor: i128,
+    negative_factor: i128,
+    exponent: i128,
+    impact_pool_usd: i128,
+) -> i128 {
+    if initial_diff == next_diff {
+        return 0;
+    }
+
+    if next_diff < initial_diff {
+        // Pool balance improves → positive impact for user
+        let initial_pow = pow_factor(env, initial_diff, exponent);
+        let next_pow    = pow_factor(env, next_diff, exponent);
+        let raw = mul_div_wide(env, positive_factor, initial_pow - next_pow, FLOAT_PRECISION);
+        // Cap by available impact pool
+        raw.min(impact_pool_usd)
+    } else {
+        // Pool balance worsens → negative impact for user
+        let initial_pow = pow_factor(env, initial_diff, exponent);
+        let next_pow    = pow_factor(env, next_diff, exponent);
+        let raw = mul_div_wide(env, negative_factor, next_pow - initial_pow, FLOAT_PRECISION);
+        -raw
+    }
+}
+
 // ─── Swap price impact ────────────────────────────────────────────────────────
 
 /// Compute price impact USD for a swap of `amount_in` of `token_in` → `token_out`.
 ///
-/// Returns signed impact_usd (positive = good for user, paid from pool;
-///                             negative = bad for user, paid into pool).
+/// Returns signed impact_usd (positive = good for user; negative = bad for user).
 pub fn get_swap_price_impact(
     env: &Env,
     data_store: &Address,
@@ -44,49 +78,38 @@ pub fn get_swap_price_impact(
     token_in: &Address,
     token_out: &Address,
     amount_in: i128,
-    price_in: i128,   // FLOAT_PRECISION
-    price_out: i128,  // FLOAT_PRECISION
+    price_in: i128,
+    price_out: i128,
 ) -> i128 {
-    // TODO: (mirrors GMX SwapPricingUtils.getPriceImpactUsd)
-    //
-    // 1. Load current pool amounts (in raw token units):
-    //    pool_in  = get_pool_amount(env, ds, market, token_in)   as i128
-    //    pool_out = get_pool_amount(env, ds, market, token_out)  as i128
-    //
-    // 2. Convert to USD (FLOAT_PRECISION):
-    //    pool_in_usd  = pool_in  * price_in  / TOKEN_PRECISION
-    //    pool_out_usd = pool_out * price_out / TOKEN_PRECISION
-    //    amount_in_usd = amount_in * price_in / TOKEN_PRECISION
-    //
-    // 3. Virtual balance BEFORE and AFTER the swap:
-    //    initial_diff = abs(pool_in_usd - pool_out_usd)
-    //    next_in_usd  = pool_in_usd  + amount_in_usd
-    //    next_out_usd = pool_out_usd - amount_in_usd  (swap drains out side)
-    //    next_diff    = abs(next_in_usd - next_out_usd)
-    //
-    // 4. Load impact factors:
-    //    positive_factor  = ds.get_u128(swap_impact_factor_key(market.market_token, true))
-    //    negative_factor  = ds.get_u128(swap_impact_factor_key(market.market_token, false))
-    //    exponent         = ds.get_u128(swap_impact_exponent_factor_key(market.market_token))
-    //
-    // 5. Compute impact (use pow_factor for the exponentiation):
-    //    if next_diff < initial_diff:  // pool balance improves
-    //        impact_usd = positive_factor * (initial_diff^exp - next_diff^exp) / FLOAT_PRECISION
-    //        impact_usd = min(impact_usd, impact_pool_usd)  // cap by available pool
-    //    else:                         // pool balance worsens
-    //        impact_usd = -(negative_factor * (next_diff^exp - initial_diff^exp) / FLOAT_PRECISION)
-    //
-    // 6. Get impact_pool_usd for cap:
-    //    impact_pool_tokens = get_swap_impact_pool_amount(env, ds, market, token_out)
-    //    impact_pool_usd = impact_pool_tokens * price_out / TOKEN_PRECISION
-    //
-    // Returns signed impact_usd
-    todo!()
+    let ds = DataStoreClient::new(env, data_store);
+
+    // Pool amounts in USD (FLOAT_PRECISION)
+    let pool_in  = get_pool_amount(env, data_store, market, token_in)  as i128;
+    let pool_out = get_pool_amount(env, data_store, market, token_out) as i128;
+    let pool_in_usd  = mul_div_wide(env, pool_in,  price_in,  TOKEN_PRECISION);
+    let pool_out_usd = mul_div_wide(env, pool_out, price_out, TOKEN_PRECISION);
+    let amount_in_usd = mul_div_wide(env, amount_in, price_in, TOKEN_PRECISION);
+
+    let initial_diff = (pool_in_usd - pool_out_usd).abs();
+    let next_in_usd  = pool_in_usd  + amount_in_usd;
+    let next_out_usd = pool_out_usd - amount_in_usd;
+    let next_diff    = (next_in_usd - next_out_usd).abs();
+
+    let pos_factor  = ds.get_u128(&swap_impact_factor_key(env, &market.market_token, true))  as i128;
+    let neg_factor  = ds.get_u128(&swap_impact_factor_key(env, &market.market_token, false)) as i128;
+    let exponent    = ds.get_u128(&swap_impact_exponent_factor_key(env, &market.market_token)) as i128;
+
+    // Impact pool cap (in USD of token_out)
+    let pool_tokens = get_swap_impact_pool_amount(env, data_store, market, token_out) as i128;
+    let pool_usd    = mul_div_wide(env, pool_tokens, price_out, TOKEN_PRECISION);
+
+    compute_impact_usd(env, initial_diff, next_diff, pos_factor, neg_factor, exponent, pool_usd)
 }
 
 /// Apply the computed swap impact to the impact pool in data_store.
 ///
-/// Positive impact reduces the pool (paid out to user); negative adds to it.
+/// Positive impact reduces the pool (paid to user); negative adds to it.
+/// Returns the impact amount in token units.
 pub fn apply_swap_impact_value(
     env: &Env,
     data_store: &Address,
@@ -96,25 +119,25 @@ pub fn apply_swap_impact_value(
     token_price: i128,
     impact_usd: i128,
 ) -> i128 {
-    // TODO:
-    // 1. Convert impact_usd → token amount:
-    //    impact_amount = impact_usd * TOKEN_PRECISION / token_price
-    //    (negative impact → positive pool delta; positive impact → negative pool delta)
-    //
-    // 2. Apply delta to impact pool:
-    //    ds.apply_delta_to_u128(
-    //        caller,
-    //        swap_impact_pool_amount_key(market.market_token, token),
-    //        -impact_amount  // positive impact removes from pool, negative adds to it
-    //    )
-    //
-    // 3. Returns impact_amount (the actual token quantity transferred)
-    todo!()
+    if impact_usd == 0 || token_price == 0 {
+        return 0;
+    }
+    // Convert USD impact to token amount
+    let impact_amount = mul_div_wide(env, impact_usd, TOKEN_PRECISION, token_price);
+
+    // Positive impact → paid from pool (reduce pool); negative → paid into pool (increase pool)
+    let delta = -impact_amount;
+    DataStoreClient::new(env, data_store)
+        .apply_delta_to_u128(caller, &swap_impact_pool_amount_key(env, &market.market_token, token), &delta);
+
+    impact_amount
 }
 
 // ─── Swap output amount ───────────────────────────────────────────────────────
 
 /// Compute the net output amount of `token_out` for a swap, after fees and impact.
+///
+/// Returns (net_output_amount, fee_amount) both in token_out raw units.
 pub fn get_swap_output_amount(
     env: &Env,
     data_store: &Address,
@@ -126,25 +149,28 @@ pub fn get_swap_output_amount(
     price_out: i128,
     for_positive_impact: bool,
 ) -> (i128, i128) {
-    // TODO: (mirrors GMX SwapUtils._swap output calculation)
-    //
-    // 1. Compute raw output before fees:
-    //    amount_out_before_fees = amount_in * price_in / price_out
-    //    (simple price conversion using mul_div_wide)
-    //
-    // 2. Load swap fee factor:
-    //    fee_factor = ds.get_u128(swap_fee_factor_key(market.market_token, for_positive_impact))
-    //    fee_amount = amount_out_before_fees * fee_factor / FLOAT_PRECISION
-    //
-    // 3. Compute price impact:
-    //    impact_usd = get_swap_price_impact(...)
-    //    impact_amount = impact_usd * TOKEN_PRECISION / price_out
-    //    (positive impact adds tokens; negative reduces output)
-    //
-    // 4. net_output = amount_out_before_fees - fee_amount + impact_amount
-    //
-    // Returns (net_output_amount, fee_amount)
-    todo!()
+    if price_out == 0 {
+        return (0, 0);
+    }
+
+    // Raw output before fees (price conversion)
+    let amount_out_before_fees = mul_div_wide(env, amount_in, price_in, price_out);
+
+    // Swap fee
+    let fee_factor = DataStoreClient::new(env, data_store)
+        .get_u128(&swap_fee_factor_key(env, &market.market_token, for_positive_impact)) as i128;
+    let fee_amount = mul_div_wide(env, amount_out_before_fees, fee_factor, FLOAT_PRECISION);
+
+    // Price impact (in token_out units)
+    let impact_usd = get_swap_price_impact(env, data_store, market, token_in, token_out, amount_in, price_in, price_out);
+    let impact_amount = if price_out > 0 {
+        mul_div_wide(env, impact_usd, TOKEN_PRECISION, price_out)
+    } else {
+        0
+    };
+
+    let net_output = (amount_out_before_fees - fee_amount + impact_amount).max(0);
+    (net_output, fee_amount)
 }
 
 // ─── Position price impact ────────────────────────────────────────────────────
@@ -159,41 +185,40 @@ pub fn get_position_price_impact(
     is_long: bool,
     size_delta_usd: i128,
     is_increase: bool,
+    index_token_price: i128,
 ) -> i128 {
-    // TODO: (mirrors GMX PositionPricingUtils.getPriceImpactUsd)
-    //
-    // 1. Load current open interest for each side:
-    //    long_oi  = get_open_interest_for_side(env, ds, market, true)   as i128
-    //    short_oi = get_open_interest_for_side(env, ds, market, false)  as i128
-    //    initial_diff = abs(long_oi - short_oi)
-    //
-    // 2. Compute next OI after the position change:
-    //    if is_increase && is_long:  next_long  = long_oi  + size_delta_usd
-    //    if is_increase && !is_long: next_short = short_oi + size_delta_usd
-    //    if !is_increase && is_long: next_long  = long_oi  - size_delta_usd
-    //    etc.
-    //    next_diff = abs(next_long - next_short)
-    //
-    // 3. Load impact factors:
-    //    positive_factor = ds.get_u128(position_impact_factor_key(market.market_token, true))
-    //    negative_factor = ds.get_u128(position_impact_factor_key(market.market_token, false))
-    //    exponent        = ds.get_u128(position_impact_exponent_factor_key(market.market_token))
-    //
-    // 4. Same formula as swap:
-    //    next_diff < initial_diff → positive impact (capped by impact pool)
-    //    next_diff > initial_diff → negative impact
-    //
-    // 5. Impact pool cap (in USD):
-    //    impact_pool_tokens = get_position_impact_pool_amount(env, ds, market)
-    //    impact_pool_usd    = impact_pool_tokens * index_token_price / TOKEN_PRECISION
-    //    (caller must pass index_token_price or compute inside; for simplicity take as param)
-    //
-    // Note: For decrease orders, the impact direction is reversed:
-    //   a decrease that improves OI balance pays the trader from impact pool.
-    todo!()
+    let ds = DataStoreClient::new(env, data_store);
+
+    let long_oi  = get_open_interest_for_side(env, data_store, market, true)  as i128;
+    let short_oi = get_open_interest_for_side(env, data_store, market, false) as i128;
+    let initial_diff = (long_oi - short_oi).abs();
+
+    let (next_long, next_short) = match (is_long, is_increase) {
+        (true,  true)  => (long_oi  + size_delta_usd, short_oi),
+        (false, true)  => (long_oi,  short_oi + size_delta_usd),
+        (true,  false) => ((long_oi  - size_delta_usd).max(0), short_oi),
+        (false, false) => (long_oi,  (short_oi - size_delta_usd).max(0)),
+    };
+    let next_diff = (next_long - next_short).abs();
+
+    let pos_factor = ds.get_u128(&position_impact_factor_key(env, &market.market_token, true))  as i128;
+    let neg_factor = ds.get_u128(&position_impact_factor_key(env, &market.market_token, false)) as i128;
+    let exponent   = ds.get_u128(&position_impact_exponent_factor_key(env, &market.market_token)) as i128;
+
+    // Impact pool cap (in USD of index token)
+    let pool_tokens = get_position_impact_pool_amount(env, data_store, market) as i128;
+    let pool_usd    = if index_token_price > 0 {
+        mul_div_wide(env, pool_tokens, index_token_price, TOKEN_PRECISION)
+    } else {
+        0
+    };
+
+    compute_impact_usd(env, initial_diff, next_diff, pos_factor, neg_factor, exponent, pool_usd)
 }
 
 /// Apply position price impact to the impact pool.
+///
+/// Returns impact_amount in index token raw units.
 pub fn apply_position_impact_value(
     env: &Env,
     data_store: &Address,
@@ -202,58 +227,47 @@ pub fn apply_position_impact_value(
     impact_usd: i128,
     index_token_price: i128,
 ) -> i128 {
-    // TODO:
-    // 1. impact_amount = impact_usd * TOKEN_PRECISION / index_token_price
-    //    (negative impact → tokens flow INTO impact pool)
-    //    (positive impact → tokens flow OUT of impact pool to trader)
-    //
-    // 2. ds.apply_delta_to_u128(
-    //        caller,
-    //        position_impact_pool_amount_key(market.market_token),
-    //        -impact_amount
-    //    )
-    //
-    // Returns impact_amount
-    todo!()
+    if impact_usd == 0 || index_token_price == 0 {
+        return 0;
+    }
+    let impact_amount = mul_div_wide(env, impact_usd, TOKEN_PRECISION, index_token_price);
+    let delta = -impact_amount; // positive impact → pool shrinks; negative → pool grows
+    DataStoreClient::new(env, data_store)
+        .apply_delta_to_u128(caller, &position_impact_pool_amount_key(env, &market.market_token), &delta);
+    impact_amount
 }
 
 // ─── Execution price ──────────────────────────────────────────────────────────
 
 /// Compute the execution price for a position change after applying price impact.
 ///
-/// Returns the adjusted price in FLOAT_PRECISION.
+/// Returns the adjusted price in FLOAT_PRECISION (USD per whole token).
 pub fn get_execution_price(
     env: &Env,
     index_price: i128,
     size_delta_usd: i128,
     price_impact_usd: i128,
-    is_long: bool,
-    is_increase: bool,
+    _is_long: bool,
+    _is_increase: bool,
 ) -> i128 {
-    // TODO: (mirrors GMX PositionPricingUtils.getExecutionPrice)
-    //
-    // Intuition: price impact changes how many tokens you actually get.
-    //   Negative impact → you "lose" some of the size → effective price is worse.
-    //   Positive impact → you gain extra tokens → effective price is better.
-    //
-    // 1. Adjusted size in USD = size_delta_usd + price_impact_usd
-    //    (price_impact_usd is positive if good for trader, negative if bad)
-    //    For an increase: negative impact makes the effective entry price higher.
-    //    For a decrease: negative impact makes the effective exit price lower.
-    //
-    // 2. Tokens received for adjusted_size at index_price:
-    //    adjusted_tokens = adjusted_size * TOKEN_PRECISION / index_price  (FLOAT_PRECISION)
-    //
-    // 3. Execution price = size_delta_usd / adjusted_tokens * TOKEN_PRECISION
-    //    (i.e., how many USD per WHOLE token you effectively paid/received)
-    //    execution_price = mul_div_wide(env, size_delta_usd, TOKEN_PRECISION, adjusted_tokens)
-    //
-    // 4. Acceptable price check (done by caller, not here):
-    //    - Long increase:  execution_price <= acceptable_price
-    //    - Long decrease:  execution_price >= acceptable_price
-    //    - Short increase: execution_price >= acceptable_price
-    //    - Short decrease: execution_price <= acceptable_price
-    //
-    // Returns execution_price
-    todo!()
+    if size_delta_usd == 0 || index_price == 0 {
+        return index_price;
+    }
+
+    // Adjusted size after price impact
+    let adjusted_size = size_delta_usd + price_impact_usd;
+    if adjusted_size <= 0 {
+        return index_price;
+    }
+
+    // Tokens you effectively get for adjusted_size at index_price
+    // adjusted_tokens (raw 7-decimal units)
+    let adjusted_tokens = mul_div_wide(env, adjusted_size, TOKEN_PRECISION, index_price);
+    if adjusted_tokens == 0 {
+        return index_price;
+    }
+
+    // execution_price = size_delta_usd (USD) / adjusted_tokens (raw) × TOKEN_PRECISION
+    // = size_delta_usd × TOKEN_PRECISION / adjusted_tokens  → FLOAT_PRECISION per whole token
+    mul_div_wide(env, size_delta_usd, TOKEN_PRECISION, adjusted_tokens)
 }

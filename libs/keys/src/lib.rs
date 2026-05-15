@@ -576,6 +576,70 @@ pub fn market_token_wasm_hash_key(env: &Env) -> BytesN<32> {
     sha256(env, &b)
 }
 
+/// Global cap on swap path length (default 3 hops)
+pub fn max_swap_path_length_key(env: &Env) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "MAX_SWAP_PATH_LENGTH");
+    sha256(env, &b)
+}
+
+/// UI fee factor per ui_fee_receiver address
+pub fn ui_fee_factor_key(env: &Env, ui_fee_receiver: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "UI_FEE_FACTOR");
+    push_addr(&mut b, env, ui_fee_receiver);
+    sha256(env, &b)
+}
+
+/// Claimable UI fee amount per (market, token, ui_fee_receiver)
+pub fn claimable_ui_fee_amount_key(
+    env: &Env,
+    market: &Address,
+    token: &Address,
+    ui_fee_receiver: &Address,
+) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "CLAIMABLE_UI_FEE_AMOUNT");
+    push_addr(&mut b, env, market);
+    push_addr(&mut b, env, token);
+    push_addr(&mut b, env, ui_fee_receiver);
+    sha256(env, &b)
+}
+
+/// ADL enabled flag per (market, is_long)
+pub fn is_adl_enabled_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "IS_ADL_ENABLED");
+    push_addr(&mut b, env, market);
+    push_bool(&mut b, env, is_long);
+    sha256(env, &b)
+}
+
+/// Max PnL factor for ADL triggering
+pub fn max_pnl_factor_for_adl_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "MAX_PNL_FACTOR_FOR_ADL");
+    push_addr(&mut b, env, market);
+    push_bool(&mut b, env, is_long);
+    sha256(env, &b)
+}
+
+/// Referral code for an account
+pub fn referral_code_key(env: &Env, account: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "REFERRAL_CODE");
+    push_addr(&mut b, env, account);
+    sha256(env, &b)
+}
+
+/// Referrer for a given referral code
+pub fn referrer_key(env: &Env, code: &BytesN<32>) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "REFERRER");
+    b.extend_from_array(&code.to_array());
+    sha256(env, &b)
+}
+
 // ─── PnL factor type constants ────────────────────────────────────────────────
 
 /// sha256("MAX_PNL_FACTOR_FOR_TRADERS") — used in pool value calculation

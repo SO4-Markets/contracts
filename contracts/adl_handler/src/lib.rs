@@ -2,39 +2,46 @@
 //! when the pool's PnL-to-pool-value ratio exceeds the configured threshold.
 //! Mirrors GMX's AdlHandler.sol.
 //!
-//! ADL is triggered when total trader PnL threatens pool solvency.
-//! Keepers select a profitable position and reduce it just enough to bring
-//! the PnL factor back below the max threshold, crediting the trader fairly.
+//! Delegates actual position closure to order_handler since positions live there.
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, Address, BytesN, Env,
+    contract, contracterror, contractimpl, contracttype, panic_with_error,
+    Address, BytesN, Env, symbol_short,
 };
-use gmx_types::{MarketProps, PriceProps};
+use gmx_types::{MarketProps, PriceProps, PositionProps};
+use gmx_math::{FLOAT_PRECISION, mul_div_wide};
 use gmx_keys::{
+    roles,
     market_index_token_key, market_long_token_key, market_short_token_key,
-    max_pnl_factor_key,
+    max_pnl_factor_key, max_pnl_factor_for_adl_key,
+    position_key,
 };
 use gmx_market_utils::{get_pool_value, get_pnl};
-use gmx_decrease_position_utils::{decrease_position, DecreasePositionParams};
+use gmx_position_utils::get_position_pnl_usd;
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
-const ADMIN_KEY:      &str = "ADMIN";
-const ROLE_STORE_KEY: &str = "ROLE_STORE";
-const DATA_STORE_KEY: &str = "DATA_STORE";
-const ORACLE_KEY:     &str = "ORACLE";
+#[contracttype]
+enum InstanceKey {
+    Initialized,
+    Admin,
+    RoleStore,
+    DataStore,
+    Oracle,
+    OrderHandler,
+}
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
 #[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
 pub enum Error {
     AlreadyInitialized = 1,
-    NotInitialized     = 2,
     Unauthorized       = 3,
     AdlNotRequired     = 4,
-    PositionNotFound   = 5,
     NotProfitable      = 6,
 }
 
@@ -42,7 +49,7 @@ pub enum Error {
 
 #[soroban_sdk::contractclient(name = "RoleStoreClient")]
 trait IRoleStore {
-    fn has_role(env: Env, account: Address, role: soroban_sdk::Symbol) -> bool;
+    fn has_role(env: Env, account: Address, role: BytesN<32>) -> bool;
 }
 
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
@@ -56,6 +63,20 @@ trait IOracle {
     fn get_primary_price(env: Env, token: Address) -> PriceProps;
 }
 
+#[soroban_sdk::contractclient(name = "OrderHandlerClient")]
+trait IOrderHandler {
+    fn execute_adl(
+        env: Env,
+        keeper: Address,
+        account: Address,
+        market: Address,
+        collateral_token: Address,
+        is_long: bool,
+        size_delta_usd: i128,
+    );
+    fn get_position(env: Env, key: BytesN<32>) -> Option<PositionProps>;
+}
+
 // ─── Contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -63,51 +84,69 @@ pub struct AdlHandler;
 
 #[contractimpl]
 impl AdlHandler {
-    /// One-time setup.
-    pub fn initialize(env: Env, admin: Address, role_store: Address, data_store: Address, oracle: Address) {
-        // TODO: panic if already initialized
-        //       Store all addresses in instance storage
-        todo!()
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        role_store: Address,
+        data_store: Address,
+        oracle: Address,
+        order_handler: Address,
+    ) {
+        admin.require_auth();
+        if env.storage().instance().has(&InstanceKey::Initialized) {
+            panic_with_error!(&env, Error::AlreadyInitialized);
+        }
+        env.storage().instance().set(&InstanceKey::Initialized, &true);
+        env.storage().instance().set(&InstanceKey::Admin, &admin);
+        env.storage().instance().set(&InstanceKey::RoleStore, &role_store);
+        env.storage().instance().set(&InstanceKey::DataStore, &data_store);
+        env.storage().instance().set(&InstanceKey::Oracle, &oracle);
+        env.storage().instance().set(&InstanceKey::OrderHandler, &order_handler);
     }
 
     /// Check whether ADL is currently required for the given market side.
     ///
-    /// Returns true if the PnL factor (total_trader_pnl / pool_value) exceeds
-    /// the configured MAX_PNL_FACTOR threshold for that side.
-    pub fn is_adl_required(
-        env: Env,
-        market: Address,
-        is_long: bool,
-    ) -> bool {
-        // TODO: (mirrors GMX AdlUtils.isAdlRequired)
-        //
-        // 1. Load data_store and oracle from instance storage
-        //
-        // 2. Load MarketProps from data_store (same index/long/short key pattern)
-        //
-        // 3. Fetch prices from oracle for index, long, short tokens
-        //
-        // 4. pool_value = get_pool_value(env, ds, market_props, long_price, short_price,
-        //                                index_price, maximize=false)
-        //    (use minimize for conservative pool value estimate)
-        //
-        // 5. pnl = get_pnl(env, ds, market_props, index_price.mid_price(), is_long, maximize=true)
-        //    (use maximize=true to get worst-case trader PnL against the pool)
-        //
-        // 6. if pnl <= 0 → return false (no profitable positions to ADL)
-        //
-        // 7. pnl_factor = pnl * FLOAT_PRECISION / pool_value
-        //    max_pnl_factor = ds.get_u128(max_pnl_factor_key(&env, &market.market_token, is_long))
-        //
-        // 8. Return pnl_factor > max_pnl_factor as i128
-        todo!()
+    /// Returns true if total trader PnL / pool_value > MAX_PNL_FACTOR_FOR_ADL.
+    pub fn is_adl_required(env: Env, market: Address, is_long: bool) -> bool {
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
+        let oracle: Address = env.storage().instance().get(&InstanceKey::Oracle).unwrap();
+
+        let market_props = load_market_props(&env, &data_store, &market);
+        let oracle_client = OracleClient::new(&env, &oracle);
+        let index_price_props = oracle_client.get_primary_price(&market_props.index_token);
+        let long_price  = oracle_client.get_primary_price(&market_props.long_token).mid_price();
+        let short_price = oracle_client.get_primary_price(&market_props.short_token).mid_price();
+        let index_price = index_price_props.mid_price();
+
+        // Minimize pool value (conservative: harder to trigger ADL)
+        let pool_info = get_pool_value(
+            &env, &data_store, &market_props,
+            long_price, short_price, index_price, false,
+        );
+        if pool_info.pool_value <= 0 {
+            return false;
+        }
+
+        // Maximize trader PnL (worst case for pool)
+        let pnl = get_pnl(&env, &data_store, &market_props, index_price, is_long, true);
+        if pnl <= 0 {
+            return false;
+        }
+
+        let pnl_factor = mul_div_wide(&env, pnl, FLOAT_PRECISION, pool_info.pool_value);
+        let max_pnl_factor = DataStoreClient::new(&env, &data_store)
+            .get_u128(&max_pnl_factor_for_adl_key(&env, &market, is_long)) as i128;
+
+        if max_pnl_factor == 0 {
+            return false; // No limit configured
+        }
+        pnl_factor > max_pnl_factor
     }
 
-    /// Execute ADL on a specific profitable position to reduce the market's PnL factor.
+    /// Execute ADL on a specific profitable position.
     ///
-    /// The keeper identifies a profitable position and supplies `size_delta_usd` — the
-    /// amount to close. The handler validates ADL is needed and that the position is
-    /// profitable, then executes a partial decrease.
+    /// Validates ADL is required and the position is profitable, then delegates
+    /// the partial close to order_handler (where positions are stored).
     pub fn execute_adl(
         env: Env,
         keeper: Address,
@@ -117,38 +156,58 @@ impl AdlHandler {
         is_long: bool,
         size_delta_usd: i128,
     ) {
-        // TODO: (mirrors GMX AdlHandler.executeAdl)
-        //
-        // 1. keeper.require_auth()
-        //    Require keeper has ADL_KEEPER role in role_store
-        //
-        // 2. Validate ADL is required:
-        //    if !is_adl_required(env, market, is_long) → panic Error::AdlNotRequired
-        //
-        // 3. Load MarketProps and oracle prices (same pattern as liquidation_handler)
-        //
-        // 4. Load the target position from order_handler storage (cross-contract or shared)
-        //    Validate position.size_in_usd >= size_delta_usd
-        //
-        // 5. Validate the position is currently PROFITABLE (PnL > 0):
-        //    (pnl_usd, _) = get_position_pnl_usd(env, &position, &index_price, size_delta_usd)
-        //    if pnl_usd <= 0 → panic Error::NotProfitable
-        //    (ADL only targets profitable positions; closing losers doesn't help the pool)
-        //
-        // 6. Execute partial decrease:
-        //    result = decrease_position(env, &DecreasePositionParams {
-        //        data_store, caller: &env.current_contract_address(),
-        //        account: &account, receiver: &account,
-        //        market: &market_props, collateral_token: &collateral_token,
-        //        size_delta_usd, acceptable_price: 0,  // no slippage check for ADL
-        //        is_long, index_token_price: &index_price,
-        //        collateral_price, current_time: env.ledger().timestamp(),
-        //    })
-        //
-        // 7. Validate that post-ADL the PnL factor is now below the threshold.
-        //    If still above, the keeper will need to call again with another position.
-        //
-        // 8. Emit "adl_executed" event with { account, market, size_delta_usd, pnl_usd }
-        todo!()
+        keeper.require_auth();
+
+        let role_store: Address = env.storage().instance().get(&InstanceKey::RoleStore).unwrap();
+        if !RoleStoreClient::new(&env, &role_store).has_role(&keeper, &roles::adl_keeper(&env)) {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+
+        // Check ADL is required
+        if !AdlHandler::is_adl_required(env.clone(), market.clone(), is_long) {
+            panic_with_error!(&env, Error::AdlNotRequired);
+        }
+
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
+        let oracle: Address = env.storage().instance().get(&InstanceKey::Oracle).unwrap();
+        let order_handler: Address = env.storage().instance().get(&InstanceKey::OrderHandler).unwrap();
+
+        let market_props = load_market_props(&env, &data_store, &market);
+        let oracle_client = OracleClient::new(&env, &oracle);
+        let index_price = oracle_client.get_primary_price(&market_props.index_token);
+
+        // Verify the target position is profitable (ADL only closes profitable positions)
+        let pk = position_key(&env, &account, &market, &collateral_token, is_long);
+        let position: PositionProps = match OrderHandlerClient::new(&env, &order_handler).get_position(&pk) {
+            Some(p) => p,
+            None => panic!("position not found"),
+        };
+
+        let (pnl_usd, _) = get_position_pnl_usd(&env, &position, &index_price, size_delta_usd);
+        if pnl_usd <= 0 {
+            panic_with_error!(&env, Error::NotProfitable);
+        }
+
+        // Delegate to order_handler
+        OrderHandlerClient::new(&env, &order_handler)
+            .execute_adl(&keeper, &account, &market, &collateral_token, &is_long, &size_delta_usd);
+
+        env.events().publish(
+            (symbol_short!("adl_req"),),
+            (account, market, is_long, size_delta_usd, pnl_usd),
+        );
     }
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+fn load_market_props(env: &Env, data_store: &Address, market_token: &Address) -> MarketProps {
+    let ds = DataStoreClient::new(env, data_store);
+    let index_token = ds.get_address(&market_index_token_key(env, market_token))
+        .unwrap_or_else(|| panic!("market index token not found"));
+    let long_token = ds.get_address(&market_long_token_key(env, market_token))
+        .unwrap_or_else(|| panic!("market long token not found"));
+    let short_token = ds.get_address(&market_short_token_key(env, market_token))
+        .unwrap_or_else(|| panic!("market short token not found"));
+    MarketProps { market_token: market_token.clone(), index_token, long_token, short_token }
 }

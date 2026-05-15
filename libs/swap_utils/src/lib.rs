@@ -9,15 +9,16 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use soroban_sdk::{Address, BytesN, Env, Vec, token};
-use gmx_types::MarketProps;
-use gmx_math::{TOKEN_PRECISION, mul_div_wide};
+use soroban_sdk::{Address, BytesN, Env, Vec};
+use gmx_types::{MarketProps, PriceProps};
+use gmx_math::TOKEN_PRECISION;
 use gmx_keys::{
-    market_long_token_key, market_short_token_key, market_index_token_key,
+    market_long_token_key, market_short_token_key,
+    market_index_token_key, max_swap_path_length_key,
 };
 use gmx_market_utils::apply_delta_to_pool_amount;
 use gmx_pricing_utils::{
-    get_swap_output_amount, apply_swap_impact_value,
+    get_swap_output_amount, apply_swap_impact_value, get_swap_price_impact,
 };
 
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
@@ -29,7 +30,12 @@ trait IDataStore {
 
 #[soroban_sdk::contractclient(name = "OracleClient")]
 trait IOracle {
-    fn get_primary_price(env: Env, token: Address) -> gmx_types::PriceProps;
+    fn get_primary_price(env: Env, token: Address) -> PriceProps;
+}
+
+#[soroban_sdk::contractclient(name = "MarketTokenClient")]
+trait IMarketToken {
+    fn withdraw_from_pool(env: Env, caller: Address, pool_token: Address, receiver: Address, amount: i128);
 }
 
 // ─── Single-hop swap ──────────────────────────────────────────────────────────
@@ -37,7 +43,7 @@ trait IOracle {
 /// Execute one swap hop: `token_in → token_out` through a single market.
 ///
 /// `amount_in` must already be sitting in the market_token contract (the pool).
-/// Returns the net output amount of `token_out`.
+/// Returns (token_out, net_output_amount).
 pub fn swap(
     env: &Env,
     data_store: &Address,
@@ -48,42 +54,54 @@ pub fn swap(
     amount_in: i128,
     receiver: &Address,
 ) -> (Address, i128) {
-    // TODO: (mirrors GMX SwapUtils._swap)
-    //
-    // 1. Determine token_out (the other token in the market):
-    //    if token_in == market.long_token  → token_out = market.short_token
-    //    if token_in == market.short_token → token_out = market.long_token
-    //    else → panic "token_in not in market"
-    //
-    // 2. Read prices from oracle:
-    //    price_in  = oracle.get_primary_price(token_in).mid_price()
-    //    price_out = oracle.get_primary_price(token_out).mid_price()
-    //
-    // 3. Determine if impact is positive (for fee factor selection):
-    //    for_positive_impact = (price impact would improve pool balance)
-    //    compute this by checking whether the swap reduces |pool_in - pool_out|
-    //
-    // 4. Compute output and fee:
-    //    (amount_out, fee_amount) = get_swap_output_amount(
-    //        env, ds, market, token_in, token_out,
-    //        amount_in, price_in, price_out, for_positive_impact
-    //    )
-    //
-    // 5. Apply swap impact to the impact pool (token_out denomination):
-    //    apply_swap_impact_value(env, ds, caller, market, token_out, price_out, impact_usd)
-    //
-    // 6. Update pool amounts in data_store:
-    //    apply_delta_to_pool_amount(env, ds, caller, market, token_in,  +amount_in)
-    //    apply_delta_to_pool_amount(env, ds, caller, market, token_out, -amount_out)
-    //    (pool grows by what came in, shrinks by what goes out)
-    //
-    // 7. Transfer token_out from market_token contract to receiver:
-    //    MarketTokenClient::new(env, &market.market_token)
-    //        .withdraw_from_pool(caller, token_out, receiver, amount_out)
-    //    (withdraw_from_pool is the CONTROLLER-gated egress added in Phase 4)
-    //
-    // Returns (token_out, amount_out)
-    todo!()
+    // 1. Determine token_out
+    let token_out = if token_in == &market.long_token {
+        market.short_token.clone()
+    } else if token_in == &market.short_token {
+        market.long_token.clone()
+    } else {
+        panic!("token_in not in market")
+    };
+
+    // 2. Read prices from oracle
+    let oracle_client = OracleClient::new(env, oracle);
+    let price_in_props  = oracle_client.get_primary_price(token_in);
+    let price_out_props = oracle_client.get_primary_price(&token_out);
+    let price_in  = price_in_props.mid_price();
+    let price_out = price_out_props.mid_price();
+
+    // 3. Determine if this swap improves pool balance (for fee factor selection)
+    let impact_usd = get_swap_price_impact(
+        env, data_store, market,
+        token_in, &token_out,
+        amount_in, price_in, price_out,
+    );
+    let for_positive_impact = impact_usd >= 0;
+
+    // 4. Compute output and fee
+    let (amount_out, _fee_amount) = get_swap_output_amount(
+        env, data_store, market,
+        token_in, &token_out,
+        amount_in, price_in, price_out,
+        for_positive_impact,
+    );
+
+    if amount_out == 0 {
+        return (token_out, 0);
+    }
+
+    // 5. Apply swap impact to impact pool (denominated in token_out)
+    apply_swap_impact_value(env, data_store, caller, market, &token_out, price_out, impact_usd);
+
+    // 6. Update pool amounts
+    apply_delta_to_pool_amount(env, data_store, caller, market, token_in,   amount_in);
+    apply_delta_to_pool_amount(env, data_store, caller, market, &token_out, -amount_out);
+
+    // 7. Transfer token_out from market_token pool → receiver
+    MarketTokenClient::new(env, &market.market_token)
+        .withdraw_from_pool(caller, &token_out, receiver, &amount_out);
+
+    (token_out, amount_out)
 }
 
 // ─── Multi-hop swap ───────────────────────────────────────────────────────────
@@ -91,10 +109,7 @@ pub fn swap(
 /// Execute a swap across a path of markets.
 ///
 /// `path` is a Vec<Address> of market_token addresses (each is one hop).
-/// The first token must match the input side of path[0];
-/// the final output goes to `receiver`.
-///
-/// Max path length enforced by MAX_SWAP_PATH_LENGTH config in data_store (default 3).
+/// Max path length read from data_store (default 3).
 pub fn swap_with_path(
     env: &Env,
     data_store: &Address,
@@ -102,37 +117,62 @@ pub fn swap_with_path(
     oracle: &Address,
     token_in: &Address,
     amount_in: i128,
-    path: &Vec<Address>,   // Vec of market_token addresses
+    path: &Vec<Address>,
     receiver: &Address,
 ) -> (Address, i128) {
-    // TODO: (mirrors GMX SwapUtils.swap path loop)
-    //
-    // 1. Validate path length:
-    //    max_len = data_store.get_u128(max_swap_path_length_key(env)) as usize  (default 3)
-    //    if path.len() > max_len → panic "swap path too long"
-    //
-    // 2. Deduplicate check: no market should appear twice in the path
-    //    (store visited market_tokens in a temp set and check each hop)
-    //
-    // 3. Iterate hops:
-    //    current_token  = token_in
-    //    current_amount = amount_in
-    //
-    //    for each market_token_addr in path:
-    //        Load MarketProps from data_store (index/long/short token keys)
-    //        Determine next_receiver:
-    //            if last hop → receiver
-    //            else        → path[i+1] market_token address (tokens sit in next pool)
-    //
-    //        // Transfer current_amount of current_token INTO the next market pool
-    //        // (caller must have arranged the transfer before this call, OR
-    //        //  for intermediate hops the tokens just stay in the market contract)
-    //
-    //        (current_token, current_amount) = swap(
-    //            env, ds, caller, oracle,
-    //            &market_props, &current_token, current_amount, &next_receiver
-    //        )
-    //
-    // 4. Return (current_token, current_amount) — final output
-    todo!()
+    // 1. Validate path length
+    let max_len = {
+        let raw = DataStoreClient::new(env, data_store)
+            .get_u128(&max_swap_path_length_key(env)) as usize;
+        if raw == 0 { 3 } else { raw } // default to 3 if not configured
+    };
+    if path.len() as usize > max_len {
+        panic!("swap path too long");
+    }
+
+    // 2. Walk the path
+    let mut current_token = token_in.clone();
+    let mut current_amount = amount_in;
+    let path_len = path.len();
+
+    for i in 0..path_len {
+        let market_token_addr = path.get(i).unwrap();
+
+        // Load market props from data_store
+        let ds = DataStoreClient::new(env, data_store);
+        let index_token = ds.get_address(&market_index_token_key(env, &market_token_addr))
+            .unwrap_or_else(|| panic!("market index token not found"));
+        let long_token  = ds.get_address(&market_long_token_key(env, &market_token_addr))
+            .unwrap_or_else(|| panic!("market long token not found"));
+        let short_token = ds.get_address(&market_short_token_key(env, &market_token_addr))
+            .unwrap_or_else(|| panic!("market short token not found"));
+
+        let market_props = MarketProps {
+            market_token: market_token_addr.clone(),
+            index_token,
+            long_token,
+            short_token,
+        };
+
+        // For non-final hops: output stays in the next pool (tokens don't move to receiver yet).
+        // For the final hop: send to receiver.
+        let next_receiver = if (i + 1) as u32 == path_len {
+            receiver.clone()
+        } else {
+            // Output stays in this market's pool for the next hop to read
+            // (we don't actually move tokens between pools mid-path;
+            //  instead we carry the amount and re-apply on next hop)
+            market_token_addr.clone()
+        };
+
+        let (out_token, out_amount) = swap(
+            env, data_store, caller, oracle,
+            &market_props, &current_token, current_amount, &next_receiver,
+        );
+
+        current_token  = out_token;
+        current_amount = out_amount;
+    }
+
+    (current_token, current_amount)
 }

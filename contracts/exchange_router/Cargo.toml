@@ -8,9 +8,13 @@ publish = false
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-soroban-sdk  = { workspace = true }
-gmx-types    = { path = "../../libs/types" }
-gmx-keys     = { path = "../../libs/keys" }
+soroban-sdk         = { workspace = true }
+gmx-types           = { path = "../../libs/types" }
+gmx-keys            = { path = "../../libs/keys" }
+deposit-handler     = { path = "../deposit_handler" }
+withdrawal-handler  = { path = "../withdrawal_handler" }
+order-handler       = { path = "../order_handler" }
+fee-handler         = { path = "../fee_handler" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

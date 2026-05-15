@@ -6,17 +6,17 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, symbol_short, token};
-// recorded balance is stored under a local key derived from token address
-
-// ─── Storage keys ─────────────────────────────────────────────────────────────
-
-const ADMIN_KEY:      &str = "ADMIN";
-const ROLE_STORE_KEY: &str = "ROLE_STORE";
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error,
+    Address, BytesN, Env, token,
+};
+use gmx_keys::roles;
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
 #[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
 pub enum Error {
     AlreadyInitialized = 1,
     NotInitialized     = 2,
@@ -24,17 +24,31 @@ pub enum Error {
     NegativeAmount     = 4,
 }
 
-// ─── Role-store client (minimal) ──────────────────────────────────────────────
+// ─── Storage keys ─────────────────────────────────────────────────────────────
+
+#[contracttype]
+enum InstanceKey {
+    Initialized,
+    RoleStore,
+}
+
+#[contracttype]
+enum DataKey {
+    TokenBalance(Address),
+}
+
+// ─── Role-store client ────────────────────────────────────────────────────────
 
 #[soroban_sdk::contractclient(name = "RoleStoreClient")]
 trait IRoleStore {
-    fn has_role(env: Env, account: Address, role: soroban_sdk::Symbol) -> bool;
+    fn has_role(env: Env, account: Address, role: BytesN<32>) -> bool;
 }
 
 fn require_controller(env: &Env, caller: &Address) {
-    // TODO: same pattern as deposit_vault — read ROLE_STORE from instance storage,
-    //       call role_store_client.has_role(caller, CONTROLLER), panic if false
-    todo!()
+    let rs: Address = env.storage().instance().get(&InstanceKey::RoleStore).unwrap();
+    if !RoleStoreClient::new(env, &rs).has_role(caller, &roles::controller(env)) {
+        panic_with_error!(env, Error::Unauthorized);
+    }
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -46,48 +60,52 @@ pub struct OrderVault;
 impl OrderVault {
     /// One-time setup: store admin and role_store addresses.
     pub fn initialize(env: Env, admin: Address, role_store: Address) {
-        // TODO: panic if already initialized (ADMIN_KEY exists in instance storage)
-        //       env.storage().instance().set(&ADMIN_KEY, &admin)
-        //       env.storage().instance().set(&ROLE_STORE_KEY, &role_store)
-        todo!()
+        admin.require_auth();
+        if env.storage().instance().has(&InstanceKey::Initialized) {
+            panic_with_error!(&env, Error::AlreadyInitialized);
+        }
+        env.storage().instance().set(&InstanceKey::Initialized, &true);
+        env.storage().instance().set(&InstanceKey::RoleStore, &role_store);
     }
 
-    /// Record how many tokens of `token` arrived since last snapshot.
-    ///
-    /// Should be called by the handler immediately after the user's SEP-41 `transfer`
-    /// into this vault. Returns the amount received (delta from last recorded balance).
+    /// Snapshot the balance of `token` in this vault.
+    /// Returns the amount received since the last snapshot (delta).
     pub fn record_transfer_in(env: Env, token: Address) -> i128 {
-        // TODO: (same pattern as deposit_vault::record_transfer_in)
-        //
-        // 1. current_balance = token::Client::new(&env, &token)
-        //        .balance(&env.current_contract_address())
-        //
-        // 2. key = recorded_balance_key(&env, &token)
-        //    prev_balance = env.storage().persistent().get::<_,i128>(&key).unwrap_or(0)
-        //
-        // 3. delta = current_balance - prev_balance
-        //    if delta < 0 → panic "balance decreased"
-        //
-        // 4. env.storage().persistent().set(&key, &current_balance)
-        //
-        // Returns delta (the new tokens received)
-        todo!()
+        let current = token::Client::new(&env, &token)
+            .balance(&env.current_contract_address());
+        let recorded: i128 = env.storage().persistent()
+            .get(&DataKey::TokenBalance(token.clone()))
+            .unwrap_or(0);
+        let delta = current - recorded;
+        env.storage().persistent().set(&DataKey::TokenBalance(token), &current);
+        delta
     }
 
     /// Transfer `amount` of `token` out to `receiver`. CONTROLLER-gated.
-    pub fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128) {
-        // TODO:
-        // 1. caller.require_auth()
-        // 2. require_controller(&env, &caller)
-        // 3. if amount <= 0 → panic "negative amount"
-        // 4. token::Client::new(&env, &token).transfer(&env.current_contract_address(), &receiver, &amount)
-        // 5. Update recorded balance: subtract amount from stored balance for `token`
-        todo!()
+    pub fn transfer_out(
+        env: Env,
+        caller: Address,
+        token: Address,
+        receiver: Address,
+        amount: i128,
+    ) {
+        caller.require_auth();
+        if amount <= 0 {
+            panic_with_error!(&env, Error::NegativeAmount);
+        }
+        require_controller(&env, &caller);
+        token::Client::new(&env, &token)
+            .transfer(&env.current_contract_address(), &receiver, &amount);
+        // Sync recorded balance
+        let new_bal = token::Client::new(&env, &token)
+            .balance(&env.current_contract_address());
+        env.storage().persistent().set(&DataKey::TokenBalance(token), &new_bal);
     }
 
-    /// Return the last snapshot balance for `token`.
+    /// Return the last recorded balance for a token.
     pub fn get_recorded_balance(env: Env, token: Address) -> i128 {
-        // TODO: read recorded_balance_key(&env, &token) from persistent storage, default 0
-        todo!()
+        env.storage().persistent()
+            .get(&DataKey::TokenBalance(token))
+            .unwrap_or(0)
     }
 }

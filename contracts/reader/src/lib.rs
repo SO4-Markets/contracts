@@ -8,20 +8,20 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use soroban_sdk::{
-    contract, contractimpl, Address, BytesN, Env, Vec,
+    contract, contractimpl, Address, BytesN, Env,
 };
 use gmx_types::{
     MarketProps, PositionProps, PositionInfo, PositionFees, PriceProps,
     PoolValueInfo, FundingInfo,
 };
-use gmx_math::{FLOAT_PRECISION, TOKEN_PRECISION};
+use gmx_math::{FLOAT_PRECISION, TOKEN_PRECISION, mul_div_wide};
 use gmx_keys::{
     market_index_token_key, market_long_token_key, market_short_token_key,
     funding_amount_per_size_key, saved_funding_factor_per_second_key,
 };
-use gmx_market_utils::{get_pool_value, get_open_interest_for_side, get_pnl};
+use gmx_market_utils::{get_pool_value, get_open_interest_for_side};
 use gmx_position_utils::{get_position_pnl_usd, get_position_fees, is_liquidatable};
-use gmx_pricing_utils::get_execution_price;
+use gmx_pricing_utils::{get_execution_price, get_position_price_impact};
 
 // ─── External clients ─────────────────────────────────────────────────────────
 
@@ -48,12 +48,14 @@ impl Reader {
 
     /// Load full MarketProps for a given market_token address from data_store.
     pub fn get_market(env: Env, data_store: Address, market_token: Address) -> MarketProps {
-        // TODO:
-        // index_token = ds.get_address(market_index_token_key(&env, &market_token)).unwrap()
-        // long_token  = ds.get_address(market_long_token_key(&env, &market_token)).unwrap()
-        // short_token = ds.get_address(market_short_token_key(&env, &market_token)).unwrap()
-        // Return MarketProps { market_token, index_token, long_token, short_token }
-        todo!()
+        let ds = DataStoreClient::new(&env, &data_store);
+        let index_token = ds.get_address(&market_index_token_key(&env, &market_token))
+            .unwrap_or_else(|| panic!("market index token not found"));
+        let long_token = ds.get_address(&market_long_token_key(&env, &market_token))
+            .unwrap_or_else(|| panic!("market long token not found"));
+        let short_token = ds.get_address(&market_short_token_key(&env, &market_token))
+            .unwrap_or_else(|| panic!("market short token not found"));
+        MarketProps { market_token, index_token, long_token, short_token }
     }
 
     /// Get the full pool value breakdown for a market at current oracle prices.
@@ -64,11 +66,12 @@ impl Reader {
         market_token: Address,
         maximize: bool,
     ) -> PoolValueInfo {
-        // TODO:
-        // 1. market = get_market(env, data_store, market_token)
-        // 2. Fetch oracle prices for long, short, index tokens
-        // 3. Return get_pool_value(env, ds, market, long_price, short_price, index_price, maximize)
-        todo!()
+        let market = Self::get_market(env.clone(), data_store.clone(), market_token);
+        let oracle_client = OracleClient::new(&env, &oracle);
+        let long_price  = oracle_client.get_primary_price(&market.long_token).mid_price();
+        let short_price = oracle_client.get_primary_price(&market.short_token).mid_price();
+        let index_price = oracle_client.get_primary_price(&market.index_token).mid_price();
+        get_pool_value(&env, &data_store, &market, long_price, short_price, index_price, maximize)
     }
 
     /// Get open interest for both sides of a market.
@@ -78,12 +81,10 @@ impl Reader {
         data_store: Address,
         market_token: Address,
     ) -> (i128, i128) {
-        // TODO:
-        // market = get_market(env, data_store, market_token)
-        // long_oi  = get_open_interest_for_side(env, ds, market, true)  as i128
-        // short_oi = get_open_interest_for_side(env, ds, market, false) as i128
-        // Return (long_oi, short_oi)
-        todo!()
+        let market = Self::get_market(env.clone(), data_store.clone(), market_token);
+        let long_oi  = get_open_interest_for_side(&env, &data_store, &market, true)  as i128;
+        let short_oi = get_open_interest_for_side(&env, &data_store, &market, false) as i128;
+        (long_oi, short_oi)
     }
 
     /// Get the aggregate funding state for a market.
@@ -92,17 +93,25 @@ impl Reader {
         data_store: Address,
         market_token: Address,
     ) -> FundingInfo {
-        // TODO:
-        // 1. key_factor = saved_funding_factor_per_second_key(&env, &market_token)
-        //    funding_factor_per_second = ds.get_i128(key_factor)
-        // 2. long_key  = funding_amount_per_size_key(&env, &market_token, true)
-        //    short_key = funding_amount_per_size_key(&env, &market_token, false)
-        //    long_funding_amount_per_size  = ds.get_i128(long_key)
-        //    short_funding_amount_per_size = ds.get_i128(short_key)
-        // 3. Return FundingInfo { funding_factor_per_second,
-        //                         long_funding_amount_per_size,
-        //                         short_funding_amount_per_size }
-        todo!()
+        let market = Self::get_market(env.clone(), data_store.clone(), market_token.clone());
+        let ds = DataStoreClient::new(&env, &data_store);
+
+        let funding_factor_per_second = ds.get_i128(
+            &saved_funding_factor_per_second_key(&env, &market_token)
+        );
+        // Long side tracks funding in long_token collateral; short in short_token
+        let long_funding_amount_per_size = ds.get_i128(
+            &funding_amount_per_size_key(&env, &market_token, &market.long_token, true)
+        );
+        let short_funding_amount_per_size = ds.get_i128(
+            &funding_amount_per_size_key(&env, &market_token, &market.short_token, false)
+        );
+
+        FundingInfo {
+            funding_factor_per_second,
+            long_funding_amount_per_size,
+            short_funding_amount_per_size,
+        }
     }
 
     // ── Position views ────────────────────────────────────────────────────────
@@ -117,37 +126,58 @@ impl Reader {
         oracle: Address,
         position: PositionProps,
     ) -> PositionInfo {
-        // TODO: (mirrors GMX Reader.getPositionInfo)
-        //
-        // 1. Load MarketProps for position.market from data_store
-        //
-        // 2. Fetch prices:
-        //    index_price      = oracle.get_primary_price(market.index_token)
-        //    collateral_price = oracle.get_primary_price(position.collateral_token).mid_price()
-        //
-        // 3. Compute PnL:
-        //    (pnl_usd, uncapped_pnl_usd) = get_position_pnl_usd(
-        //        env, &position, &index_price, position.size_in_usd)
-        //
-        // 4. Compute fees:
-        //    fees = get_position_fees(env, ds, market, position, collateral_price,
-        //                             position.size_in_usd, for_positive_impact=false)
-        //    borrowing_fee_usd  = fees.borrowing_fee_amount * collateral_price / TOKEN_PRECISION
-        //    funding_fee_usd    = fees.funding_fee_amount   * collateral_price / TOKEN_PRECISION
-        //    position_fee_usd   = fees.position_fee_amount  * collateral_price / TOKEN_PRECISION
-        //
-        // 5. Compute liquidation price (approximate):
-        //    Solve for the index_price at which remaining_collateral == min_collateral_required:
-        //    For a long: liq_price = (position.size_in_usd - collateral_usd + fees_usd)
-        //                            / position.size_in_tokens * TOKEN_PRECISION
-        //    For a short: liq_price = (position.size_in_usd + collateral_usd - fees_usd)
-        //                             / position.size_in_tokens * TOKEN_PRECISION
-        //    (simplified; GMX uses a more precise iterative solve)
-        //
-        // 6. Return PositionInfo { position, pnl_usd, uncapped_pnl_usd,
-        //                          borrowing_fee_usd, funding_fee_usd, position_fee_usd,
-        //                          liquidation_price }
-        todo!()
+        let market = Self::get_market(env.clone(), data_store.clone(), position.market.clone());
+        let oracle_client = OracleClient::new(&env, &oracle);
+
+        let index_price      = oracle_client.get_primary_price(&market.index_token);
+        let collateral_price = oracle_client.get_primary_price(&position.collateral_token).mid_price();
+
+        // PnL for the full position size
+        let (pnl_usd, uncapped_pnl_usd) = get_position_pnl_usd(
+            &env, &position, &index_price, position.size_in_usd,
+        );
+
+        // Fees in collateral token units
+        let fees: PositionFees = get_position_fees(
+            &env, &data_store, &market, &position,
+            collateral_price, position.size_in_usd, false,
+        );
+
+        // Convert fee amounts (collateral token raw) → USD (FLOAT_PRECISION)
+        let borrowing_fee_usd = mul_div_wide(&env, fees.borrowing_fee_amount, collateral_price, TOKEN_PRECISION);
+        let funding_fee_usd   = mul_div_wide(&env, fees.funding_fee_amount,   collateral_price, TOKEN_PRECISION);
+        let position_fee_usd  = mul_div_wide(&env, fees.position_fee_amount,  collateral_price, TOKEN_PRECISION);
+
+        // Approximate liquidation price:
+        // For a long:  liq_price = (size_usd - collateral_usd + fees_usd) / size_in_tokens × TOKEN_PRECISION
+        // For a short: liq_price = (size_usd + collateral_usd - fees_usd) / size_in_tokens × TOKEN_PRECISION
+        let collateral_usd = mul_div_wide(&env, position.collateral_amount, collateral_price, TOKEN_PRECISION);
+        let total_fees_usd = borrowing_fee_usd + funding_fee_usd + position_fee_usd;
+
+        let liquidation_price = if position.size_in_tokens > 0 {
+            let numerator = if position.is_long {
+                position.size_in_usd - collateral_usd + total_fees_usd
+            } else {
+                position.size_in_usd + collateral_usd - total_fees_usd
+            };
+            if numerator > 0 {
+                mul_div_wide(&env, numerator, TOKEN_PRECISION, position.size_in_tokens)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        PositionInfo {
+            position,
+            pnl_usd,
+            uncapped_pnl_usd,
+            borrowing_fee_usd,
+            funding_fee_usd,
+            position_fee_usd,
+            liquidation_price,
+        }
     }
 
     /// Compute the execution price a user would get for a given size and order direction.
@@ -162,14 +192,15 @@ impl Reader {
         is_increase: bool,
         size_delta_usd: i128,
     ) -> i128 {
-        // TODO:
-        // 1. market = get_market(env, data_store, market_token)
-        // 2. index_price = oracle.get_primary_price(market.index_token).mid_price()
-        // 3. impact_usd = get_position_price_impact(env, ds, market, is_long,
-        //                                           size_delta_usd, is_increase)
-        // 4. Return get_execution_price(env, index_price, size_delta_usd, impact_usd,
-        //                               is_long, is_increase)
-        todo!()
+        let market = Self::get_market(env.clone(), data_store.clone(), market_token);
+        let oracle_client = OracleClient::new(&env, &oracle);
+        let index_price = oracle_client.get_primary_price(&market.index_token).mid_price();
+
+        let impact_usd = get_position_price_impact(
+            &env, &data_store, &market, is_long, size_delta_usd, is_increase, index_price,
+        );
+
+        get_execution_price(&env, index_price, size_delta_usd, impact_usd, is_long, is_increase)
     }
 
     /// Return whether a position is currently liquidatable at oracle prices.
@@ -179,11 +210,10 @@ impl Reader {
         oracle: Address,
         position: PositionProps,
     ) -> bool {
-        // TODO:
-        // 1. market = get_market(env, data_store, position.market)
-        // 2. index_price = oracle.get_primary_price(market.index_token)
-        //    collateral_price = oracle.get_primary_price(position.collateral_token).mid_price()
-        // 3. Return is_liquidatable(env, ds, position, market, collateral_price, index_price)
-        todo!()
+        let market = Self::get_market(env.clone(), data_store.clone(), position.market.clone());
+        let oracle_client = OracleClient::new(&env, &oracle);
+        let index_price      = oracle_client.get_primary_price(&market.index_token);
+        let collateral_price = oracle_client.get_primary_price(&position.collateral_token).mid_price();
+        is_liquidatable(&env, &data_store, &position, &market, collateral_price, &index_price)
     }
 }

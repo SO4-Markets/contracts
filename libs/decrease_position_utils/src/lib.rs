@@ -14,12 +14,13 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use soroban_sdk::{Address, BytesN, Env};
-use gmx_types::{MarketProps, PositionProps, PositionFees, PriceProps, DecreasePositionResult};
+use soroban_sdk::{contracttype, Address, BytesN, Env};
+use gmx_types::{MarketProps, PositionProps, PriceProps, DecreasePositionResult};
 use gmx_math::{FLOAT_PRECISION, TOKEN_PRECISION, mul_div_wide};
 use gmx_keys::{
-    position_key, open_interest_key, open_interest_in_tokens_key, collateral_sum_key,
-    claimable_funding_amount_key,
+    position_key, position_list_key, account_position_list_key,
+    cumulative_borrowing_factor_key, funding_amount_per_size_key,
+    collateral_sum_key,
 };
 use gmx_market_utils::{
     apply_delta_to_pool_amount, apply_delta_to_open_interest,
@@ -44,6 +45,18 @@ trait IDataStore {
     fn remove_bytes32_from_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
 }
 
+#[soroban_sdk::contractclient(name = "MarketTokenClient")]
+trait IMarketToken {
+    fn withdraw_from_pool(env: Env, caller: Address, pool_token: Address, receiver: Address, amount: i128);
+}
+
+// ─── Position storage key ──────────────────────────────────────────────────────
+
+#[contracttype]
+enum PositionKey {
+    Position(BytesN<32>),
+}
+
 // ─── Params ───────────────────────────────────────────────────────────────────
 
 pub struct DecreasePositionParams<'a> {
@@ -65,99 +78,141 @@ pub struct DecreasePositionParams<'a> {
 
 /// Decrease or fully close a position. Returns a `DecreasePositionResult`.
 pub fn decrease_position(env: &Env, p: &DecreasePositionParams) -> DecreasePositionResult {
-    // TODO: (mirrors GMX DecreasePositionUtils.decreasePosition)
-    //
-    // 1. LOAD POSITION:
-    //    key = position_key(env, p.account, &p.market.market_token, p.collateral_token, p.is_long)
-    //    position = load from handler storage at `key`
-    //    Panic if position doesn't exist: "position not found"
-    //    If p.size_delta_usd > position.size_in_usd → clamp to full close
-    //
-    // 2. UPDATE MARKET STATE (funding + borrowing) BEFORE modifying position:
-    //    update_funding_state(env, ds, caller, market, long_price, short_price, current_time)
-    //    update_cumulative_borrowing_factor(env, ds, caller, market, is_long, current_time)
-    //
-    // 3. SETTLE PENDING FUNDING for this position:
-    //    settle_funding_fees(env, ds, caller, market, &mut position)
-    //
-    // 4. PRICE IMPACT:
-    //    impact_usd = get_position_price_impact(env, ds, market, is_long,
-    //                                           size_delta_usd, is_increase=false)
-    //    apply_position_impact_value(env, ds, caller, market, impact_usd, index_price.mid_price())
-    //    For decreases: positive impact = good for trader (closing a size that improved OI balance)
-    //
-    // 5. EXECUTION PRICE:
-    //    execution_price = get_execution_price(env, index_price.mid_price(), size_delta_usd,
-    //                                          impact_usd, is_long, is_increase=false)
-    //    if acceptable_price != 0:
-    //        if is_long  && execution_price < acceptable_price → panic "price too low"
-    //        if !is_long && execution_price > acceptable_price → panic "price too high"
-    //
-    // 6. SIZE DELTA IN TOKENS:
-    //    Compute size_delta_in_tokens proportional to position.size_in_tokens:
-    //    size_delta_in_tokens = size_delta_usd * position.size_in_tokens / position.size_in_usd
-    //    (use mul_div_wide to avoid overflow; this is how many raw index tokens are freed)
-    //
-    // 7. REALISE PnL:
-    //    (pnl_usd, _) = get_position_pnl_usd(env, &position, index_token_price, size_delta_usd)
-    //    pnl_token_amount = pnl_usd * TOKEN_PRECISION / collateral_price
-    //    (can be negative — a loss reduces collateral)
-    //    Pool settlement:
-    //      if pnl_usd > 0 (trader profit): pool pays out, apply_delta_to_pool_amount(-pnl_tokens)
-    //      if pnl_usd < 0 (trader loss):  pool gains,   apply_delta_to_pool_amount(+loss_tokens)
-    //
-    // 8. POSITION FEES:
-    //    for_positive_impact = impact_usd >= 0
-    //    fees = get_position_fees(env, ds, market, &position, collateral_price,
-    //                             size_delta_usd, for_positive_impact)
-    //    apply_delta_to_pool_amount for fee income (fees go to pool)
-    //
-    // 9. COMPUTE OUTPUT AMOUNT:
-    //    remaining_collateral_after_pnl = position.collateral_amount + pnl_token_amount
-    //    output_amount = remaining_collateral_after_pnl - fees.total_cost_amount
-    //    For full close: output_amount = all collateral (after pnl & fees)
-    //    For partial close: output_amount = collateral_delta (portion proportional to size_delta)
-    //    if output_amount < 0 → set to 0 (liquidation scenario; no output)
-    //
-    // 10. UPDATE POSITION SIZE FIELDS:
-    //     position.size_in_usd    -= size_delta_usd
-    //     position.size_in_tokens -= size_delta_in_tokens
-    //     position.collateral_amount -= output_amount + fees.total_cost_amount - pnl_token_amount
-    //     (i.e., remove what was output plus fees collected, adjust for pnl already settled in pool)
-    //     Update trackers:
-    //       position.borrowing_factor = current cumulative_borrowing_factor from ds
-    //       position.funding_fee_amount_per_size = current funding_amount_per_size from ds
-    //       position.decreased_at_time = current_time
-    //
-    // 11. OPEN INTEREST DELTAS:
-    //     apply_delta_to_open_interest(env, ds, caller, market, collateral_token,
-    //                                  is_long, -size_delta_usd)
-    //     apply_delta_to_open_interest_in_tokens(env, ds, caller, market, collateral_token,
-    //                                             is_long, -size_delta_in_tokens)
-    //
-    // 12. COLLATERAL SUM:
-    //     ds.apply_delta_to_u128(caller,
-    //         collateral_sum_key(env, &market.market_token, collateral_token, is_long),
-    //         -(output_amount as i128)
-    //     )
-    //     (reduce collateral sum by the amount leaving the pool)
-    //
-    // 13. is_fully_closed = position.size_in_usd == 0
-    //     if is_fully_closed:
-    //         Remove position key from POSITION_LIST and ACCOUNT_POSITION_LIST in ds
-    //         Delete position from handler storage
-    //     else:
-    //         validate_position(env, ds, &position, market, collateral_price, index_token_price)
-    //         Persist updated position to handler storage at `key`
-    //
-    // 14. TRANSFER OUTPUT TO RECEIVER:
-    //     MarketTokenClient::new(env, &market.market_token)
-    //         .withdraw_from_pool(caller, collateral_token, receiver, output_amount)
-    //     (if output_amount > 0)
-    //
-    // Returns DecreasePositionResult { execution_price, pnl_usd, output_amount,
-    //                                  secondary_output_amount: 0,
-    //                                  remaining_collateral: position.collateral_amount,
-    //                                  is_fully_closed }
-    todo!()
+    let pos_key = position_key(env, p.account, &p.market.market_token, p.collateral_token, p.is_long);
+    let storage_key = PositionKey::Position(pos_key.clone());
+
+    // 1. Load position
+    let mut position: PositionProps = env.storage().persistent()
+        .get(&storage_key)
+        .unwrap_or_else(|| panic!("position not found"));
+
+    // Clamp size_delta to full close if needed
+    let size_delta_usd = p.size_delta_usd.min(position.size_in_usd);
+
+    // 2. Update market funding + borrowing state
+    let index_price_mid = p.index_token_price.mid_price();
+    update_funding_state(env, p.data_store, p.caller, p.market, index_price_mid, index_price_mid, p.current_time);
+    update_cumulative_borrowing_factor(env, p.data_store, p.caller, p.market, p.is_long, p.current_time);
+
+    // 3. Settle pending funding for this position
+    settle_funding_fees(env, p.data_store, p.caller, p.market, &mut position);
+
+    // 4. Price impact (decrease: is_increase = false)
+    let impact_usd = get_position_price_impact(
+        env, p.data_store, p.market,
+        p.is_long, size_delta_usd, false,
+        index_price_mid,
+    );
+    apply_position_impact_value(env, p.data_store, p.caller, p.market, impact_usd, index_price_mid);
+
+    // 5. Execution price
+    let execution_price = get_execution_price(env, index_price_mid, size_delta_usd, impact_usd, p.is_long, false);
+    if p.acceptable_price != 0 {
+        if p.is_long  && execution_price < p.acceptable_price {
+            panic!("execution price too low for long decrease");
+        }
+        if !p.is_long && execution_price > p.acceptable_price {
+            panic!("execution price too high for short decrease");
+        }
+    }
+
+    // 6. Size delta in tokens (proportional to position)
+    let size_delta_in_tokens = if position.size_in_usd > 0 {
+        mul_div_wide(env, size_delta_usd, position.size_in_tokens, position.size_in_usd)
+    } else {
+        0
+    };
+
+    // 7. Realise PnL for the closing slice
+    let (pnl_usd, _) = get_position_pnl_usd(env, &position, p.index_token_price, size_delta_usd);
+    let pnl_token_amount = if p.collateral_price > 0 {
+        mul_div_wide(env, pnl_usd, TOKEN_PRECISION, p.collateral_price)
+    } else {
+        0
+    };
+
+    // Settle PnL with the pool:
+    //   trader profit → pool shrinks (pool pays trader)
+    //   trader loss   → pool grows  (trader pays pool)
+    if pnl_token_amount > 0 {
+        apply_delta_to_pool_amount(env, p.data_store, p.caller, p.market, p.collateral_token, -pnl_token_amount);
+    } else if pnl_token_amount < 0 {
+        apply_delta_to_pool_amount(env, p.data_store, p.caller, p.market, p.collateral_token, -pnl_token_amount); // negative delta = pool grows
+    }
+
+    // 8. Position fees
+    let for_positive_impact = impact_usd >= 0;
+    let fees = get_position_fees(
+        env, p.data_store, p.market, &position,
+        p.collateral_price, size_delta_usd, for_positive_impact,
+    );
+    // Fee income goes to pool
+    apply_delta_to_pool_amount(env, p.data_store, p.caller, p.market, p.collateral_token, fees.total_cost_amount);
+
+    // 9. Compute output amount
+    // For a partial close, we return the collateral proportional to the size delta
+    let collateral_delta = if position.size_in_usd > 0 {
+        mul_div_wide(env, position.collateral_amount, size_delta_usd, position.size_in_usd)
+    } else {
+        position.collateral_amount
+    };
+
+    let raw_output = collateral_delta + pnl_token_amount - fees.total_cost_amount;
+    let output_amount = raw_output.max(0);
+
+    // 10. Update position size fields
+    position.size_in_usd    -= size_delta_usd;
+    position.size_in_tokens -= size_delta_in_tokens;
+    position.collateral_amount -= collateral_delta;
+    position.decreased_at_time = p.current_time;
+
+    // Sync trackers
+    let cum_borrow_key = cumulative_borrowing_factor_key(env, &p.market.market_token, p.is_long);
+    position.borrowing_factor = DataStoreClient::new(env, p.data_store).get_u128(&cum_borrow_key) as i128;
+
+    let fnd_key = funding_amount_per_size_key(env, &p.market.market_token, p.collateral_token, p.is_long);
+    position.funding_fee_amount_per_size = DataStoreClient::new(env, p.data_store).get_i128(&fnd_key);
+
+    // 11. Open interest deltas
+    apply_delta_to_open_interest(env, p.data_store, p.caller, p.market, p.collateral_token, p.is_long, -size_delta_usd);
+    apply_delta_to_open_interest_in_tokens(env, p.data_store, p.caller, p.market, p.collateral_token, p.is_long, -size_delta_in_tokens);
+
+    // 12. Collateral sum
+    let col_sum_key = collateral_sum_key(env, &p.market.market_token, p.collateral_token, p.is_long);
+    DataStoreClient::new(env, p.data_store)
+        .apply_delta_to_u128(p.caller, &col_sum_key, &(-output_amount));
+
+    // 13. Persist or remove position
+    let is_fully_closed = position.size_in_usd == 0;
+    let remaining_collateral = position.collateral_amount;
+
+    if is_fully_closed {
+        env.storage().persistent().remove(&storage_key);
+        let ds = DataStoreClient::new(env, p.data_store);
+        ds.remove_bytes32_from_set(p.caller, &position_list_key(env), &pos_key);
+        ds.remove_bytes32_from_set(p.caller, &account_position_list_key(env, p.account), &pos_key);
+    } else {
+        validate_position(env, p.data_store, &position, p.market, p.collateral_price, p.index_token_price);
+        env.storage().persistent().set(&storage_key, &position);
+    }
+
+    // 14. Transfer output to receiver
+    if output_amount > 0 {
+        MarketTokenClient::new(env, &p.market.market_token)
+            .withdraw_from_pool(p.caller, p.collateral_token, p.receiver, &output_amount);
+    }
+
+    env.events().publish(
+        (soroban_sdk::symbol_short!("pos_dec"),),
+        (pos_key, p.account.clone(), size_delta_usd, execution_price, pnl_usd),
+    );
+
+    DecreasePositionResult {
+        execution_price,
+        pnl_usd,
+        output_amount,
+        secondary_output_amount: 0,
+        remaining_collateral,
+        is_fully_closed,
+    }
 }

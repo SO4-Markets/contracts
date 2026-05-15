@@ -1,36 +1,34 @@
 //! Fee handler — claims and distributes protocol fees accumulated in the pool.
 //! Mirrors GMX's FeeHandler.sol.
-//!
-//! Fees collected during position open/close and swaps accumulate as pool amounts.
-//! The fee handler lets a privileged keeper sweep those fees to a treasury address
-//! and optionally distribute a portion to stakers via GLP/GM-style fee sharing.
-//!
-//! In this minimal implementation:
-//!   - claimable_fees(market, token) → how much is claimable
-//!   - claim_fees(keeper, market, token, receiver) → sweep to receiver
-//!   - claim_funding_fees(account, market, token) → user claims earned funding
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, Address, BytesN, Env,
+    contract, contracterror, contractimpl, contracttype, panic_with_error,
+    Address, BytesN, Env, symbol_short,
 };
 use gmx_keys::{
+    roles,
     claimable_fee_amount_key, claimable_funding_amount_key,
 };
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
-const ADMIN_KEY:      &str = "ADMIN";
-const ROLE_STORE_KEY: &str = "ROLE_STORE";
-const DATA_STORE_KEY: &str = "DATA_STORE";
+#[contracttype]
+enum InstanceKey {
+    Initialized,
+    Admin,
+    RoleStore,
+    DataStore,
+}
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
 #[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
 pub enum Error {
     AlreadyInitialized = 1,
-    NotInitialized     = 2,
     Unauthorized       = 3,
     NothingToClaim     = 4,
 }
@@ -39,7 +37,7 @@ pub enum Error {
 
 #[soroban_sdk::contractclient(name = "RoleStoreClient")]
 trait IRoleStore {
-    fn has_role(env: Env, account: Address, role: soroban_sdk::Symbol) -> bool;
+    fn has_role(env: Env, account: Address, role: BytesN<32>) -> bool;
 }
 
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
@@ -49,6 +47,11 @@ trait IDataStore {
     fn apply_delta_to_u128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> u128;
 }
 
+#[soroban_sdk::contractclient(name = "MarketTokenClient")]
+trait IMarketToken {
+    fn withdraw_from_pool(env: Env, caller: Address, pool_token: Address, receiver: Address, amount: i128);
+}
+
 // ─── Contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -56,25 +59,25 @@ pub struct FeeHandler;
 
 #[contractimpl]
 impl FeeHandler {
-    /// One-time setup.
     pub fn initialize(env: Env, admin: Address, role_store: Address, data_store: Address) {
-        // TODO: panic if already initialized
-        //       Store admin, role_store, data_store in instance storage
-        todo!()
+        admin.require_auth();
+        if env.storage().instance().has(&InstanceKey::Initialized) {
+            panic_with_error!(&env, Error::AlreadyInitialized);
+        }
+        env.storage().instance().set(&InstanceKey::Initialized, &true);
+        env.storage().instance().set(&InstanceKey::Admin, &admin);
+        env.storage().instance().set(&InstanceKey::RoleStore, &role_store);
+        env.storage().instance().set(&InstanceKey::DataStore, &data_store);
     }
 
     /// Return the accumulated protocol fee amount for a given market + token.
     pub fn claimable_fees(env: Env, market: Address, token: Address) -> u128 {
-        // TODO:
-        // 1. Load data_store from instance storage
-        // 2. key = claimable_fee_amount_key(&env, &market, &token)
-        // 3. Return ds.get_u128(key)
-        todo!()
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
+        let key = claimable_fee_amount_key(&env, &market, &token);
+        DataStoreClient::new(&env, &data_store).get_u128(&key)
     }
 
-    /// Sweep accumulated protocol fees for a market/token to `receiver`.
-    ///
-    /// Only FEE_KEEPER role may call this.
+    /// Sweep accumulated protocol fees for a market/token to `receiver`. FEE_KEEPER only.
     pub fn claim_fees(
         env: Env,
         keeper: Address,
@@ -82,60 +85,64 @@ impl FeeHandler {
         token: Address,
         receiver: Address,
     ) -> u128 {
-        // TODO: (mirrors GMX FeeHandler.claimFees)
-        //
-        // 1. keeper.require_auth()
-        //    Require FEE_KEEPER role
-        //
-        // 2. Load data_store from instance storage
-        //
-        // 3. key = claimable_fee_amount_key(&env, &market, &token)
-        //    amount = ds.get_u128(key)
-        //    if amount == 0 → panic Error::NothingToClaim
-        //
-        // 4. Reset to zero:
-        //    ds.set_u128(&keeper, key, 0)
-        //
-        // 5. Transfer `amount` of `token` from market_token contract to receiver:
-        //    MarketTokenClient::new(&env, &market)
-        //        .withdraw_from_pool(&keeper, &token, &receiver, amount as i128)
-        //
-        // 6. Emit "fees_claimed" event with { market, token, amount, receiver }
-        //
-        // Returns amount claimed
-        todo!()
+        keeper.require_auth();
+
+        let role_store: Address = env.storage().instance().get(&InstanceKey::RoleStore).unwrap();
+        if !RoleStoreClient::new(&env, &role_store).has_role(&keeper, &roles::fee_keeper(&env)) {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
+        let ds = DataStoreClient::new(&env, &data_store);
+        let handler = env.current_contract_address();
+
+        let key = claimable_fee_amount_key(&env, &market, &token);
+        let amount = ds.get_u128(&key);
+        if amount == 0 {
+            panic_with_error!(&env, Error::NothingToClaim);
+        }
+
+        ds.set_u128(&handler, &key, &0u128);
+
+        // Transfer from market_token pool to receiver
+        MarketTokenClient::new(&env, &market)
+            .withdraw_from_pool(&handler, &token, &receiver, &(amount as i128));
+
+        env.events().publish(
+            (symbol_short!("fee_clm"),),
+            (market, token, amount, receiver),
+        );
+        amount
     }
 
-    /// Claim funding fees earned by a position account for a given market + collateral token.
-    ///
-    /// Any user can call this to collect their accrued funding credits.
+    /// Claim funding fees earned by a position account. Anyone can call for their own account.
     pub fn claim_funding_fees(
         env: Env,
         account: Address,
         market: Address,
         token: Address,
     ) -> u128 {
-        // TODO: (mirrors GMX FeeHandler.claimFundingFees)
-        //
-        // 1. account.require_auth()
-        //
-        // 2. Load data_store from instance storage
-        //
-        // 3. key = claimable_funding_amount_key(&env, &market, &token, &account)
-        //    amount = ds.get_u128(key)
-        //    if amount == 0 → return 0 (nothing to claim, not an error)
-        //
-        // 4. Reset to zero:
-        //    ds.set_u128(&env.current_contract_address(), key, 0)
-        //
-        // 5. Transfer `amount` of `token` from market_token contract to account:
-        //    MarketTokenClient::new(&env, &market)
-        //        .withdraw_from_pool(&env.current_contract_address(), &token, &account, amount as i128)
-        //    (fee_handler must hold CONTROLLER role for this to work)
-        //
-        // 6. Emit "funding_fees_claimed" event with { account, market, token, amount }
-        //
-        // Returns amount claimed
-        todo!()
+        account.require_auth();
+
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
+        let ds = DataStoreClient::new(&env, &data_store);
+        let handler = env.current_contract_address();
+
+        let key = claimable_funding_amount_key(&env, &market, &token, &account);
+        let amount = ds.get_u128(&key);
+        if amount == 0 {
+            return 0;
+        }
+
+        ds.set_u128(&handler, &key, &0u128);
+
+        MarketTokenClient::new(&env, &market)
+            .withdraw_from_pool(&handler, &token, &account, &(amount as i128));
+
+        env.events().publish(
+            (symbol_short!("fnd_clm"),),
+            (account, market, token, amount),
+        );
+        amount
     }
 }

@@ -14,19 +14,24 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Vec, token,
+    contract, contracterror, contractimpl, contracttype, panic_with_error,
+    Address, BytesN, Env, Vec, token,
 };
 use gmx_types::OrderType;
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
-const ADMIN_KEY:              &str = "ADMIN";
-const ROLE_STORE_KEY:         &str = "ROLE_STORE";
-const DATA_STORE_KEY:         &str = "DATA_STORE";
-const DEPOSIT_HANDLER_KEY:    &str = "DEP_HANDLER";
-const WITHDRAWAL_HANDLER_KEY: &str = "WD_HANDLER";
-const ORDER_HANDLER_KEY:      &str = "ORD_HANDLER";
-const FEE_HANDLER_KEY:        &str = "FEE_HANDLER";
+#[contracttype]
+enum InstanceKey {
+    Initialized,
+    Admin,
+    RoleStore,
+    DataStore,
+    DepositHandler,
+    WithdrawalHandler,
+    OrderHandler,
+    FeeHandler,
+}
 
 // ─── Per-action param structs ─────────────────────────────────────────────────
 // Soroban #[contracttype] enums do not support named fields — each variant
@@ -39,20 +44,24 @@ pub struct SendTokensParams {
     pub amount:   i128,
 }
 
+/// User-facing params for creating a deposit.
+/// Includes both token addresses (the router does not look them up itself).
 #[contracttype]
 pub struct CreateDepositParams {
-    pub market:             Address,
-    pub receiver:           Address,
-    pub long_token_amount:  i128,
-    pub short_token_amount: i128,
-    pub min_market_tokens:  i128,
-    pub execution_fee:      i128,
+    pub receiver:            Address,
+    pub market:              Address,
+    pub initial_long_token:  Address,
+    pub initial_short_token: Address,
+    pub long_token_amount:   i128,
+    pub short_token_amount:  i128,
+    pub min_market_tokens:   i128,
+    pub execution_fee:       i128,
 }
 
 #[contracttype]
 pub struct CreateWithdrawalParams {
-    pub market:                 Address,
     pub receiver:               Address,
+    pub market:                 Address,
     pub market_token_amount:    i128,
     pub min_long_token_amount:  i128,
     pub min_short_token_amount: i128,
@@ -61,8 +70,8 @@ pub struct CreateWithdrawalParams {
 
 #[contracttype]
 pub struct CreateOrderParams {
-    pub market:                   Address,
     pub receiver:                 Address,
+    pub market:                   Address,
     pub initial_collateral_token: Address,
     pub swap_path:                Vec<Address>,
     pub size_delta_usd:           i128,
@@ -109,6 +118,8 @@ pub enum RouterAction {
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
 #[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
 pub enum Error {
     AlreadyInitialized = 1,
     NotInitialized     = 2,
@@ -116,24 +127,44 @@ pub enum Error {
 }
 
 // ─── External handler clients ─────────────────────────────────────────────────
+// Signatures must match the handler contract's public functions exactly.
 
 #[soroban_sdk::contractclient(name = "DepositHandlerClient")]
 trait IDepositHandler {
-    fn create_deposit(env: Env, caller: Address, params: gmx_types::DepositProps) -> BytesN<32>;
+    fn create_deposit(
+        env: Env,
+        caller: Address,
+        params: deposit_handler::CreateDepositParams,
+    ) -> BytesN<32>;
     fn cancel_deposit(env: Env, caller: Address, key: BytesN<32>);
 }
 
 #[soroban_sdk::contractclient(name = "WithdrawalHandlerClient")]
 trait IWithdrawalHandler {
-    fn create_withdrawal(env: Env, caller: Address, params: gmx_types::WithdrawalProps) -> BytesN<32>;
+    fn create_withdrawal(
+        env: Env,
+        caller: Address,
+        params: withdrawal_handler::CreateWithdrawalParams,
+    ) -> BytesN<32>;
     fn cancel_withdrawal(env: Env, caller: Address, key: BytesN<32>);
 }
 
 #[soroban_sdk::contractclient(name = "OrderHandlerClient")]
 trait IOrderHandler {
-    fn create_order(env: Env, caller: Address, params: gmx_types::OrderProps) -> BytesN<32>;
-    fn update_order(env: Env, caller: Address, key: BytesN<32>, size_delta_usd: i128,
-                    acceptable_price: i128, trigger_price: i128, min_output_amount: i128);
+    fn create_order(
+        env: Env,
+        caller: Address,
+        params: order_handler::CreateOrderParams,
+    ) -> BytesN<32>;
+    fn update_order(
+        env: Env,
+        caller: Address,
+        key: BytesN<32>,
+        size_delta_usd: i128,
+        acceptable_price: i128,
+        trigger_price: i128,
+        min_output_amount: i128,
+    );
     fn cancel_order(env: Env, caller: Address, key: BytesN<32>);
 }
 
@@ -160,9 +191,18 @@ impl ExchangeRouter {
         order_handler: Address,
         fee_handler: Address,
     ) {
-        // TODO: panic if already initialized (ADMIN_KEY exists in instance storage)
-        //       Store all seven addresses in instance storage under their respective keys
-        todo!()
+        admin.require_auth();
+        if env.storage().instance().has(&InstanceKey::Initialized) {
+            panic_with_error!(&env, Error::AlreadyInitialized);
+        }
+        env.storage().instance().set(&InstanceKey::Initialized, &true);
+        env.storage().instance().set(&InstanceKey::Admin, &admin);
+        env.storage().instance().set(&InstanceKey::RoleStore, &role_store);
+        env.storage().instance().set(&InstanceKey::DataStore, &data_store);
+        env.storage().instance().set(&InstanceKey::DepositHandler, &deposit_handler);
+        env.storage().instance().set(&InstanceKey::WithdrawalHandler, &withdrawal_handler);
+        env.storage().instance().set(&InstanceKey::OrderHandler, &order_handler);
+        env.storage().instance().set(&InstanceKey::FeeHandler, &fee_handler);
     }
 
     // ── Multicall ─────────────────────────────────────────────────────────────
@@ -173,127 +213,189 @@ impl ExchangeRouter {
     /// Returns one BytesN<32> result per action (create_* returns a key; others return zero hash).
     /// If any action panics, the entire transaction reverts (Soroban atomicity).
     pub fn multicall(env: Env, caller: Address, actions: Vec<RouterAction>) -> Vec<BytesN<32>> {
-        // TODO: (mirrors GMX ExchangeRouter.multicall)
-        //
-        // 1. caller.require_auth()
-        //
-        // 2. let mut results: Vec<BytesN<32>> = Vec::new(&env);
-        //    let zero_key = BytesN::from_array(&env, &[0u8; 32]);
-        //
-        // 3. for action in actions.iter() {
-        //        match action {
-        //            RouterAction::SendTokens(p) =>
-        //                token::Client::new(&env, &p.token)
-        //                    .transfer(&caller, &p.receiver, &p.amount);
-        //                results.push_back(zero_key.clone());
-        //
-        //            RouterAction::CreateDeposit(p) =>
-        //                let key = Self::create_deposit(env, caller.clone(), p);
-        //                results.push_back(key);
-        //
-        //            RouterAction::CancelDeposit(key) =>
-        //                Self::cancel_deposit(env, caller.clone(), key);
-        //                results.push_back(zero_key.clone());
-        //
-        //            RouterAction::CreateWithdrawal(p) => ...
-        //            RouterAction::CancelWithdrawal(key) => ...
-        //            RouterAction::CreateOrder(p) => ...
-        //            RouterAction::UpdateOrder(p) => ...
-        //            RouterAction::CancelOrder(key) => ...
-        //            RouterAction::ClaimFundingFees(p) =>
-        //                Self::claim_funding_fees(env, caller.clone(), p.markets, p.tokens);
-        //                results.push_back(zero_key.clone());
-        //        }
-        //    }
-        //
-        // 4. Return results
-        todo!()
+        caller.require_auth();
+
+        let mut results: Vec<BytesN<32>> = Vec::new(&env);
+        let zero_key = BytesN::from_array(&env, &[0u8; 32]);
+
+        let len = actions.len();
+        let mut i = 0u32;
+        while i < len {
+            let action = actions.get(i).unwrap();
+            match action {
+                RouterAction::SendTokens(p) => {
+                    token::Client::new(&env, &p.token)
+                        .transfer(&caller, &p.receiver, &p.amount);
+                    results.push_back(zero_key.clone());
+                }
+                RouterAction::CreateDeposit(p) => {
+                    let key = Self::create_deposit(env.clone(), caller.clone(), p);
+                    results.push_back(key);
+                }
+                RouterAction::CancelDeposit(key) => {
+                    Self::cancel_deposit(env.clone(), caller.clone(), key);
+                    results.push_back(zero_key.clone());
+                }
+                RouterAction::CreateWithdrawal(p) => {
+                    let key = Self::create_withdrawal(env.clone(), caller.clone(), p);
+                    results.push_back(key);
+                }
+                RouterAction::CancelWithdrawal(key) => {
+                    Self::cancel_withdrawal(env.clone(), caller.clone(), key);
+                    results.push_back(zero_key.clone());
+                }
+                RouterAction::CreateOrder(p) => {
+                    let key = Self::create_order(env.clone(), caller.clone(), p);
+                    results.push_back(key);
+                }
+                RouterAction::UpdateOrder(p) => {
+                    Self::update_order(env.clone(), caller.clone(), p);
+                    results.push_back(zero_key.clone());
+                }
+                RouterAction::CancelOrder(key) => {
+                    Self::cancel_order(env.clone(), caller.clone(), key);
+                    results.push_back(zero_key.clone());
+                }
+                RouterAction::ClaimFundingFees(p) => {
+                    Self::claim_funding_fees(env.clone(), caller.clone(), p.markets, p.tokens);
+                    results.push_back(zero_key.clone());
+                }
+            }
+            i += 1;
+        }
+
+        results
     }
 
     // ── Individual action helpers ─────────────────────────────────────────────
 
     /// Transfer `amount` of `token` from caller to `receiver` (funds a vault).
     pub fn send_tokens(env: Env, caller: Address, token: Address, receiver: Address, amount: i128) {
-        // TODO:
-        // 1. caller.require_auth()
-        // 2. token::Client::new(&env, &token).transfer(&caller, &receiver, &amount)
-        todo!()
+        caller.require_auth();
+        token::Client::new(&env, &token).transfer(&caller, &receiver, &amount);
     }
 
     /// Forward create_deposit to the deposit_handler.
     pub fn create_deposit(env: Env, caller: Address, params: CreateDepositParams) -> BytesN<32> {
-        // TODO:
-        // 1. caller.require_auth()
-        // 2. Load deposit_handler address from instance storage
-        // 3. Build DepositProps and call:
-        //    DepositHandlerClient::new(&env, &deposit_handler).create_deposit(&caller, &props)
-        // Returns the deposit key
-        todo!()
+        caller.require_auth();
+        let deposit_handler: Address = env.storage().instance()
+            .get(&InstanceKey::DepositHandler).unwrap();
+        DepositHandlerClient::new(&env, &deposit_handler).create_deposit(
+            &caller,
+            &deposit_handler::CreateDepositParams {
+                receiver:            params.receiver,
+                market:              params.market,
+                initial_long_token:  params.initial_long_token,
+                initial_short_token: params.initial_short_token,
+                long_token_amount:   params.long_token_amount,
+                short_token_amount:  params.short_token_amount,
+                min_market_tokens:   params.min_market_tokens,
+                execution_fee:       params.execution_fee,
+            },
+        )
     }
 
     /// Forward cancel_deposit to the deposit_handler.
     pub fn cancel_deposit(env: Env, caller: Address, key: BytesN<32>) {
-        // TODO:
-        // 1. caller.require_auth()
-        // 2. DepositHandlerClient::new(&env, &deposit_handler).cancel_deposit(&caller, &key)
-        todo!()
+        caller.require_auth();
+        let deposit_handler: Address = env.storage().instance()
+            .get(&InstanceKey::DepositHandler).unwrap();
+        DepositHandlerClient::new(&env, &deposit_handler).cancel_deposit(&caller, &key);
     }
 
     /// Forward create_withdrawal to the withdrawal_handler.
     pub fn create_withdrawal(env: Env, caller: Address, params: CreateWithdrawalParams) -> BytesN<32> {
-        // TODO:
-        // 1. caller.require_auth()
-        // 2. Build WithdrawalProps and forward to withdrawal_handler
-        // Returns the withdrawal key
-        todo!()
+        caller.require_auth();
+        let withdrawal_handler: Address = env.storage().instance()
+            .get(&InstanceKey::WithdrawalHandler).unwrap();
+        WithdrawalHandlerClient::new(&env, &withdrawal_handler).create_withdrawal(
+            &caller,
+            &withdrawal_handler::CreateWithdrawalParams {
+                receiver:               params.receiver,
+                market:                 params.market,
+                market_token_amount:    params.market_token_amount,
+                min_long_token_amount:  params.min_long_token_amount,
+                min_short_token_amount: params.min_short_token_amount,
+                execution_fee:          params.execution_fee,
+            },
+        )
     }
 
     /// Forward cancel_withdrawal to the withdrawal_handler.
     pub fn cancel_withdrawal(env: Env, caller: Address, key: BytesN<32>) {
-        // TODO:
-        // 1. caller.require_auth()
-        // 2. WithdrawalHandlerClient::new(&env, &withdrawal_handler).cancel_withdrawal(&caller, &key)
-        todo!()
+        caller.require_auth();
+        let withdrawal_handler: Address = env.storage().instance()
+            .get(&InstanceKey::WithdrawalHandler).unwrap();
+        WithdrawalHandlerClient::new(&env, &withdrawal_handler).cancel_withdrawal(&caller, &key);
     }
 
     /// Forward create_order to the order_handler.
     pub fn create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32> {
-        // TODO:
-        // 1. caller.require_auth()
-        // 2. Build OrderProps from params and forward to order_handler
-        // Returns the order key
-        todo!()
+        caller.require_auth();
+        let order_handler: Address = env.storage().instance()
+            .get(&InstanceKey::OrderHandler).unwrap();
+        OrderHandlerClient::new(&env, &order_handler).create_order(
+            &caller,
+            &order_handler::CreateOrderParams {
+                receiver:                 params.receiver,
+                market:                   params.market,
+                initial_collateral_token: params.initial_collateral_token,
+                swap_path:                params.swap_path,
+                size_delta_usd:           params.size_delta_usd,
+                collateral_delta_amount:  params.collateral_delta_amount,
+                trigger_price:            params.trigger_price,
+                acceptable_price:         params.acceptable_price,
+                execution_fee:            params.execution_fee,
+                min_output_amount:        params.min_output_amount,
+                order_type:               params.order_type,
+                is_long:                  params.is_long,
+            },
+        )
     }
 
     /// Forward update_order to the order_handler.
     pub fn update_order(env: Env, caller: Address, params: UpdateOrderParams) {
-        // TODO:
-        // 1. caller.require_auth()
-        // 2. OrderHandlerClient::new(&env, &order_handler)
-        //        .update_order(&caller, &params.key, params.size_delta_usd,
-        //                      params.acceptable_price, params.trigger_price,
-        //                      params.min_output_amount)
-        todo!()
+        caller.require_auth();
+        let order_handler: Address = env.storage().instance()
+            .get(&InstanceKey::OrderHandler).unwrap();
+        OrderHandlerClient::new(&env, &order_handler).update_order(
+            &caller,
+            &params.key,
+            &params.size_delta_usd,
+            &params.acceptable_price,
+            &params.trigger_price,
+            &params.min_output_amount,
+        );
     }
 
     /// Forward cancel_order to the order_handler.
     pub fn cancel_order(env: Env, caller: Address, key: BytesN<32>) {
-        // TODO:
-        // 1. caller.require_auth()
-        // 2. OrderHandlerClient::new(&env, &order_handler).cancel_order(&caller, &key)
-        todo!()
+        caller.require_auth();
+        let order_handler: Address = env.storage().instance()
+            .get(&InstanceKey::OrderHandler).unwrap();
+        OrderHandlerClient::new(&env, &order_handler).cancel_order(&caller, &key);
     }
 
     /// Claim earned funding fees across multiple markets in one call.
-    pub fn claim_funding_fees(env: Env, caller: Address, markets: Vec<Address>, tokens: Vec<Address>) {
-        // TODO:
-        // 1. caller.require_auth()
-        // 2. Load fee_handler from instance storage
-        // 3. Iterate: for i in 0..markets.len() {
-        //        FeeHandlerClient::new(&env, &fee_handler)
-        //            .claim_funding_fees(&caller, &markets.get(i).unwrap(),
-        //                                &tokens.get(i).unwrap());
-        //    }
-        todo!()
+    pub fn claim_funding_fees(
+        env: Env,
+        caller: Address,
+        markets: Vec<Address>,
+        tokens: Vec<Address>,
+    ) {
+        caller.require_auth();
+        let fee_handler: Address = env.storage().instance()
+            .get(&InstanceKey::FeeHandler).unwrap();
+        let fee_client = FeeHandlerClient::new(&env, &fee_handler);
+        let len = markets.len();
+        let mut i = 0u32;
+        while i < len {
+            fee_client.claim_funding_fees(
+                &caller,
+                &markets.get(i).unwrap(),
+                &tokens.get(i).unwrap(),
+            );
+            i += 1;
+        }
     }
 }
