@@ -5,6 +5,7 @@
 //! Delegates actual position closure to order_handler since positions live there.
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
+#![allow(deprecated)]
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error,
@@ -15,7 +16,7 @@ use gmx_math::{FLOAT_PRECISION, mul_div_wide};
 use gmx_keys::{
     roles,
     market_index_token_key, market_long_token_key, market_short_token_key,
-    max_pnl_factor_key, max_pnl_factor_for_adl_key,
+    max_pnl_factor_for_adl_key,
     position_key,
 };
 use gmx_market_utils::{get_pool_value, get_pnl};
@@ -47,22 +48,26 @@ pub enum Error {
 
 // ─── External clients ─────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "RoleStoreClient")]
 trait IRoleStore {
     fn has_role(env: Env, account: Address, role: BytesN<32>) -> bool;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "OracleClient")]
 trait IOracle {
     fn get_primary_price(env: Env, token: Address) -> PriceProps;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "OrderHandlerClient")]
 trait IOrderHandler {
     fn execute_adl(

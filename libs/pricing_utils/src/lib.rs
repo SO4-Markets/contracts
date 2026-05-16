@@ -24,6 +24,7 @@ use gmx_market_utils::{
     get_swap_impact_pool_amount, get_position_impact_pool_amount,
 };
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
@@ -68,9 +69,7 @@ fn compute_impact_usd(
 
 // ─── Swap price impact ────────────────────────────────────────────────────────
 
-/// Compute price impact USD for a swap of `amount_in` of `token_in` → `token_out`.
-///
-/// Returns signed impact_usd (positive = good for user; negative = bad for user).
+#[allow(clippy::too_many_arguments)]
 pub fn get_swap_price_impact(
     env: &Env,
     data_store: &Address,
@@ -135,9 +134,7 @@ pub fn apply_swap_impact_value(
 
 // ─── Swap output amount ───────────────────────────────────────────────────────
 
-/// Compute the net output amount of `token_out` for a swap, after fees and impact.
-///
-/// Returns (net_output_amount, fee_amount) both in token_out raw units.
+#[allow(clippy::too_many_arguments)]
 pub fn get_swap_output_amount(
     env: &Env,
     data_store: &Address,

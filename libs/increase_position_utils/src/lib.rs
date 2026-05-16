@@ -11,10 +11,11 @@
 //!   7. Persist updated position.
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
+#![allow(deprecated)]
 
 use soroban_sdk::{contracttype, Address, BytesN, Env};
 use gmx_types::{MarketProps, PositionProps, PriceProps};
-use gmx_math::{FLOAT_PRECISION, TOKEN_PRECISION, mul_div_wide};
+use gmx_math::{TOKEN_PRECISION, mul_div_wide};
 use gmx_keys::{
     position_key, position_list_key, account_position_list_key,
     cumulative_borrowing_factor_key, funding_amount_per_size_key,
@@ -28,6 +29,7 @@ use gmx_market_utils::{
 use gmx_position_utils::{get_position_fees, validate_position, settle_funding_fees};
 use gmx_pricing_utils::{get_position_price_impact, get_execution_price, apply_position_impact_value};
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;

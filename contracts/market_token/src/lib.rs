@@ -4,6 +4,7 @@
 //! by `market_factory`. Mint and burn are gated to CONTROLLER role (held by
 //! deposit_handler / withdrawal_handler). All other SEP-41 methods are public.
 #![no_std]
+#![allow(deprecated)]
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, contracterror, panic_with_error,
@@ -53,6 +54,7 @@ struct AllowanceData {
 
 // ─── Role store cross-contract ────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "RoleStoreClient")]
 trait IRoleStore {
     fn has_role(env: Env, account: Address, role: BytesN<32>) -> bool;

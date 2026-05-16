@@ -6,6 +6,7 @@
 //! stored in order_handler's persistent storage.
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
+#![allow(deprecated)]
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error,
@@ -44,23 +45,26 @@ pub enum Error {
 
 // ─── External clients ─────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "RoleStoreClient")]
 trait IRoleStore {
     fn has_role(env: Env, account: Address, role: BytesN<32>) -> bool;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "OracleClient")]
 trait IOracle {
     fn get_primary_price(env: Env, token: Address) -> PriceProps;
 }
 
-/// Minimal interface to order_handler for position storage access.
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "OrderHandlerClient")]
 trait IOrderHandler {
     fn liquidate_position(

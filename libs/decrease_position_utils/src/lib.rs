@@ -13,10 +13,11 @@
 //!   9. Transfer output tokens to receiver.
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
+#![allow(deprecated)]
 
 use soroban_sdk::{contracttype, Address, BytesN, Env};
 use gmx_types::{MarketProps, PositionProps, PriceProps, DecreasePositionResult};
-use gmx_math::{FLOAT_PRECISION, TOKEN_PRECISION, mul_div_wide};
+use gmx_math::{TOKEN_PRECISION, mul_div_wide};
 use gmx_keys::{
     position_key, position_list_key, account_position_list_key,
     cumulative_borrowing_factor_key, funding_amount_per_size_key,
@@ -34,6 +35,7 @@ use gmx_pricing_utils::{
     get_position_price_impact, get_execution_price, apply_position_impact_value,
 };
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
@@ -45,6 +47,7 @@ trait IDataStore {
     fn remove_bytes32_from_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "MarketTokenClient")]
 trait IMarketToken {
     fn withdraw_from_pool(env: Env, caller: Address, pool_token: Address, receiver: Address, amount: i128);

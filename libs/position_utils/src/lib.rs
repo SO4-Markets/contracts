@@ -19,6 +19,7 @@ use gmx_market_utils::validate_open_interest;
 
 // ─── Data-store client (same minimal interface used across libs) ───────────────
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;

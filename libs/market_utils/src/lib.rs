@@ -32,6 +32,7 @@ pub enum Error {
 
 // ─── Data-store client interface ──────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
@@ -387,7 +388,7 @@ pub fn get_pool_value(
     index_token_price: i128,
     maximize: bool,
 ) -> PoolValueInfo {
-    let ds_client = DataStoreClient::new(env, ds);
+    let _ds_client = DataStoreClient::new(env, ds);
 
     let long_pool = get_pool_amount(env, ds, market, &market.long_token) as i128;
     let short_pool = get_pool_amount(env, ds, market, &market.short_token) as i128;
@@ -424,6 +425,7 @@ pub fn get_pool_value(
 
 // ─── Market token price ───────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "MarketTokenClient")]
 trait IMarketToken {
     fn total_supply(env: Env) -> i128;

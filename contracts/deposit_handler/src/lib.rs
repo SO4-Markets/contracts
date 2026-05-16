@@ -13,14 +13,15 @@
 //!   4. On failure or timeout: `cancel_deposit` refunds tokens from vault.
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
+#![allow(deprecated)]
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, contracterror, panic_with_error,
-    symbol_short, token, Address, BytesN, Env, Vec,
+    symbol_short, token, Address, BytesN, Env,
 };
-use gmx_types::{DepositProps, MarketProps, TokenPrice};
+use gmx_types::{DepositProps, MarketProps};
 pub use gmx_types::CreateDepositParams;
-use gmx_math::{mul_div_wide, FLOAT_PRECISION, TOKEN_PRECISION};
+use gmx_math::{mul_div_wide, TOKEN_PRECISION};
 use gmx_keys::{
     roles,
     deposit_key, deposit_list_key, account_deposit_list_key,
@@ -64,11 +65,13 @@ enum LocalKey {
 
 // ─── Cross-contract clients ───────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "RoleStoreClient")]
 trait IRoleStore {
     fn has_role(env: Env, account: Address, role: BytesN<32>) -> bool;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
@@ -85,16 +88,19 @@ trait IDataStore {
     fn increment_nonce(env: Env, caller: Address) -> u64;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "OracleClient")]
 trait IOracle {
     fn get_primary_price(env: Env, token: Address) -> gmx_types::PriceProps;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DepositVaultClient")]
 trait IDepositVault {
     fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128);
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "MarketTokenClient")]
 trait IMarketToken {
     fn mint(env: Env, caller: Address, to: Address, amount: i128);

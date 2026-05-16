@@ -11,7 +11,6 @@
 
 use soroban_sdk::{Address, BytesN, Env, Vec};
 use gmx_types::{MarketProps, PriceProps};
-use gmx_math::TOKEN_PRECISION;
 use gmx_keys::{
     market_long_token_key, market_short_token_key,
     market_index_token_key, max_swap_path_length_key,
@@ -21,6 +20,7 @@ use gmx_pricing_utils::{
     get_swap_output_amount, apply_swap_impact_value, get_swap_price_impact,
 };
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
@@ -28,11 +28,13 @@ trait IDataStore {
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "OracleClient")]
 trait IOracle {
     fn get_primary_price(env: Env, token: Address) -> PriceProps;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "MarketTokenClient")]
 trait IMarketToken {
     fn withdraw_from_pool(env: Env, caller: Address, pool_token: Address, receiver: Address, amount: i128);
@@ -40,10 +42,7 @@ trait IMarketToken {
 
 // ─── Single-hop swap ──────────────────────────────────────────────────────────
 
-/// Execute one swap hop: `token_in → token_out` through a single market.
-///
-/// `amount_in` must already be sitting in the market_token contract (the pool).
-/// Returns (token_out, net_output_amount).
+#[allow(clippy::too_many_arguments)]
 pub fn swap(
     env: &Env,
     data_store: &Address,
@@ -106,10 +105,7 @@ pub fn swap(
 
 // ─── Multi-hop swap ───────────────────────────────────────────────────────────
 
-/// Execute a swap across a path of markets.
-///
-/// `path` is a Vec<Address> of market_token addresses (each is one hop).
-/// Max path length read from data_store (default 3).
+#[allow(clippy::too_many_arguments)]
 pub fn swap_with_path(
     env: &Env,
     data_store: &Address,
@@ -156,7 +152,7 @@ pub fn swap_with_path(
 
         // For non-final hops: output stays in the next pool (tokens don't move to receiver yet).
         // For the final hop: send to receiver.
-        let next_receiver = if (i + 1) as u32 == path_len {
+        let next_receiver = if i + 1 == path_len {
             receiver.clone()
         } else {
             // Output stays in this market's pool for the next hop to read

@@ -10,6 +10,7 @@
 //!   salt = sha256("GMX_MARKET" ‖ index_token ‖ long_token ‖ short_token ‖ market_type)
 //!   LP token address = env.deployer().with_address(factory, salt).deployed_address()
 #![no_std]
+#![allow(deprecated)]
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, contracterror, panic_with_error,
@@ -47,11 +48,13 @@ enum InstanceKey {
 
 // ─── Cross-contract client interfaces ────────────────────────────────────────
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "RoleStoreClient")]
 trait IRoleStore {
     fn has_role(env: Env, account: Address, role: BytesN<32>) -> bool;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_bool(env: Env, key: BytesN<32>) -> bool;
@@ -65,6 +68,7 @@ trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "MarketTokenClient")]
 trait IMarketToken {
     fn initialize(

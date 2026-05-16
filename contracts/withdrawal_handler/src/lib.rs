@@ -13,6 +13,7 @@
 //!   4. On cancel: LP tokens refunded from vault.
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
+#![allow(deprecated)]
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, contracterror, panic_with_error,
@@ -20,12 +21,11 @@ use soroban_sdk::{
 };
 use gmx_types::{WithdrawalProps, MarketProps};
 pub use gmx_types::CreateWithdrawalParams;
-use gmx_math::{mul_div_wide, TOKEN_PRECISION};
+use gmx_math::mul_div_wide;
 use gmx_keys::{
     roles,
     withdrawal_key, withdrawal_list_key, account_withdrawal_list_key,
     market_index_token_key, market_long_token_key, market_short_token_key,
-    pool_amount_key,
 };
 use gmx_market_utils::{
     get_pool_amount, apply_delta_to_pool_amount,
@@ -65,11 +65,13 @@ enum LocalKey {
 
 // ─── Cross-contract clients ───────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "RoleStoreClient")]
 trait IRoleStore {
     fn has_role(env: Env, account: Address, role: BytesN<32>) -> bool;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
@@ -84,16 +86,19 @@ trait IDataStore {
     fn increment_nonce(env: Env, caller: Address) -> u64;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "OracleClient")]
 trait IOracle {
     fn get_primary_price(env: Env, token: Address) -> gmx_types::PriceProps;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "WithdrawalVaultClient")]
 trait IWithdrawalVault {
     fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128);
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "MarketTokenClient")]
 trait IMarketToken {
     fn burn(env: Env, from: Address, amount: i128);
@@ -193,9 +198,9 @@ impl WithdrawalHandler {
 
         // Read oracle prices
         let oracle_client = OracleClient::new(&env, &oracle);
-        let long_price  = oracle_client.get_primary_price(&market.long_token).mid_price();
-        let short_price = oracle_client.get_primary_price(&market.short_token).mid_price();
-        let index_price = oracle_client.get_primary_price(&market.index_token).mid_price();
+        let long_price   = oracle_client.get_primary_price(&market.long_token).mid_price();
+        let short_price  = oracle_client.get_primary_price(&market.short_token).mid_price();
+        let _index_price = oracle_client.get_primary_price(&market.index_token).mid_price();
 
         let mt_client = MarketTokenClient::new(&env, &market.market_token);
         let total_supply = mt_client.total_supply();

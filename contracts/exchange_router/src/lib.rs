@@ -90,18 +90,21 @@ pub enum Error {
 // ─── External handler clients ─────────────────────────────────────────────────
 // Signatures must match the handler contract's public functions exactly.
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DepositHandlerClient")]
 trait IDepositHandler {
     fn create_deposit(env: Env, caller: Address, params: CreateDepositParams) -> BytesN<32>;
     fn cancel_deposit(env: Env, caller: Address, key: BytesN<32>);
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "WithdrawalHandlerClient")]
 trait IWithdrawalHandler {
     fn create_withdrawal(env: Env, caller: Address, params: CreateWithdrawalParams) -> BytesN<32>;
     fn cancel_withdrawal(env: Env, caller: Address, key: BytesN<32>);
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "OrderHandlerClient")]
 trait IOrderHandler {
     fn create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32>;
@@ -117,6 +120,7 @@ trait IOrderHandler {
     fn cancel_order(env: Env, caller: Address, key: BytesN<32>);
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "FeeHandlerClient")]
 trait IFeeHandler {
     fn claim_funding_fees(env: Env, account: Address, market: Address, token: Address) -> u128;
@@ -130,6 +134,7 @@ pub struct ExchangeRouter;
 #[contractimpl]
 impl ExchangeRouter {
     /// One-time setup — store all handler addresses.
+    #[allow(clippy::too_many_arguments)]
     pub fn initialize(
         env: Env,
         admin: Address,

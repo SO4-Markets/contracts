@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, contracterror, panic_with_error,
+    contract, contractevent, contractimpl, contracttype, contracterror, panic_with_error,
     BytesN, Env, Address, Vec,
 };
 use gmx_keys::roles;
@@ -44,9 +44,18 @@ enum DataKey {
 
 // ─── Cross-contract role check interface ─────────────────────────────────────
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "RoleStoreClient")]
 trait IRoleStore {
     fn has_role(env: Env, account: Address, role: BytesN<32>) -> bool;
+}
+
+// ─── Events ───────────────────────────────────────────────────────────────────
+
+#[contractevent(topics = ["init"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DataStoreInitialized {
+    pub role_store: Address,
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -66,10 +75,7 @@ impl DataStore {
         }
         env.storage().instance().set(&InstanceKey::Initialized, &true);
         env.storage().instance().set(&InstanceKey::RoleStore, &role_store);
-        env.events().publish(
-            (soroban_sdk::symbol_short!("init"),),
-            (role_store,),
-        );
+        env.events().publish_event(&DataStoreInitialized { role_store });
     }
 
     // ── u128 operations ──────────────────────────────────────────────────────

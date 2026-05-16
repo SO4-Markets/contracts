@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, contracterror, panic_with_error, symbol_short,
+    contract, contractevent, contractimpl, contracttype, contracterror, panic_with_error,
     BytesN, Env, Address, Vec,
 };
 use gmx_keys::roles;
@@ -34,6 +34,29 @@ enum RoleKey {
     Initialized,
 }
 
+// ─── Events ───────────────────────────────────────────────────────────────────
+
+#[contractevent(topics = ["init"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoleStoreInitialized {
+    pub admin:      Address,
+    pub admin_role: BytesN<32>,
+}
+
+#[contractevent(topics = ["grant"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoleGranted {
+    pub account: Address,
+    pub role:    BytesN<32>,
+}
+
+#[contractevent(topics = ["revoke"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoleRevoked {
+    pub account: Address,
+    pub role:    BytesN<32>,
+}
+
 // ─── Contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -52,7 +75,7 @@ impl RoleStore {
         env.storage().instance().set(&RoleKey::Initialized, &true);
         let admin_role = roles::role_admin(&env);
         internal_grant_role(&env, &admin, &admin_role);
-        env.events().publish((symbol_short!("init"),), (admin, admin_role));
+        env.events().publish_event(&RoleStoreInitialized { admin, admin_role });
     }
 
     // ── Public write ─────────────────────────────────────────────────────────
@@ -63,7 +86,7 @@ impl RoleStore {
         require_init(&env);
         require_admin(&env, &caller);
         internal_grant_role(&env, &account, &role);
-        env.events().publish((symbol_short!("grant"),), (account, role));
+        env.events().publish_event(&RoleGranted { account, role });
     }
 
     /// Revoke `role` from `account`. Caller must hold ROLE_ADMIN.
@@ -86,7 +109,7 @@ impl RoleStore {
         }
 
         internal_revoke_role(&env, &account, &role);
-        env.events().publish((symbol_short!("revoke"),), (account, role));
+        env.events().publish_event(&RoleRevoked { account, role });
     }
 
     // ── Public reads ─────────────────────────────────────────────────────────

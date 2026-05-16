@@ -16,6 +16,7 @@
 //!   We use a simple approach: keepers are registered by index (u32), stored directly.
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
+#![allow(deprecated)]
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, contracterror, panic_with_error,
@@ -73,11 +74,13 @@ pub struct SignedPrice {
 
 // ─── Cross-contract clients ───────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "RoleStoreClient")]
 trait IRoleStore {
     fn has_role(env: Env, account: Address, role: BytesN<32>) -> bool;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
@@ -135,7 +138,7 @@ impl Oracle {
 
             // Timestamp must be within 5 minutes of current ledger time
             let now = env.ledger().timestamp();
-            let age = if now > sp.timestamp { now - sp.timestamp } else { 0 };
+            let age = now.saturating_sub(sp.timestamp);
             if age > 300 {
                 panic_with_error!(&env, Error::StalePrice);
             }

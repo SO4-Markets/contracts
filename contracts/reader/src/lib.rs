@@ -14,7 +14,7 @@ use gmx_types::{
     MarketProps, PositionProps, PositionInfo, PositionFees, PriceProps,
     PoolValueInfo, FundingInfo,
 };
-use gmx_math::{FLOAT_PRECISION, TOKEN_PRECISION, mul_div_wide};
+use gmx_math::{TOKEN_PRECISION, mul_div_wide};
 use gmx_keys::{
     market_index_token_key, market_long_token_key, market_short_token_key,
     funding_amount_per_size_key, saved_funding_factor_per_second_key,
@@ -25,6 +25,7 @@ use gmx_pricing_utils::{get_execution_price, get_position_price_impact};
 
 // ─── External clients ─────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
@@ -32,6 +33,7 @@ trait IDataStore {
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "OracleClient")]
 trait IOracle {
     fn get_primary_price(env: Env, token: Address) -> PriceProps;

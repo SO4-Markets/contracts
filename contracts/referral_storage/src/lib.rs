@@ -4,8 +4,8 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error,
-    Address, BytesN, Env, symbol_short,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
+    Address, BytesN, Env,
 };
 
 // ─── Storage key types ────────────────────────────────────────────────────────
@@ -30,6 +30,22 @@ enum InstanceKey {
 pub struct TierConfig {
     pub total_rebate_bps: u32,    // basis points of position fee paid back to referrer
     pub discount_share_bps: u32, // portion of that rebate forwarded to trader as discount
+}
+
+// ─── Events ───────────────────────────────────────────────────────────────────
+
+#[contractevent(topics = ["ref_reg"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodeRegistered {
+    pub caller: Address,
+    pub code:   BytesN<32>,
+}
+
+#[contractevent(topics = ["ref_set"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TraderCodeSet {
+    pub trader: Address,
+    pub code:   BytesN<32>,
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -69,7 +85,7 @@ impl ReferralStorage {
             panic_with_error!(&env, Error::CodeAlreadyTaken);
         }
         env.storage().persistent().set(&key, &caller);
-        env.events().publish((symbol_short!("ref_reg"),), (caller, code));
+        env.events().publish_event(&CodeRegistered { caller, code });
     }
 
     /// Set the referral code for a trader (links them to a referrer).
@@ -80,7 +96,7 @@ impl ReferralStorage {
             panic_with_error!(&env, Error::CodeNotFound);
         }
         env.storage().persistent().set(&ReferralKey::TraderCode(trader.clone()), &code);
-        env.events().publish((symbol_short!("ref_set"),), (trader, code));
+        env.events().publish_event(&TraderCodeSet { trader, code });
     }
 
     /// Look up the referral code for a trader, and return the referrer's address.

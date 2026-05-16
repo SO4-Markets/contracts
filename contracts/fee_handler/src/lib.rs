@@ -4,8 +4,8 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error,
-    Address, BytesN, Env, symbol_short,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
+    Address, BytesN, Env,
 };
 use gmx_keys::{
     roles,
@@ -35,11 +35,13 @@ pub enum Error {
 
 // ─── External clients ─────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "RoleStoreClient")]
 trait IRoleStore {
     fn has_role(env: Env, account: Address, role: BytesN<32>) -> bool;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
@@ -47,9 +49,30 @@ trait IDataStore {
     fn apply_delta_to_u128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> u128;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "MarketTokenClient")]
 trait IMarketToken {
     fn withdraw_from_pool(env: Env, caller: Address, pool_token: Address, receiver: Address, amount: i128);
+}
+
+// ─── Events ───────────────────────────────────────────────────────────────────
+
+#[contractevent(topics = ["fee_clm"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeClaimed {
+    pub market:   Address,
+    pub token:    Address,
+    pub amount:   u128,
+    pub receiver: Address,
+}
+
+#[contractevent(topics = ["fnd_clm"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FundingFeeClaimed {
+    pub account: Address,
+    pub market:  Address,
+    pub token:   Address,
+    pub amount:  u128,
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -108,10 +131,7 @@ impl FeeHandler {
         MarketTokenClient::new(&env, &market)
             .withdraw_from_pool(&handler, &token, &receiver, &(amount as i128));
 
-        env.events().publish(
-            (symbol_short!("fee_clm"),),
-            (market, token, amount, receiver),
-        );
+        env.events().publish_event(&FeeClaimed { market, token, amount, receiver });
         amount
     }
 
@@ -139,10 +159,7 @@ impl FeeHandler {
         MarketTokenClient::new(&env, &market)
             .withdraw_from_pool(&handler, &token, &account, &(amount as i128));
 
-        env.events().publish(
-            (symbol_short!("fnd_clm"),),
-            (account, market, token, amount),
-        );
+        env.events().publish_event(&FundingFeeClaimed { account, market, token, amount });
         amount
     }
 }

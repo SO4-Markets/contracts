@@ -15,10 +15,11 @@
 //!   freeze_order  → mark order as frozen (keeper-side circuit breaker)
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
+#![allow(deprecated)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Vec,
-    symbol_short, panic_with_error, token,
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env,
+    symbol_short, panic_with_error,
 };
 use gmx_types::{MarketProps, OrderProps, OrderType, PriceProps};
 pub use gmx_types::CreateOrderParams;
@@ -30,7 +31,6 @@ use gmx_keys::{
 use gmx_increase_position_utils::{IncreasePositionParams, increase_position};
 use gmx_decrease_position_utils::{DecreasePositionParams, decrease_position};
 use gmx_swap_utils::swap_with_path;
-use gmx_position_utils::is_liquidatable;
 use gmx_types::PositionProps;
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
@@ -64,11 +64,13 @@ pub enum Error {
 
 // ─── External contract clients ────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "RoleStoreClient")]
 trait IRoleStore {
     fn has_role(env: Env, account: Address, role: BytesN<32>) -> bool;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
@@ -78,11 +80,13 @@ trait IDataStore {
     fn remove_bytes32_from_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "OracleClient")]
 trait IOracle {
     fn get_primary_price(env: Env, token: Address) -> PriceProps;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "OrderVaultClient")]
 trait IOrderVault {
     fn record_transfer_in(env: Env, token: Address) -> i128;
@@ -226,23 +230,14 @@ impl OrderHandler {
 
         // Trigger price checks for non-market orders
         match order.order_type {
-            OrderType::LimitIncrease => {
-                // Enter at or below trigger price
-                if index_price.min > order.trigger_price {
-                    panic_with_error!(&env, Error::UnsatisfiedTrigger);
-                }
+            OrderType::LimitIncrease if index_price.min > order.trigger_price => {
+                panic_with_error!(&env, Error::UnsatisfiedTrigger);
             }
-            OrderType::LimitDecrease => {
-                // Exit at or above trigger price
-                if index_price.max < order.trigger_price {
-                    panic_with_error!(&env, Error::UnsatisfiedTrigger);
-                }
+            OrderType::LimitDecrease if index_price.max < order.trigger_price => {
+                panic_with_error!(&env, Error::UnsatisfiedTrigger);
             }
-            OrderType::StopLossDecrease => {
-                // Exit if price drops to/below trigger
-                if index_price.min > order.trigger_price {
-                    panic_with_error!(&env, Error::UnsatisfiedTrigger);
-                }
+            OrderType::StopLossDecrease if index_price.min > order.trigger_price => {
+                panic_with_error!(&env, Error::UnsatisfiedTrigger);
             }
             _ => {}
         }

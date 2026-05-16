@@ -1,7 +1,7 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use soroban_sdk::{contracttype, Address, BytesN, Vec};
+use soroban_sdk::{contracttype, Address, Vec};
 
 // ─── Price ───────────────────────────────────────────────────────────────────
 
