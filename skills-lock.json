@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "soroban": {
+      "source": "stellar/stellar-dev-skill",
+      "sourceType": "github",
+      "skillPath": "skills/soroban/SKILL.md",
+      "computedHash": "8f4aecc6a11e4b81a855484bc0b29ec5ee23a40bb2619156bd3fb0ae56296abe"
+    },
+    "standards": {
+      "source": "stellar/stellar-dev-skill",
+      "sourceType": "github",
+      "skillPath": "skills/standards/SKILL.md",
+      "computedHash": "79fd770f36299e1ddb2f4d8ffc49bb56af1fe9b274a3e01853fdc069a47166f7"
+    }
+  }
+}

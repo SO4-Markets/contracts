@@ -119,192 +119,457 @@ liquidatable when: remaining < min_collateral_factor × position_size_usd
 
 ## Prerequisites
 
-**Rust** with the `wasm32-unknown-unknown` target:
+### 1. Rust toolchain
+
 ```bash
+# Install Rust (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Add the wasm target (required for Soroban contract compilation)
 rustup target add wasm32-unknown-unknown
 ```
 
-**Stellar CLI:**
+### 2. Stellar CLI
+
 ```bash
+# Install from crates.io with wasm optimiser enabled
 cargo install --locked stellar-cli --features opt
+
+# Verify
+stellar --version
 ```
 
-**A funded Stellar account** (testnet):
+### 3. Docker (optional — required for local node)
+
+[Install Docker Desktop](https://docs.docker.com/get-docker/) if you want to run a fully local Stellar node instead of using testnet.
+
+---
+
+## Keys & Identity
+
+Every transaction on Stellar must be signed by a key pair. The CLI manages keys in a local keystore (`~/.config/stellar/identity/`).
+
+### Generate a new key pair
+
 ```bash
+# Generate and store a key named "alice" globally (persists across projects)
 stellar keys generate --global alice --network testnet
+
+# Print the public address for "alice"
+stellar keys address alice
+
+# Print the secret key (keep this safe — do not commit it)
+stellar keys show alice
+```
+
+### Import an existing secret key
+
+```bash
+stellar keys add alice --secret-key
+# You will be prompted to paste the secret key (starts with S...)
+```
+
+### List all stored keys
+
+```bash
+stellar keys ls
+```
+
+### Fund a key on testnet (Friendbot airdrop)
+
+```bash
+# Requests 10,000 XLM from the testnet Friendbot faucet
 stellar keys fund alice --network testnet
+
+# Verify the balance
+stellar contract invoke \
+  --id CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC \
+  --source alice --network testnet \
+  -- balance --id $(stellar keys address alice)
+```
+
+### Configure the network shorthand (optional)
+
+```bash
+# "testnet" is pre-configured. To add a custom RPC:
+stellar network add localnet \
+  --rpc-url http://localhost:8000/soroban/rpc \
+  --network-passphrase "Standalone Network ; February 2017"
 ```
 
 ---
 
 ## Build
 
-### Type-check only (fastest, no wasm output)
+### Type-check only (fastest — no wasm output)
+
 ```bash
-cargo check
+cargo check --workspace
+```
+
+### Lint with Clippy
+
+```bash
+cargo clippy --workspace -- -D warnings
 ```
 
 ### Build all contracts to wasm
+
 ```bash
 stellar contract build
 ```
+
 Output: `target/wasm32-unknown-unknown/release/<contract_name>.wasm`
 
+> The `stellar contract build` command compiles every `cdylib` crate in the workspace automatically.
+
 ### Build a single contract
+
 ```bash
 stellar contract build --package data-store
+stellar contract build --package role-store
 stellar contract build --package oracle
+stellar contract build --package market-factory
+stellar contract build --package deposit-handler
+stellar contract build --package withdrawal-handler
 stellar contract build --package order-handler
+stellar contract build --package liquidation-handler
+stellar contract build --package adl-handler
+stellar contract build --package fee-handler
+stellar contract build --package referral-storage
+stellar contract build --package reader
 stellar contract build --package exchange-router
 ```
 
 ### Optimised release build
+
 ```bash
+# Adds wasm-opt shrinking pass — use this before uploading to mainnet
 stellar contract build --release
+```
+
+### Inspect a compiled wasm
+
+```bash
+# Print all exported function names
+stellar contract inspect \
+  --wasm target/wasm32-unknown-unknown/release/order_handler.wasm
 ```
 
 ---
 
 ## Test
 
+All tests run inside the Soroban sandbox (no network required). The SDK provides a full mock host environment with storage, auth, and events.
+
 ### Run the full test suite
+
 ```bash
 cargo test --workspace
 ```
 
 ### Test a specific crate
+
 ```bash
-cargo test -p gmx-market-utils
+# Shared libraries
 cargo test -p gmx-math
-cargo test -p oracle
+cargo test -p gmx-keys
+cargo test -p gmx-market-utils
+cargo test -p gmx-position-utils
+cargo test -p gmx-pricing-utils
+cargo test -p gmx-swap-utils
+
+# Core contracts
 cargo test -p data-store
 cargo test -p role-store
+cargo test -p oracle
+
+# Handler contracts
+cargo test -p deposit-handler
+cargo test -p withdrawal-handler
+cargo test -p order-handler
 ```
 
 ### Run a single test by name
+
 ```bash
 cargo test -p gmx-market-utils apply_delta_to_pool_amount_works
 cargo test -p oracle set_and_get_price
+cargo test -p deposit-handler create_and_execute_deposit
 ```
 
-### Show test output (disable capture)
+### Show test output (disable output capture)
+
 ```bash
 cargo test --workspace -- --nocapture
 ```
+
+### Run tests with a filter pattern
+
+```bash
+# All tests whose name contains "deposit"
+cargo test --workspace deposit
+```
+
+### Check test coverage (requires cargo-llvm-cov)
+
+```bash
+cargo install cargo-llvm-cov
+cargo llvm-cov --workspace --open
+```
+
+---
+
+## Local Node
+
+For end-to-end integration testing without using public testnet.
+
+### Start a local Stellar node
+
+```bash
+stellar network start local
+```
+
+This starts a Docker container with a local Stellar + Soroban node on `http://localhost:8000`.
+
+### Generate and fund a local key
+
+```bash
+stellar keys generate --global dev --network local
+stellar keys fund dev --network local
+```
+
+### Stop the local node
+
+```bash
+stellar network stop local
+```
+
+All state is ephemeral — restarting clears everything.
 
 ---
 
 ## Deploy to Testnet
 
-Contracts must be deployed in dependency order. Complete sequence below.
+Contracts must be deployed in dependency order: stores first, then handlers that depend on them, then the router last. The sequence below captures the full stack.
 
-### Step 1 — Build
+### Step 1 — Build wasm blobs
+
 ```bash
 stellar contract build
 ```
 
 ### Step 2 — Upload wasm blobs
 
-Each upload returns a `WASM_HASH`. Record each one.
+Each `upload` uploads bytecode and returns a `WASM_HASH`. Record each one — the hash is stable as long as the code doesn't change, so you only need to re-upload after rebuilding.
 
 ```bash
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/role_store.wasm        --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/data_store.wasm        --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/oracle.wasm             --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/market_token.wasm      --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/market_factory.wasm    --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/deposit_vault.wasm     --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/deposit_handler.wasm   --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/withdrawal_vault.wasm  --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/withdrawal_handler.wasm --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/order_vault.wasm       --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/order_handler.wasm     --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/liquidation_handler.wasm --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/adl_handler.wasm       --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/fee_handler.wasm       --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/referral_storage.wasm  --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/reader.wasm             --source alice --network testnet
-stellar contract upload --wasm target/wasm32-unknown-unknown/release/exchange_router.wasm   --source alice --network testnet
+ROLE_STORE_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/role_store.wasm \
+  --source alice --network testnet)
+
+DATA_STORE_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/data_store.wasm \
+  --source alice --network testnet)
+
+ORACLE_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/oracle.wasm \
+  --source alice --network testnet)
+
+MARKET_TOKEN_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/market_token.wasm \
+  --source alice --network testnet)
+
+MARKET_FACTORY_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/market_factory.wasm \
+  --source alice --network testnet)
+
+DEPOSIT_VAULT_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/deposit_vault.wasm \
+  --source alice --network testnet)
+
+DEPOSIT_HANDLER_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/deposit_handler.wasm \
+  --source alice --network testnet)
+
+WITHDRAWAL_VAULT_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/withdrawal_vault.wasm \
+  --source alice --network testnet)
+
+WITHDRAWAL_HANDLER_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/withdrawal_handler.wasm \
+  --source alice --network testnet)
+
+ORDER_VAULT_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/order_vault.wasm \
+  --source alice --network testnet)
+
+ORDER_HANDLER_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/order_handler.wasm \
+  --source alice --network testnet)
+
+LIQUIDATION_HANDLER_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/liquidation_handler.wasm \
+  --source alice --network testnet)
+
+ADL_HANDLER_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/adl_handler.wasm \
+  --source alice --network testnet)
+
+FEE_HANDLER_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/fee_handler.wasm \
+  --source alice --network testnet)
+
+REFERRAL_STORAGE_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/referral_storage.wasm \
+  --source alice --network testnet)
+
+READER_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/reader.wasm \
+  --source alice --network testnet)
+
+EXCHANGE_ROUTER_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/exchange_router.wasm \
+  --source alice --network testnet)
 ```
 
-### Step 3 — Deploy core contracts
+### Step 3 — Capture your admin address
+
+```bash
+ALICE=$(stellar keys address alice)
+```
+
+### Step 4 — Deploy core infrastructure
 
 ```bash
 ROLE_STORE=$(stellar contract deploy \
-  --wasm-hash <ROLE_STORE_WASM_HASH> --source alice --network testnet \
-  -- --admin <ALICE_ADDRESS>)
+  --wasm-hash $ROLE_STORE_HASH \
+  --source alice --network testnet \
+  -- initialize --admin $ALICE)
 
 DATA_STORE=$(stellar contract deploy \
-  --wasm-hash <DATA_STORE_WASM_HASH> --source alice --network testnet \
-  -- --role_store $ROLE_STORE)
+  --wasm-hash $DATA_STORE_HASH \
+  --source alice --network testnet \
+  -- initialize --role_store $ROLE_STORE)
 
 ORACLE=$(stellar contract deploy \
-  --wasm-hash <ORACLE_WASM_HASH> --source alice --network testnet \
-  -- --admin <ALICE_ADDRESS> --role_store $ROLE_STORE --data_store $DATA_STORE)
+  --wasm-hash $ORACLE_HASH \
+  --source alice --network testnet \
+  -- initialize --admin $ALICE --role_store $ROLE_STORE --data_store $DATA_STORE)
 ```
 
-### Step 4 — Deploy market infrastructure
+### Step 5 — Deploy market factory
 
 ```bash
 MARKET_FACTORY=$(stellar contract deploy \
-  --wasm-hash <MARKET_FACTORY_WASM_HASH> --source alice --network testnet \
-  -- --admin <ALICE_ADDRESS> \
+  --wasm-hash $MARKET_FACTORY_HASH \
+  --source alice --network testnet \
+  -- initialize \
+     --admin $ALICE \
      --role_store $ROLE_STORE \
      --data_store $DATA_STORE \
-     --market_token_wasm_hash <MARKET_TOKEN_WASM_HASH>)
+     --market_token_wasm_hash $MARKET_TOKEN_HASH)
 ```
 
-### Step 5 — Deploy vaults and handlers
+### Step 6 — Deploy vaults and handlers
 
 ```bash
-DEPOSIT_VAULT=$(stellar contract deploy --wasm-hash <DEPOSIT_VAULT_WASM_HASH> \
-  --source alice --network testnet -- --admin <ALICE_ADDRESS> --role_store $ROLE_STORE)
-
-DEPOSIT_HANDLER=$(stellar contract deploy --wasm-hash <DEPOSIT_HANDLER_WASM_HASH> \
+DEPOSIT_VAULT=$(stellar contract deploy \
+  --wasm-hash $DEPOSIT_VAULT_HASH \
   --source alice --network testnet \
-  -- --admin <ALICE_ADDRESS> --role_store $ROLE_STORE --data_store $DATA_STORE \
-     --oracle $ORACLE --deposit_vault $DEPOSIT_VAULT)
+  -- initialize --admin $ALICE --role_store $ROLE_STORE)
 
-WITHDRAWAL_VAULT=$(stellar contract deploy --wasm-hash <WITHDRAWAL_VAULT_WASM_HASH> \
-  --source alice --network testnet -- --admin <ALICE_ADDRESS> --role_store $ROLE_STORE)
-
-WITHDRAWAL_HANDLER=$(stellar contract deploy --wasm-hash <WITHDRAWAL_HANDLER_WASM_HASH> \
+DEPOSIT_HANDLER=$(stellar contract deploy \
+  --wasm-hash $DEPOSIT_HANDLER_HASH \
   --source alice --network testnet \
-  -- --admin <ALICE_ADDRESS> --role_store $ROLE_STORE --data_store $DATA_STORE \
-     --oracle $ORACLE --withdrawal_vault $WITHDRAWAL_VAULT)
+  -- initialize \
+     --admin $ALICE \
+     --role_store $ROLE_STORE \
+     --data_store $DATA_STORE \
+     --oracle $ORACLE \
+     --deposit_vault $DEPOSIT_VAULT)
 
-ORDER_VAULT=$(stellar contract deploy --wasm-hash <ORDER_VAULT_WASM_HASH> \
-  --source alice --network testnet -- --admin <ALICE_ADDRESS> --role_store $ROLE_STORE)
-
-ORDER_HANDLER=$(stellar contract deploy --wasm-hash <ORDER_HANDLER_WASM_HASH> \
+WITHDRAWAL_VAULT=$(stellar contract deploy \
+  --wasm-hash $WITHDRAWAL_VAULT_HASH \
   --source alice --network testnet \
-  -- --admin <ALICE_ADDRESS> --role_store $ROLE_STORE --data_store $DATA_STORE \
-     --oracle $ORACLE --order_vault $ORDER_VAULT)
+  -- initialize --admin $ALICE --role_store $ROLE_STORE)
+
+WITHDRAWAL_HANDLER=$(stellar contract deploy \
+  --wasm-hash $WITHDRAWAL_HANDLER_HASH \
+  --source alice --network testnet \
+  -- initialize \
+     --admin $ALICE \
+     --role_store $ROLE_STORE \
+     --data_store $DATA_STORE \
+     --oracle $ORACLE \
+     --withdrawal_vault $WITHDRAWAL_VAULT)
+
+ORDER_VAULT=$(stellar contract deploy \
+  --wasm-hash $ORDER_VAULT_HASH \
+  --source alice --network testnet \
+  -- initialize --admin $ALICE --role_store $ROLE_STORE)
+
+ORDER_HANDLER=$(stellar contract deploy \
+  --wasm-hash $ORDER_HANDLER_HASH \
+  --source alice --network testnet \
+  -- initialize \
+     --admin $ALICE \
+     --role_store $ROLE_STORE \
+     --data_store $DATA_STORE \
+     --oracle $ORACLE \
+     --order_vault $ORDER_VAULT)
 ```
 
-### Step 6 — Deploy risk, periphery, and router
+### Step 7 — Deploy risk handlers and periphery
 
 ```bash
-LIQUIDATION_HANDLER=$(stellar contract deploy --wasm-hash <LIQUIDATION_HANDLER_WASM_HASH> \
+LIQUIDATION_HANDLER=$(stellar contract deploy \
+  --wasm-hash $LIQUIDATION_HANDLER_HASH \
   --source alice --network testnet \
-  -- --admin <ALICE_ADDRESS> --role_store $ROLE_STORE --data_store $DATA_STORE --oracle $ORACLE)
+  -- initialize \
+     --admin $ALICE \
+     --role_store $ROLE_STORE \
+     --data_store $DATA_STORE \
+     --oracle $ORACLE \
+     --order_handler $ORDER_HANDLER)
 
-ADL_HANDLER=$(stellar contract deploy --wasm-hash <ADL_HANDLER_WASM_HASH> \
+ADL_HANDLER=$(stellar contract deploy \
+  --wasm-hash $ADL_HANDLER_HASH \
   --source alice --network testnet \
-  -- --admin <ALICE_ADDRESS> --role_store $ROLE_STORE --data_store $DATA_STORE --oracle $ORACLE)
+  -- initialize \
+     --admin $ALICE \
+     --role_store $ROLE_STORE \
+     --data_store $DATA_STORE \
+     --oracle $ORACLE \
+     --order_handler $ORDER_HANDLER)
 
-FEE_HANDLER=$(stellar contract deploy --wasm-hash <FEE_HANDLER_WASM_HASH> \
+FEE_HANDLER=$(stellar contract deploy \
+  --wasm-hash $FEE_HANDLER_HASH \
   --source alice --network testnet \
-  -- --admin <ALICE_ADDRESS> --role_store $ROLE_STORE --data_store $DATA_STORE)
+  -- initialize \
+     --admin $ALICE \
+     --role_store $ROLE_STORE \
+     --data_store $DATA_STORE)
 
-stellar contract deploy --wasm-hash <REFERRAL_STORAGE_WASM_HASH> \
-  --source alice --network testnet -- --admin <ALICE_ADDRESS>
-
-stellar contract deploy --wasm-hash <READER_WASM_HASH> --source alice --network testnet
-
-EXCHANGE_ROUTER=$(stellar contract deploy --wasm-hash <EXCHANGE_ROUTER_WASM_HASH> \
+REFERRAL_STORAGE=$(stellar contract deploy \
+  --wasm-hash $REFERRAL_STORAGE_HASH \
   --source alice --network testnet \
-  -- --admin <ALICE_ADDRESS> \
+  -- initialize --admin $ALICE)
+
+# Reader is stateless — no initialize call needed
+READER=$(stellar contract deploy \
+  --wasm-hash $READER_HASH \
+  --source alice --network testnet)
+```
+
+### Step 8 — Deploy exchange router
+
+```bash
+EXCHANGE_ROUTER=$(stellar contract deploy \
+  --wasm-hash $EXCHANGE_ROUTER_HASH \
+  --source alice --network testnet \
+  -- initialize \
+     --admin $ALICE \
      --role_store $ROLE_STORE \
      --data_store $DATA_STORE \
      --deposit_handler $DEPOSIT_HANDLER \
@@ -313,17 +578,54 @@ EXCHANGE_ROUTER=$(stellar contract deploy --wasm-hash <EXCHANGE_ROUTER_WASM_HASH
      --fee_handler $FEE_HANDLER)
 ```
 
-### Step 7 — Grant roles
+### Step 9 — Grant CONTROLLER role to all handlers
 
-Each handler needs the `CONTROLLER` role to write to `data_store` and withdraw from market pools:
+Handlers need `CONTROLLER` to write to `data_store` and withdraw from market pools:
 
 ```bash
-for CONTRACT in $DEPOSIT_HANDLER $WITHDRAWAL_HANDLER $ORDER_HANDLER \
-                $LIQUIDATION_HANDLER $ADL_HANDLER $FEE_HANDLER $EXCHANGE_ROUTER; do
-  stellar contract invoke --id $ROLE_STORE \
+for CONTRACT in \
+  $DEPOSIT_HANDLER \
+  $WITHDRAWAL_HANDLER \
+  $ORDER_HANDLER \
+  $LIQUIDATION_HANDLER \
+  $ADL_HANDLER \
+  $FEE_HANDLER \
+  $EXCHANGE_ROUTER
+do
+  stellar contract invoke \
+    --id $ROLE_STORE \
     --source alice --network testnet \
     -- grant_role --account $CONTRACT --role CONTROLLER
 done
+```
+
+### Step 10 — Grant keeper roles (optional, for a test keeper account)
+
+```bash
+# Generate a dedicated keeper key
+stellar keys generate --global keeper --network testnet
+stellar keys fund keeper --network testnet
+KEEPER=$(stellar keys address keeper)
+
+# Market keeper (price feeds, execute deposits/withdrawals)
+stellar contract invoke --id $ROLE_STORE --source alice --network testnet \
+  -- grant_role --account $KEEPER --role MARKET_KEEPER
+
+# Order keeper (execute pending orders)
+stellar contract invoke --id $ROLE_STORE --source alice --network testnet \
+  -- grant_role --account $KEEPER --role ORDER_KEEPER
+
+# Liquidation keeper
+stellar contract invoke --id $ROLE_STORE --source alice --network testnet \
+  -- grant_role --account $KEEPER --role LIQUIDATION_KEEPER
+
+# ADL keeper
+stellar contract invoke --id $ROLE_STORE --source alice --network testnet \
+  -- grant_role --account $KEEPER --role ADL_KEEPER
+
+# Fee keeper (sweep protocol fees)
+stellar contract invoke --id $ROLE_STORE --source alice --network testnet \
+  -- grant_role --account $KEEPER --role FEE_KEEPER
 ```
 
 ---
@@ -439,18 +741,16 @@ contracts/
 | 2 | Market infrastructure — market_token, market_factory, market_utils | ✅ Complete |
 | 3 | Oracle — keeper-fed prices, ed25519 verification | ✅ Complete |
 | 4 | Liquidity — deposit and withdrawal vaults + handlers | ✅ Complete |
-| 5 | Trading — order vault, position utils, order handler | 🔧 Scaffolded |
-| 6 | Risk — liquidation handler, ADL handler | 🔧 Scaffolded |
-| 7 | Periphery — fee handler, referral storage, reader | 🔧 Scaffolded |
-| 8 | Router — exchange router with multicall | 🔧 Scaffolded |
-
-> **Scaffolded** means all function signatures, parameter types, and detailed implementation notes are in place. Logic bodies are the next step.
+| 5 | Trading — order vault, position utils, order handler | ✅ Complete |
+| 6 | Risk — liquidation handler, ADL handler | ✅ Complete |
+| 7 | Periphery — fee handler, referral storage, reader | ✅ Complete |
+| 8 | Router — exchange router with multicall | ✅ Complete |
 
 ---
 
 ## Contributing
 
-SO4.market is being built in the open. The contract architecture is fully scaffolded — every function has a signature and a precise description of what to implement. See the issue tracker to pick up a task.
+SO4.market is being built in the open. All eight implementation phases are complete — the full protocol logic is live in Rust/Soroban. See the issue tracker for integration tests, optimisation tasks, and frontend work.
 
 ---
 
