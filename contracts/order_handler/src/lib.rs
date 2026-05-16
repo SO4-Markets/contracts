@@ -21,6 +21,7 @@ use soroban_sdk::{
     symbol_short, panic_with_error, token,
 };
 use gmx_types::{MarketProps, OrderProps, OrderType, PriceProps};
+pub use gmx_types::CreateOrderParams;
 use gmx_keys::{
     roles,
     order_key, order_list_key, account_order_list_key,
@@ -103,24 +104,6 @@ pub enum PositionStorageKey {
 pub enum OrderStorageKey {
     Order(BytesN<32>),
     OrderFrozen(BytesN<32>),
-}
-
-// ─── Create params (mirrors GMX BaseOrderUtils.CreateOrderParams) ─────────────
-
-#[contracttype]
-pub struct CreateOrderParams {
-    pub receiver:                   Address,
-    pub market:                     Address,  // market_token address
-    pub initial_collateral_token:   Address,
-    pub swap_path:                  Vec<Address>,
-    pub size_delta_usd:             i128,
-    pub collateral_delta_amount:    i128,
-    pub trigger_price:              i128,   // FLOAT_PRECISION; 0 for market orders
-    pub acceptable_price:           i128,   // FLOAT_PRECISION; 0 = no slippage check
-    pub execution_fee:              i128,
-    pub min_output_amount:          i128,
-    pub order_type:                 OrderType,
-    pub is_long:                    bool,
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────

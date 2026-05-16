@@ -19,6 +19,7 @@ use soroban_sdk::{
     symbol_short, token, Address, BytesN, Env, Vec,
 };
 use gmx_types::{DepositProps, MarketProps, TokenPrice};
+pub use gmx_types::CreateDepositParams;
 use gmx_math::{mul_div_wide, FLOAT_PRECISION, TOKEN_PRECISION};
 use gmx_keys::{
     roles,
@@ -98,21 +99,6 @@ trait IDepositVault {
 trait IMarketToken {
     fn mint(env: Env, caller: Address, to: Address, amount: i128);
     fn total_supply(env: Env) -> i128;
-}
-
-// ─── Params ───────────────────────────────────────────────────────────────────
-
-/// User-supplied parameters for creating a deposit.
-#[contracttype]
-pub struct CreateDepositParams {
-    pub receiver:           Address,
-    pub market:             Address,  // market_token address
-    pub initial_long_token: Address,
-    pub initial_short_token: Address,
-    pub long_token_amount:  i128,
-    pub short_token_amount: i128,
-    pub min_market_tokens:  i128,
-    pub execution_fee:      i128,
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────

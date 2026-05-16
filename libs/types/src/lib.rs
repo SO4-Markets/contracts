@@ -107,6 +107,49 @@ pub struct OrderProps {
     pub updated_at_time: u64,
 }
 
+// ─── Handler create-params (shared so router doesn't depend on handler crates) ─
+
+/// User-supplied parameters for creating a deposit.
+#[contracttype]
+pub struct CreateDepositParams {
+    pub receiver:            Address,
+    pub market:              Address,
+    pub initial_long_token:  Address,
+    pub initial_short_token: Address,
+    pub long_token_amount:   i128,
+    pub short_token_amount:  i128,
+    pub min_market_tokens:   i128,
+    pub execution_fee:       i128,
+}
+
+/// User-supplied parameters for creating a withdrawal.
+#[contracttype]
+pub struct CreateWithdrawalParams {
+    pub receiver:               Address,
+    pub market:                 Address,
+    pub market_token_amount:    i128,
+    pub min_long_token_amount:  i128,
+    pub min_short_token_amount: i128,
+    pub execution_fee:          i128,
+}
+
+/// User-supplied parameters for creating an order. Mirrors GMX BaseOrderUtils.CreateOrderParams.
+#[contracttype]
+pub struct CreateOrderParams {
+    pub receiver:                 Address,
+    pub market:                   Address,
+    pub initial_collateral_token: Address,
+    pub swap_path:                Vec<Address>,
+    pub size_delta_usd:           i128,
+    pub collateral_delta_amount:  i128,
+    pub trigger_price:            i128,
+    pub acceptable_price:         i128,
+    pub execution_fee:            i128,
+    pub min_output_amount:        i128,
+    pub order_type:               OrderType,
+    pub is_long:                  bool,
+}
+
 // ─── Deposits / Withdrawals ───────────────────────────────────────────────────
 
 /// Mirrors GMX's Deposit.Props.

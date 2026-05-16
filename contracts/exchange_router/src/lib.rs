@@ -17,7 +17,9 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error,
     Address, BytesN, Env, Vec, token,
 };
-use gmx_types::OrderType;
+use gmx_types::{
+    CreateDepositParams, CreateWithdrawalParams, CreateOrderParams,
+};
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
@@ -33,55 +35,14 @@ enum InstanceKey {
     FeeHandler,
 }
 
-// ─── Per-action param structs ─────────────────────────────────────────────────
-// Soroban #[contracttype] enums do not support named fields — each variant
-// wraps a dedicated struct instead.
+// ─── Router-only param structs ────────────────────────────────────────────────
+// These are user-facing types for actions that have no handler equivalent.
 
 #[contracttype]
 pub struct SendTokensParams {
     pub token:    Address,
     pub receiver: Address,
     pub amount:   i128,
-}
-
-/// User-facing params for creating a deposit.
-/// Includes both token addresses (the router does not look them up itself).
-#[contracttype]
-pub struct CreateDepositParams {
-    pub receiver:            Address,
-    pub market:              Address,
-    pub initial_long_token:  Address,
-    pub initial_short_token: Address,
-    pub long_token_amount:   i128,
-    pub short_token_amount:  i128,
-    pub min_market_tokens:   i128,
-    pub execution_fee:       i128,
-}
-
-#[contracttype]
-pub struct CreateWithdrawalParams {
-    pub receiver:               Address,
-    pub market:                 Address,
-    pub market_token_amount:    i128,
-    pub min_long_token_amount:  i128,
-    pub min_short_token_amount: i128,
-    pub execution_fee:          i128,
-}
-
-#[contracttype]
-pub struct CreateOrderParams {
-    pub receiver:                 Address,
-    pub market:                   Address,
-    pub initial_collateral_token: Address,
-    pub swap_path:                Vec<Address>,
-    pub size_delta_usd:           i128,
-    pub collateral_delta_amount:  i128,
-    pub trigger_price:            i128,
-    pub acceptable_price:         i128,
-    pub execution_fee:            i128,
-    pub min_output_amount:        i128,
-    pub order_type:               OrderType,
-    pub is_long:                  bool,
 }
 
 #[contracttype]
@@ -131,31 +92,19 @@ pub enum Error {
 
 #[soroban_sdk::contractclient(name = "DepositHandlerClient")]
 trait IDepositHandler {
-    fn create_deposit(
-        env: Env,
-        caller: Address,
-        params: deposit_handler::CreateDepositParams,
-    ) -> BytesN<32>;
+    fn create_deposit(env: Env, caller: Address, params: CreateDepositParams) -> BytesN<32>;
     fn cancel_deposit(env: Env, caller: Address, key: BytesN<32>);
 }
 
 #[soroban_sdk::contractclient(name = "WithdrawalHandlerClient")]
 trait IWithdrawalHandler {
-    fn create_withdrawal(
-        env: Env,
-        caller: Address,
-        params: withdrawal_handler::CreateWithdrawalParams,
-    ) -> BytesN<32>;
+    fn create_withdrawal(env: Env, caller: Address, params: CreateWithdrawalParams) -> BytesN<32>;
     fn cancel_withdrawal(env: Env, caller: Address, key: BytesN<32>);
 }
 
 #[soroban_sdk::contractclient(name = "OrderHandlerClient")]
 trait IOrderHandler {
-    fn create_order(
-        env: Env,
-        caller: Address,
-        params: order_handler::CreateOrderParams,
-    ) -> BytesN<32>;
+    fn create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32>;
     fn update_order(
         env: Env,
         caller: Address,
@@ -280,19 +229,7 @@ impl ExchangeRouter {
         caller.require_auth();
         let deposit_handler: Address = env.storage().instance()
             .get(&InstanceKey::DepositHandler).unwrap();
-        DepositHandlerClient::new(&env, &deposit_handler).create_deposit(
-            &caller,
-            &deposit_handler::CreateDepositParams {
-                receiver:            params.receiver,
-                market:              params.market,
-                initial_long_token:  params.initial_long_token,
-                initial_short_token: params.initial_short_token,
-                long_token_amount:   params.long_token_amount,
-                short_token_amount:  params.short_token_amount,
-                min_market_tokens:   params.min_market_tokens,
-                execution_fee:       params.execution_fee,
-            },
-        )
+        DepositHandlerClient::new(&env, &deposit_handler).create_deposit(&caller, &params)
     }
 
     /// Forward cancel_deposit to the deposit_handler.
@@ -304,21 +241,16 @@ impl ExchangeRouter {
     }
 
     /// Forward create_withdrawal to the withdrawal_handler.
-    pub fn create_withdrawal(env: Env, caller: Address, params: CreateWithdrawalParams) -> BytesN<32> {
+    pub fn create_withdrawal(
+        env: Env,
+        caller: Address,
+        params: CreateWithdrawalParams,
+    ) -> BytesN<32> {
         caller.require_auth();
         let withdrawal_handler: Address = env.storage().instance()
             .get(&InstanceKey::WithdrawalHandler).unwrap();
-        WithdrawalHandlerClient::new(&env, &withdrawal_handler).create_withdrawal(
-            &caller,
-            &withdrawal_handler::CreateWithdrawalParams {
-                receiver:               params.receiver,
-                market:                 params.market,
-                market_token_amount:    params.market_token_amount,
-                min_long_token_amount:  params.min_long_token_amount,
-                min_short_token_amount: params.min_short_token_amount,
-                execution_fee:          params.execution_fee,
-            },
-        )
+        WithdrawalHandlerClient::new(&env, &withdrawal_handler)
+            .create_withdrawal(&caller, &params)
     }
 
     /// Forward cancel_withdrawal to the withdrawal_handler.
@@ -334,23 +266,7 @@ impl ExchangeRouter {
         caller.require_auth();
         let order_handler: Address = env.storage().instance()
             .get(&InstanceKey::OrderHandler).unwrap();
-        OrderHandlerClient::new(&env, &order_handler).create_order(
-            &caller,
-            &order_handler::CreateOrderParams {
-                receiver:                 params.receiver,
-                market:                   params.market,
-                initial_collateral_token: params.initial_collateral_token,
-                swap_path:                params.swap_path,
-                size_delta_usd:           params.size_delta_usd,
-                collateral_delta_amount:  params.collateral_delta_amount,
-                trigger_price:            params.trigger_price,
-                acceptable_price:         params.acceptable_price,
-                execution_fee:            params.execution_fee,
-                min_output_amount:        params.min_output_amount,
-                order_type:               params.order_type,
-                is_long:                  params.is_long,
-            },
-        )
+        OrderHandlerClient::new(&env, &order_handler).create_order(&caller, &params)
     }
 
     /// Forward update_order to the order_handler.

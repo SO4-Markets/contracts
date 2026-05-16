@@ -19,6 +19,7 @@ use soroban_sdk::{
     symbol_short, token, Address, BytesN, Env,
 };
 use gmx_types::{WithdrawalProps, MarketProps};
+pub use gmx_types::CreateWithdrawalParams;
 use gmx_math::{mul_div_wide, TOKEN_PRECISION};
 use gmx_keys::{
     roles,
@@ -98,18 +99,6 @@ trait IMarketToken {
     fn burn(env: Env, from: Address, amount: i128);
     fn total_supply(env: Env) -> i128;
     fn withdraw_from_pool(env: Env, caller: Address, pool_token: Address, receiver: Address, amount: i128);
-}
-
-// ─── Params ───────────────────────────────────────────────────────────────────
-
-#[contracttype]
-pub struct CreateWithdrawalParams {
-    pub receiver:              Address,
-    pub market:                Address,
-    pub market_token_amount:   i128,
-    pub min_long_token_amount: i128,
-    pub min_short_token_amount: i128,
-    pub execution_fee:         i128,
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
