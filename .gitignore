@@ -5,6 +5,9 @@ target
 .soroban
 .stellar
 
+# Deployed contract addresses (network-specific, not for version control)
+.deployed/
+
 # Private working documents (never commit)
 IMPLEMENTATION_PLAN.md
 issue.md

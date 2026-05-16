@@ -349,7 +349,56 @@ All state is ephemeral — restarting clears everything.
 
 ---
 
-## Deploy to Testnet
+## Makefile
+
+A `Makefile` is provided for the most common workflows.
+
+| Target | Description |
+|---|---|
+| `make build` | Compile all contracts to wasm via `stellar contract build` |
+| `make check` | Type-check without producing wasm (`cargo check`) |
+| `make lint` | Run Clippy with warnings as errors |
+| `make test` | Run the full Soroban sandbox test suite |
+| `make deploy` | Deploy all contracts to **testnet** (default) |
+| `make deploy-mainnet` | Deploy all contracts to **mainnet** |
+| `make clean` | Remove `target/` and `.deployed/` |
+
+### One-shot deploy
+
+```bash
+# Testnet (default)
+make deploy
+
+# Testnet with a different key name
+make deploy SOURCE=mykey
+
+# Mainnet
+make deploy-mainnet SOURCE=mykey
+
+# Override both
+make deploy NETWORK=mainnet SOURCE=mykey
+```
+
+`SOURCE` must match a key stored in your local Stellar keystore (see [Keys & Identity](#keys--identity) above).
+
+The deploy script (`scripts/deploy.sh`) handles the full sequence automatically:
+builds → uploads wasm blobs → deploys each contract → calls `initialize` → grants `CONTROLLER` roles → prints a summary table → saves all addresses to `.deployed/<NETWORK>.env`.
+
+### Deployed address file
+
+After a successful deploy, addresses are written to `.deployed/testnet.env` (or `mainnet.env`):
+
+```bash
+# Source the file to load all contract addresses into your shell
+source .deployed/testnet.env
+echo $EXCHANGE_ROUTER
+```
+
+---
+
+## Deploy to Testnet (manual)
+
+The steps below are the manual equivalent of `make deploy`, useful for debugging individual steps or partial re-deploys.
 
 Contracts must be deployed in dependency order: stores first, then handlers that depend on them, then the router last. The sequence below captures the full stack.
 
