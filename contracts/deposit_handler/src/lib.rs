@@ -153,8 +153,10 @@ impl DepositHandler {
             panic_with_error!(&env, Error::ZeroDeposit);
         }
 
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
-        let deposit_vault: Address = env.storage().instance().get(&InstanceKey::DepositVault).unwrap();
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let deposit_vault: Address = env.storage().instance().get(&InstanceKey::DepositVault)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
         let ds = DataStoreClient::new(&env, &data_store);
 
@@ -204,9 +206,12 @@ impl DepositHandler {
         keeper.require_auth();
         require_order_keeper(&env, &keeper);
 
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
-        let deposit_vault: Address = env.storage().instance().get(&InstanceKey::DepositVault).unwrap();
-        let oracle: Address = env.storage().instance().get(&InstanceKey::Oracle).unwrap();
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let deposit_vault: Address = env.storage().instance().get(&InstanceKey::DepositVault)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let oracle: Address = env.storage().instance().get(&InstanceKey::Oracle)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
 
         // Load deposit
@@ -355,11 +360,11 @@ fn load_market_props(env: &Env, data_store: &Address, market_token: &Address) ->
     MarketProps {
         market_token: market_token.clone(),
         index_token:  ds.get_address(&market_index_token_key(env, market_token))
-            .expect("market index token not found"),
+            .unwrap_or_else(|| panic_with_error!(env, Error::DepositNotFound)),
         long_token:   ds.get_address(&market_long_token_key(env, market_token))
-            .expect("market long token not found"),
+            .unwrap_or_else(|| panic_with_error!(env, Error::DepositNotFound)),
         short_token:  ds.get_address(&market_short_token_key(env, market_token))
-            .expect("market short token not found"),
+            .unwrap_or_else(|| panic_with_error!(env, Error::DepositNotFound)),
     }
 }
 

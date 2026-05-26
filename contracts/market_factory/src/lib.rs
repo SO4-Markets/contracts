@@ -230,13 +230,15 @@ impl MarketFactory {
     // ── Views ─────────────────────────────────────────────────────────────────
 
     pub fn get_market_count(env: Env) -> u32 {
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let ds = DataStoreClient::new(&env, &data_store);
         ds.get_address_set_count(&market_list_key(&env))
     }
 
     pub fn get_markets(env: Env, start: u32, end: u32) -> Vec<Address> {
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let ds = DataStoreClient::new(&env, &data_store);
         ds.get_address_set_at(&market_list_key(&env), &start, &end)
     }
@@ -245,7 +247,8 @@ impl MarketFactory {
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 fn require_admin(env: &Env, caller: &Address) {
-    let admin: Address = env.storage().instance().get(&InstanceKey::Admin).unwrap();
+    let admin: Address = env.storage().instance().get(&InstanceKey::Admin)
+        .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
     if *caller != admin {
         panic_with_error!(env, Error::Unauthorized);
     }

@@ -233,7 +233,8 @@ impl ExchangeRouter {
     pub fn create_deposit(env: Env, caller: Address, params: CreateDepositParams) -> BytesN<32> {
         caller.require_auth();
         let deposit_handler: Address = env.storage().instance()
-            .get(&InstanceKey::DepositHandler).unwrap();
+            .get(&InstanceKey::DepositHandler)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         DepositHandlerClient::new(&env, &deposit_handler).create_deposit(&caller, &params)
     }
 
@@ -241,7 +242,8 @@ impl ExchangeRouter {
     pub fn cancel_deposit(env: Env, caller: Address, key: BytesN<32>) {
         caller.require_auth();
         let deposit_handler: Address = env.storage().instance()
-            .get(&InstanceKey::DepositHandler).unwrap();
+            .get(&InstanceKey::DepositHandler)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         DepositHandlerClient::new(&env, &deposit_handler).cancel_deposit(&caller, &key);
     }
 

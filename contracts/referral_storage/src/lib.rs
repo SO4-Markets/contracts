@@ -54,11 +54,13 @@ pub struct TraderCodeSet {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    AlreadyInitialized = 1,
-    Unauthorized       = 2,
-    CodeAlreadyTaken   = 3,
-    CodeNotFound       = 4,
-    InvalidTier        = 5,
+    NotInitialized     = 1,
+    AlreadyInitialized = 2,
+    Unauthorized       = 3,
+    CodeAlreadyTaken   = 4,
+    CodeNotFound       = 5,
+    InvalidTier        = 6,
+    InvalidInput       = 7,
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -114,7 +116,8 @@ impl ReferralStorage {
     /// Set the tier for a referrer (admin only).
     pub fn set_referrer_tier(env: Env, admin: Address, referrer: Address, tier: u32) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&InstanceKey::Admin).unwrap();
+        let stored_admin: Address = env.storage().instance().get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         if admin != stored_admin {
             panic_with_error!(&env, Error::Unauthorized);
         }
@@ -127,12 +130,17 @@ impl ReferralStorage {
     /// Configure the rebate/discount parameters for a tier (admin only).
     pub fn set_tier_config(env: Env, admin: Address, tier: u32, config: TierConfig) {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&InstanceKey::Admin).unwrap();
+        let stored_admin: Address = env.storage().instance().get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         if admin != stored_admin {
             panic_with_error!(&env, Error::Unauthorized);
         }
         if tier > 2 {
             panic_with_error!(&env, Error::InvalidTier);
+        }
+        // Validate config parameters
+        if config.total_rebate_bps > 10000 || config.discount_share_bps > 10000 {
+            panic_with_error!(&env, Error::InvalidInput);
         }
         env.storage().persistent().set(&ReferralKey::TierConfig(tier), &config);
     }

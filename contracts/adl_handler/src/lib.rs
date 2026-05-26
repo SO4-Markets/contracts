@@ -40,8 +40,10 @@ enum InstanceKey {
 #[repr(u32)]
 pub enum Error {
     AlreadyInitialized = 1,
+    NotInitialized     = 2,
     Unauthorized       = 3,
     AdlNotRequired     = 4,
+    InvalidInput       = 5,
     NotProfitable      = 6,
     PositionNotFound   = 7,
 }
@@ -113,8 +115,10 @@ impl AdlHandler {
     ///
     /// Returns true if total trader PnL / pool_value > MAX_PNL_FACTOR_FOR_ADL.
     pub fn is_adl_required(env: Env, market: Address, is_long: bool) -> bool {
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
-        let oracle: Address = env.storage().instance().get(&InstanceKey::Oracle).unwrap();
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let oracle: Address = env.storage().instance().get(&InstanceKey::Oracle)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
 
         let market_props = load_market_props(&env, &data_store, &market);
         let oracle_client = OracleClient::new(&env, &oracle);
@@ -163,7 +167,13 @@ impl AdlHandler {
     ) {
         keeper.require_auth();
 
-        let role_store: Address = env.storage().instance().get(&InstanceKey::RoleStore).unwrap();
+        // Input validation
+        if size_delta_usd <= 0 {
+            panic_with_error!(&env, Error::InvalidInput);
+        }
+
+        let role_store: Address = env.storage().instance().get(&InstanceKey::RoleStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         if !RoleStoreClient::new(&env, &role_store).has_role(&keeper, &roles::adl_keeper(&env)) {
             panic_with_error!(&env, Error::Unauthorized);
         }
@@ -173,9 +183,12 @@ impl AdlHandler {
             panic_with_error!(&env, Error::AdlNotRequired);
         }
 
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
-        let oracle: Address = env.storage().instance().get(&InstanceKey::Oracle).unwrap();
-        let order_handler: Address = env.storage().instance().get(&InstanceKey::OrderHandler).unwrap();
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let oracle: Address = env.storage().instance().get(&InstanceKey::Oracle)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let order_handler: Address = env.storage().instance().get(&InstanceKey::OrderHandler)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
 
         let market_props = load_market_props(&env, &data_store, &market);
         let oracle_client = OracleClient::new(&env, &oracle);
@@ -209,10 +222,10 @@ impl AdlHandler {
 fn load_market_props(env: &Env, data_store: &Address, market_token: &Address) -> MarketProps {
     let ds = DataStoreClient::new(env, data_store);
     let index_token = ds.get_address(&market_index_token_key(env, market_token))
-        .expect("market index token not found");
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidInput));
     let long_token = ds.get_address(&market_long_token_key(env, market_token))
-        .expect("market long token not found");
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidInput));
     let short_token = ds.get_address(&market_short_token_key(env, market_token))
-        .expect("market short token not found");
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidInput));
     MarketProps { market_token: market_token.clone(), index_token, long_token, short_token }
 }

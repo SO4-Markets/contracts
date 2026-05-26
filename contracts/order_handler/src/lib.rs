@@ -145,8 +145,10 @@ impl OrderHandler {
     pub fn create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32> {
         caller.require_auth();
 
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
-        let order_vault: Address = env.storage().instance().get(&InstanceKey::OrderVault).unwrap();
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let order_vault: Address = env.storage().instance().get(&InstanceKey::OrderVault)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
         let ds = DataStoreClient::new(&env, &data_store);
 
@@ -199,9 +201,12 @@ impl OrderHandler {
         keeper.require_auth();
         require_order_keeper(&env, &keeper);
 
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
-        let order_vault: Address = env.storage().instance().get(&InstanceKey::OrderVault).unwrap();
-        let oracle: Address = env.storage().instance().get(&InstanceKey::Oracle).unwrap();
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let order_vault: Address = env.storage().instance().get(&InstanceKey::OrderVault)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let oracle: Address = env.storage().instance().get(&InstanceKey::Oracle)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
 
         // Load order
@@ -319,9 +324,12 @@ impl OrderHandler {
     pub fn cancel_order(env: Env, caller: Address, key: BytesN<32>) {
         caller.require_auth();
 
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
-        let order_vault: Address = env.storage().instance().get(&InstanceKey::OrderVault).unwrap();
-        let role_store: Address  = env.storage().instance().get(&InstanceKey::RoleStore).unwrap();
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let order_vault: Address = env.storage().instance().get(&InstanceKey::OrderVault)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let role_store: Address  = env.storage().instance().get(&InstanceKey::RoleStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
 
         let order: OrderProps = env.storage().persistent()
@@ -427,8 +435,10 @@ impl OrderHandler {
         keeper.require_auth();
         require_liquidation_keeper(&env, &keeper);
 
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
-        let oracle: Address = env.storage().instance().get(&InstanceKey::Oracle).unwrap();
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let oracle: Address = env.storage().instance().get(&InstanceKey::Oracle)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
 
         let market_props = load_market_props(&env, &data_store, &market);
@@ -484,8 +494,10 @@ impl OrderHandler {
         keeper.require_auth();
         require_adl_keeper(&env, &keeper);
 
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
-        let oracle: Address = env.storage().instance().get(&InstanceKey::Oracle).unwrap();
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let oracle: Address = env.storage().instance().get(&InstanceKey::Oracle)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
 
         let market_props = load_market_props(&env, &data_store, &market);
@@ -518,21 +530,24 @@ impl OrderHandler {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn require_order_keeper(env: &Env, caller: &Address) {
-    let role_store: Address = env.storage().instance().get(&InstanceKey::RoleStore).unwrap();
+    let role_store: Address = env.storage().instance().get(&InstanceKey::RoleStore)
+        .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
     if !RoleStoreClient::new(env, &role_store).has_role(caller, &roles::order_keeper(env)) {
         panic_with_error!(env, Error::Unauthorized);
     }
 }
 
 fn require_liquidation_keeper(env: &Env, caller: &Address) {
-    let role_store: Address = env.storage().instance().get(&InstanceKey::RoleStore).unwrap();
+    let role_store: Address = env.storage().instance().get(&InstanceKey::RoleStore)
+        .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
     if !RoleStoreClient::new(env, &role_store).has_role(caller, &roles::liquidation_keeper(env)) {
         panic_with_error!(env, Error::Unauthorized);
     }
 }
 
 fn require_adl_keeper(env: &Env, caller: &Address) {
-    let role_store: Address = env.storage().instance().get(&InstanceKey::RoleStore).unwrap();
+    let role_store: Address = env.storage().instance().get(&InstanceKey::RoleStore)
+        .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
     if !RoleStoreClient::new(env, &role_store).has_role(caller, &roles::adl_keeper(env)) {
         panic_with_error!(env, Error::Unauthorized);
     }
