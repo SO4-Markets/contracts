@@ -59,6 +59,10 @@ pub enum Error {
     PriceTooHigh          = 7,
     PriceTooLow           = 8,
     OrderFrozen           = 9,
+    /// Increase/swap orders require collateral to have been transferred to
+    /// order_vault (via exchange_router SendTokens) before calling create_order.
+    /// record_transfer_in returned zero, meaning no collateral arrived.
+    ZeroCollateral        = 10,
 }
 
 // ─── External contract clients ────────────────────────────────────────────────
@@ -137,10 +141,35 @@ impl OrderHandler {
         env.storage().instance().set(&InstanceKey::OrderVault, &order_vault);
     }
 
-    /// Create a new order and pull collateral into the order vault.
+    /// Create a new order and record collateral in the order vault.
     ///
-    /// For increase/swap order types: caller must have already transferred
-    /// collateral to the order_vault; we call record_transfer_in to snapshot it.
+    /// # Collateral model (canonical — issue #47)
+    ///
+    /// **Chosen path:** the exchange_router is responsible for transferring
+    /// collateral from the caller to order_vault BEFORE invoking create_order.
+    /// order_handler then calls `record_transfer_in` to snapshot the delta.
+    ///
+    /// **Why this model:**
+    /// - The router owns the auth context for the caller's token approval.
+    /// - Keeping the pull inside the router makes the vault a passive custodian
+    ///   with no token-approval dependencies of its own.
+    /// - Handlers never hold approvals, so they cannot silently double-pull.
+    ///
+    /// **Invariant enforced here:**
+    /// - For increase/swap orders: `record_transfer_in` delta MUST be > 0.
+    ///   A zero delta means tokens were not pre-sent; the transaction reverts
+    ///   with `ZeroCollateral` before any state is written.
+    /// - For decrease/stop-loss/liquidation orders: no collateral is deposited;
+    ///   `collateral_delta_amount` comes from params (typically the existing position size).
+    ///
+    /// **Multicall sequence the router enforces for increase/swap orders:**
+    /// ```text
+    /// multicall([
+    ///   SendTokens { token, receiver: order_vault, amount },   // 1. push collateral
+    ///   CreateOrder { params },                                 // 2. snapshot + store order
+    /// ])
+    /// ```
+    ///
     /// Returns the order key.
     pub fn create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32> {
         caller.require_auth();
@@ -152,17 +181,25 @@ impl OrderHandler {
         let handler = env.current_contract_address();
         let ds = DataStoreClient::new(&env, &data_store);
 
-        // Record collateral arrival for increase/swap orders
+        // Determine whether this order type requires upfront collateral in the vault.
+        // Increase and swap orders pull from the vault; decrease orders do not deposit.
         let is_increase_or_swap = matches!(
             params.order_type,
             OrderType::MarketIncrease | OrderType::LimitIncrease | OrderType::StopIncrease |
             OrderType::MarketSwap     | OrderType::LimitSwap
         );
+
+        // Snapshot vault balance and derive received amount (canonical model — issue #47).
+        // Reverts with ZeroCollateral if caller skipped the SendTokens pre-step.
         let collateral_delta_amount = if is_increase_or_swap {
             let received = OrderVaultClient::new(&env, &order_vault)
                 .record_transfer_in(&params.initial_collateral_token);
-            received.max(0)
+            if received <= 0 {
+                panic_with_error!(&env, Error::ZeroCollateral);
+            }
+            received
         } else {
+            // Decrease/liquidation orders: no collateral deposit required.
             params.collateral_delta_amount
         };
 
@@ -575,4 +612,271 @@ fn remove_order(env: &Env, data_store: &Address, caller: &Address, key: &BytesN<
     let ds = DataStoreClient::new(env, data_store);
     ds.remove_bytes32_from_set(caller, &order_list_key(env), key);
     ds.remove_bytes32_from_set(caller, &account_order_list_key(env, account), key);
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Env, Vec};
+    use role_store::{RoleStore, RoleStoreClient as RsClient};
+    use data_store::{DataStore, DataStoreClient as DsClient};
+    use oracle::{Oracle, OracleClient as OClient};
+    use order_vault::{OrderVault, OrderVaultClient as OVClient};
+    use market_token::{MarketToken, MarketTokenClient as MtClient};
+    use gmx_keys::{roles, position_key};
+    use gmx_types::TokenPrice;
+
+    /// 1 whole token at 7-decimal Stellar precision.
+    const COLLATERAL: i128 = 1_000_0000;
+
+    struct World {
+        env:       Env,
+        admin:     Address,
+        keeper:    Address,
+        user:      Address,
+        rs:        Address,
+        ds:        Address,
+        oracle:    Address,
+        vault:     Address,
+        handler:   Address,
+        market_tk: Address,
+        long_tk:   Address,
+        short_tk:  Address,
+        index_tk:  Address,
+    }
+
+    fn setup() -> World {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin  = Address::generate(&env);
+        let keeper = Address::generate(&env);
+        let user   = Address::generate(&env);
+
+        // — Role store —
+        let rs = env.register(RoleStore, ());
+        RsClient::new(&env, &rs).initialize(&admin);
+        let rs_c = RsClient::new(&env, &rs);
+        rs_c.grant_role(&admin, &admin,  &roles::controller(&env));
+        rs_c.grant_role(&admin, &keeper, &roles::order_keeper(&env));
+
+        // — Data store —
+        let ds = env.register(DataStore, ());
+        DsClient::new(&env, &ds).initialize(&admin, &rs);
+
+        // — Oracle —
+        let oracle_addr = env.register(Oracle, ());
+        let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
+        OClient::new(&env, &oracle_addr).initialize(&admin, &rs, &ds, &passphrase);
+
+        // — Order vault —
+        let vault = env.register(OrderVault, ());
+        OVClient::new(&env, &vault).initialize(&admin, &rs);
+
+        // — Market token (LP + pool custodian) —
+        let market_tk = env.register(MarketToken, ());
+        MtClient::new(&env, &market_tk).initialize(
+            &admin, &rs, &7u32,
+            &soroban_sdk::String::from_str(&env, "SO4 Market"),
+            &soroban_sdk::String::from_str(&env, "GM"),
+        );
+
+        // — Order handler —
+        let handler = env.register(OrderHandler, ());
+        OrderHandlerClient::new(&env, &handler).initialize(
+            &admin, &rs, &ds, &oracle_addr, &vault,
+        );
+
+        // Grant handler CONTROLLER: needed for DS writes and vault.transfer_out
+        rs_c.grant_role(&admin, &handler, &roles::controller(&env));
+
+        // — Underlying tokens (SEP-41 stellar assets support minting in tests) —
+        let long_tk  = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let index_tk = Address::generate(&env);
+
+        // Register market in DataStore
+        let ds_c = DsClient::new(&env, &ds);
+        ds_c.set_address(&handler, &gmx_keys::market_index_token_key(&env, &market_tk), &index_tk);
+        ds_c.set_address(&handler, &gmx_keys::market_long_token_key (&env, &market_tk), &long_tk);
+        ds_c.set_address(&handler, &gmx_keys::market_short_token_key(&env, &market_tk), &short_tk);
+
+        World { env, admin, keeper, user, rs, ds, oracle: oracle_addr, vault, handler, market_tk, long_tk, short_tk, index_tk }
+    }
+
+    /// Set oracle prices: long_tk = $2000, short_tk = $1, index_tk = $2000.
+    fn set_prices(w: &World) {
+        let fp = gmx_math::FLOAT_PRECISION;
+        OClient::new(&w.env, &w.oracle).set_prices_simple(&w.keeper, &Vec::from_array(&w.env, [
+            TokenPrice { token: w.long_tk.clone(),  min: 2000 * fp, max: 2000 * fp },
+            TokenPrice { token: w.short_tk.clone(), min: fp,        max: fp },
+            TokenPrice { token: w.index_tk.clone(), min: 2000 * fp, max: 2000 * fp },
+        ]));
+    }
+
+    /// Fund the vault with COLLATERAL of long_tk then call create_order.
+    /// Returns (client, order_key).
+    fn create_increase_order(
+        w: &World,
+        order_type: OrderType,
+        trigger_price: i128,
+    ) -> (OrderHandlerClient, BytesN<32>) {
+        // Simulates the SendTokens step that the exchange_router multicall does
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.vault, &COLLATERAL);
+
+        let hc = OrderHandlerClient::new(&w.env, &w.handler);
+        let key = hc.create_order(&w.user, &CreateOrderParams {
+            receiver:                  w.user.clone(),
+            market:                    w.market_tk.clone(),
+            initial_collateral_token:  w.long_tk.clone(),
+            swap_path:                 Vec::new(&w.env),
+            size_delta_usd:            2000 * gmx_math::FLOAT_PRECISION,
+            collateral_delta_amount:   COLLATERAL,
+            trigger_price,
+            acceptable_price:          0,  // 0 = no slippage check
+            execution_fee:             0,
+            min_output_amount:         0,
+            order_type,
+            is_long:                   true,
+        });
+        (hc, key)
+    }
+
+    // ── Issue #47: collateral model guard ────────────────────────────────────
+
+    /// Creating an increase/swap order without pre-depositing collateral in the
+    /// vault must revert with ZeroCollateral (canonical model — issue #47).
+    #[test]
+    #[should_panic]
+    fn create_order_without_collateral_reverts() {
+        let w = setup();
+        // Vault has no tokens → record_transfer_in returns 0 → ZeroCollateral
+        OrderHandlerClient::new(&w.env, &w.handler).create_order(&w.user, &CreateOrderParams {
+            receiver:                  w.user.clone(),
+            market:                    w.market_tk.clone(),
+            initial_collateral_token:  w.long_tk.clone(),
+            swap_path:                 Vec::new(&w.env),
+            size_delta_usd:            2000 * gmx_math::FLOAT_PRECISION,
+            collateral_delta_amount:   COLLATERAL,
+            trigger_price:             0,
+            acceptable_price:          0,
+            execution_fee:             0,
+            min_output_amount:         0,
+            order_type:                OrderType::MarketIncrease,
+            is_long:                   true,
+        });
+    }
+
+    /// Vault's recorded balance must equal its on-chain balance immediately after
+    /// create_order (balance snapshot invariant — issue #47).
+    #[test]
+    fn vault_balance_invariant_holds_after_create() {
+        let w = setup();
+        let (_hc, _key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+
+        let ov = OVClient::new(&w.env, &w.vault);
+        let recorded = ov.get_recorded_balance(&w.long_tk);
+        let on_chain = soroban_sdk::token::Client::new(&w.env, &w.long_tk)
+            .balance(&w.vault);
+        assert_eq!(recorded, on_chain,   "vault recorded ≠ on-chain balance");
+        assert_eq!(recorded, COLLATERAL, "vault should hold exactly the deposited collateral");
+    }
+
+    /// cancel_order must refund the full collateral to the account and update the
+    /// vault's recorded balance to zero.
+    #[test]
+    fn cancel_order_refunds_collateral_to_user() {
+        let w = setup();
+        let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+
+        let before = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.user);
+        hc.cancel_order(&w.user, &key);
+        let after  = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.user);
+
+        assert_eq!(after - before, COLLATERAL, "user should receive full collateral refund");
+        assert!(hc.get_order(&key).is_none(), "order must be removed after cancel");
+        assert_eq!(
+            OVClient::new(&w.env, &w.vault).get_recorded_balance(&w.long_tk),
+            0,
+            "vault recorded balance must be zero after refund"
+        );
+    }
+
+    /// Submitting a second create_order for the same token without new collateral
+    /// arriving at the vault must revert (double-snapshot guard — issue #47).
+    #[test]
+    #[should_panic]
+    fn double_create_order_without_new_deposit_reverts() {
+        let w = setup();
+        // First order consumes the vault snapshot
+        let _  = create_increase_order(&w, OrderType::MarketIncrease, 0);
+
+        // Second order — no new tokens deposited; record_transfer_in delta = 0 → ZeroCollateral
+        OrderHandlerClient::new(&w.env, &w.handler).create_order(&w.user, &CreateOrderParams {
+            receiver:                  w.user.clone(),
+            market:                    w.market_tk.clone(),
+            initial_collateral_token:  w.long_tk.clone(),
+            swap_path:                 Vec::new(&w.env),
+            size_delta_usd:            2000 * gmx_math::FLOAT_PRECISION,
+            collateral_delta_amount:   COLLATERAL,
+            trigger_price:             0,
+            acceptable_price:          0,
+            execution_fee:             0,
+            min_output_amount:         0,
+            order_type:                OrderType::MarketIncrease,
+            is_long:                   true,
+        });
+    }
+
+    // ── Issue #49: limit increase order lifecycle ─────────────────────────────
+
+    /// LimitIncrease where oracle price > trigger_price must revert with
+    /// UnsatisfiedTrigger before any state mutation occurs.
+    #[test]
+    #[should_panic]
+    fn limit_increase_unsatisfied_trigger_reverts() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        // trigger = $1 000; oracle index price = $2 000 → 2000 > 1000 → reverts
+        let (hc, key) = create_increase_order(&w, OrderType::LimitIncrease, 1000 * fp);
+        set_prices(&w);
+        hc.execute_order(&w.keeper, &key);
+    }
+
+    /// LimitIncrease where oracle price ≤ trigger_price must succeed:
+    ///   • position created with correct fields,
+    ///   • open interest increased in DataStore,
+    ///   • order key removed from storage.
+    #[test]
+    fn limit_increase_satisfied_trigger_creates_position() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        // trigger = $3 000; oracle index = $2 000 → 2000 ≤ 3000 → satisfied
+        let (hc, key) = create_increase_order(&w, OrderType::LimitIncrease, 3000 * fp);
+        set_prices(&w);
+
+        hc.execute_order(&w.keeper, &key);
+
+        // 1. Order must be removed from handler storage
+        assert!(hc.get_order(&key).is_none(), "order should be removed after execution");
+
+        // 2. Position must exist and have correct fields
+        let pk       = position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true);
+        let position = hc.get_position(&pk)
+            .expect("position must exist after limit increase execution");
+
+        assert!(position.size_in_usd > 0,          "position size_in_usd must be positive");
+        assert_eq!(position.market, w.market_tk,   "position market must match order market");
+        assert_eq!(position.is_long, true,          "position must be long");
+        assert_eq!(position.collateral_token, w.long_tk, "collateral token must match");
+
+        // 3. Long open interest in DataStore must have increased
+        let ds_c    = DsClient::new(&w.env, &w.ds);
+        let long_oi = ds_c.get_u128(
+            &gmx_keys::open_interest_key(&w.env, &w.market_tk, &w.long_tk, true)
+        );
+        assert!(long_oi > 0, "long open interest must increase after limit increase execution");
+    }
 }

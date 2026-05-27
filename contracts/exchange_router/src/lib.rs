@@ -269,6 +269,23 @@ impl ExchangeRouter {
     }
 
     /// Forward create_order to the order_handler.
+    ///
+    /// # Required multicall sequence for increase / swap order types
+    ///
+    /// The protocol's canonical collateral model (issue #47) requires that
+    /// the caller pushes tokens into order_vault **before** this action runs.
+    /// Use `SendTokens` with `receiver = order_vault` as the immediately
+    /// preceding step in the same multicall:
+    ///
+    /// ```text
+    /// multicall([
+    ///   SendTokens { token: collateral_token, receiver: order_vault, amount },
+    ///   CreateOrder { params },   ← order_handler snapshots the delta here
+    /// ])
+    /// ```
+    ///
+    /// Omitting `SendTokens` causes order_handler to revert with `ZeroCollateral`.
+    /// Decrease / stop-loss / liquidation orders do not require a prior token send.
     pub fn create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32> {
         caller.require_auth();
         let order_handler: Address = env.storage().instance()

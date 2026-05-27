@@ -117,6 +117,96 @@ liquidatable when: remaining < min_collateral_factor × position_size_usd
 
 ---
 
+## Order Collateral Flow
+
+> **Resolves issue #47 — Unify order collateral transfer model.**
+
+The protocol follows a single, canonical two-step collateral path.
+`exchange_router` is the only entry point that may touch a caller's tokens.
+`order_handler` is a passive consumer that only reads from the vault.
+
+### Chosen model: Router-push, Handler-snapshot
+
+```
+User
+ │
+ │  multicall([
+ │    SendTokens { token, receiver: order_vault, amount },  ← Step 1
+ │    CreateOrder { params },                               ← Step 2
+ │  ])
+ ▼
+ExchangeRouter
+ │
+ ├─ Step 1: token::Client(token).transfer(caller → order_vault, amount)
+ │
+ └─ Step 2: OrderHandlerClient.create_order(caller, params)
+               │
+               └─ OrderVault.record_transfer_in(token)
+                    │  snapshot = on_chain_balance − last_recorded
+                    │  REVERT if snapshot ≤ 0  (ZeroCollateral)
+                    └─ stores order with collateral_delta_amount = snapshot
+```
+
+**Why this model:**
+- The router holds the user's token approval; keeping the pull there means
+  handlers never need their own approval and cannot silently double-pull.
+- `record_transfer_in` acts as a snapshot oracle: it always reflects exactly
+  what arrived since the last order, so double-submission is impossible.
+- Decrease / stop-loss / liquidation orders do **not** deposit collateral;
+  `create_order` skips the vault snapshot for those order types.
+
+**Balance invariant:** after every `create_order` or `transfer_out`, the vault's
+DataStore recorded balance equals its actual on-chain SEP-41 balance.
+
+---
+
+## Multi-hop Swap Semantics
+
+> **Resolves issue #57 — Audit multi-hop swap token movement semantics.**
+
+### Physical token movement model
+
+Tokens move **physically** between pool contracts on every hop.
+No virtual accounting shortcut is used — each intermediate transfer is
+a real SEP-41 `transfer` call on-chain.
+
+For a two-hop path `A → B → C` via `[market_1, market_2]`:
+
+```
+                 order_vault
+                      │  transfer_out(token_A → market_1)
+                      ▼
+          ┌─── market_1 (pool: A, B) ───┐
+          │  pool_A += input_A          │
+          │  pool_B -= output_B         │
+          │  SEP-41 transfer:           │
+          │  token_B → market_2  ───────┼────────────────────┐
+          └─────────────────────────────┘                    ▼
+                                             ┌─── market_2 (pool: B, C) ───┐
+                                             │  pool_B += output_B         │
+                                             │  pool_C -= output_C         │
+                                             │  SEP-41 transfer:           │
+                                             │  token_C → receiver  ───────┼──► User
+                                             └─────────────────────────────┘
+```
+
+**Pool balance invariant (holds after every multi-hop execution):**
+
+| pool          | token   | DataStore record             | on-chain balance |
+|---------------|---------|------------------------------|-----------------|
+| market_1      | token_A | + input_A                    | + input_A       |
+| market_1      | token_B | − output_B                   | − output_B      |
+| market_2      | token_B | + output_B                   | + output_B      |
+| market_2      | token_C | − output_C                   | − output_C      |
+
+### Duplicate market guard
+
+A swap path with a repeated market address causes double-mutation of pool
+state and corrupts price-impact accounting.  `swap_with_path` rejects any
+path with duplicate market addresses before any state is touched.
+
+---
+
 ## Prerequisites
 
 ### 1. Rust toolchain

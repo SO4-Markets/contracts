@@ -104,6 +104,37 @@ pub fn swap(
 }
 
 // ─── Multi-hop swap ───────────────────────────────────────────────────────────
+//
+// # Token movement semantics (issue #57)
+//
+// Tokens move **physically** between pools on every hop.  There is no virtual
+// accounting shortcut — each intermediate transfer is an actual SEP-41 token
+// transfer on-chain.  The flow for a two-hop path A→B→C is:
+//
+//   Before first hop : order_handler has already transferred `token_A` from the
+//                      order_vault into `market_1`'s contract address.
+//
+//   Hop 1 (market_1, A→B):
+//     • pool_1 amount_A  += input_amount    (DataStore record)
+//     • pool_1 amount_B  -= output_amount   (DataStore record)
+//     • SEP-41 transfer  : token_B moves from market_1 → market_2 (physical)
+//
+//   Hop 2 (market_2, B→C):
+//     • pool_2 amount_B  += intermediate_amount   (DataStore record, tokens
+//                                                   already physically present)
+//     • pool_2 amount_C  -= output_amount          (DataStore record)
+//     • SEP-41 transfer  : token_C moves from market_2 → final_receiver (physical)
+//
+// Pool balance invariant (after full execution):
+//   market_1 on-chain balance of token_B  == recorded pool_1 amount_B
+//   market_2 on-chain balance of token_C  == recorded pool_2 amount_C
+//
+// # Duplicate market guard (issue #56)
+//
+// A swap path with repeated market addresses would cause the same pool's state
+// to be mutated twice inside one transaction, double-counting both the pool
+// amounts and the price-impact pool.  This function rejects any path that
+// contains a duplicate market address before any state is touched.
 
 #[allow(clippy::too_many_arguments)]
 pub fn swap_with_path(
@@ -116,20 +147,42 @@ pub fn swap_with_path(
     path: &Vec<Address>,
     receiver: &Address,
 ) -> (Address, i128) {
+    let path_len = path.len();
+
     // 1. Validate path length
     let max_len = {
         let raw = DataStoreClient::new(env, data_store)
             .get_u128(&max_swap_path_length_key(env)) as usize;
         if raw == 0 { 3 } else { raw } // default to 3 if not configured
     };
-    if path.len() as usize > max_len {
+    if path_len as usize > max_len {
         soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(2));
     }
 
-    // 2. Walk the path
+    // 2. Reject duplicate market addresses in path (issue #56).
+    //    Any repeated market would double-mutate pool state and corrupt
+    //    price-impact accounting; revert before any state change.
+    {
+        let mut i = 0u32;
+        while i < path_len {
+            let mut j = i + 1;
+            while j < path_len {
+                if path.get(i).unwrap() == path.get(j).unwrap() {
+                    // Error code 3 = DuplicateMarketInPath
+                    soroban_sdk::panic_with_error!(
+                        env,
+                        soroban_sdk::contracterror::Error::from_u32(3)
+                    );
+                }
+                j += 1;
+            }
+            i += 1;
+        }
+    }
+
+    // 3. Walk the path — tokens move physically on every hop (see module comment).
     let mut current_token = token_in.clone();
     let mut current_amount = amount_in;
-    let path_len = path.len();
 
     for i in 0..path_len {
         let market_token_addr = path.get(i).unwrap();
@@ -150,15 +203,16 @@ pub fn swap_with_path(
             short_token,
         };
 
-        // For non-final hops: output stays in the next pool (tokens don't move to receiver yet).
-        // For the final hop: send to receiver.
+        // For intermediate hops the output token is physically transferred to the
+        // next market's contract address (it becomes that pool's input for the
+        // following hop).  For the final hop the output goes to the caller's receiver.
         let next_receiver = if i + 1 == path_len {
             receiver.clone()
         } else {
-            // Output stays in this market's pool for the next hop to read
-            // (we don't actually move tokens between pools mid-path;
-            //  instead we carry the amount and re-apply on next hop)
-            market_token_addr.clone()
+            // Tokens physically move from this market to the next market pool.
+            // The next hop will find them already in the target pool contract.
+            let next_market = path.get(i + 1).unwrap();
+            next_market
         };
 
         let (out_token, out_amount) = swap(

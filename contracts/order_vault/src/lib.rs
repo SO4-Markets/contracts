@@ -70,8 +70,19 @@ impl OrderVault {
         env.storage().instance().set(&InstanceKey::RoleStore, &role_store);
     }
 
-    /// Snapshot the balance of `token` in this vault.
-    /// Returns the amount received since the last snapshot (delta).
+    /// Snapshot the balance of `token` in this vault and return the received delta.
+    ///
+    /// # Balance invariant (issue #47)
+    ///
+    /// The returned delta is `current_on_chain_balance − last_recorded_balance`.
+    /// A positive delta means tokens arrived since the last snapshot; the caller
+    /// (order_handler.create_order) treats this as the collateral amount and
+    /// reverts the transaction if the delta is ≤ 0.
+    ///
+    /// After every transfer-out the vault re-snapshots in the same call, so the
+    /// recorded balance always equals the actual on-chain balance.  This prevents
+    /// double-counting: a second `record_transfer_in` before any new deposit
+    /// returns 0, which order_handler will reject.
     pub fn record_transfer_in(env: Env, token: Address) -> i128 {
         let current = token::Client::new(&env, &token)
             .balance(&env.current_contract_address());
