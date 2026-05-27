@@ -2,17 +2,17 @@
 //! Mirrors GMX's OrderHandler.sol.
 //!
 //! Supported order types (OrderType enum in gmx_types):
-//!   MarketSwap, LimitSwap            → routed to swap_utils
-//!   MarketIncrease, LimitIncrease    → routed to increase_position_utils
+//!   MarketSwap, LimitSwap            ? routed to swap_utils
+//!   MarketIncrease, LimitIncrease    ? routed to increase_position_utils
 //!   MarketDecrease, LimitDecrease,
-//!   StopLossDecrease, Liquidation    → routed to decrease_position_utils
+//!   StopLossDecrease, Liquidation    ? routed to decrease_position_utils
 //!
 //! Two-step lifecycle (same as deposit/withdrawal):
-//!   create_order  → pulls collateral into order_vault, stores OrderProps
-//!   execute_order → keeper calls with fresh oracle prices, dispatches by type
-//!   cancel_order  → refunds collateral from order_vault to account
-//!   update_order  → modify trigger_price / acceptable_price / size before execution
-//!   freeze_order  → mark order as frozen (keeper-side circuit breaker)
+//!   create_order  ? pulls collateral into order_vault, stores OrderProps
+//!   execute_order ? keeper calls with fresh oracle prices, dispatches by type
+//!   cancel_order  ? refunds collateral from order_vault to account
+//!   update_order  ? modify trigger_price / acceptable_price / size before execution
+//!   freeze_order  ? mark order as frozen (keeper-side circuit breaker)
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
@@ -32,7 +32,7 @@ use gmx_decrease_position_utils::{DecreasePositionParams, decrease_position};
 use gmx_swap_utils::swap_with_path;
 use gmx_types::PositionProps;
 
-// ─── Storage keys ─────────────────────────────────────────────────────────────
+// --- Storage keys -------------------------------------------------------------
 
 #[contracttype]
 enum InstanceKey {
@@ -42,9 +42,10 @@ enum InstanceKey {
     DataStore,
     Oracle,
     OrderVault,
+    LiquidationHandler,
 }
 
-// ─── Errors ───────────────────────────────────────────────────────────────────
+// --- Errors -------------------------------------------------------------------
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -65,7 +66,7 @@ pub enum Error {
     ZeroCollateral        = 10,
 }
 
-// ─── External contract clients ────────────────────────────────────────────────
+// --- External contract clients ------------------------------------------------
 
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "RoleStoreClient")]
@@ -98,7 +99,7 @@ trait IOrderVault {
     fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128);
 }
 
-// ─── Position storage key (must match increase/decrease position utils) ───────
+// --- Position storage key (must match increase/decrease position utils) -------
 
 /// Positions are stored in this contract's persistent storage under this key.
 /// The #[contracttype] XDR encoding must match the one in increase/decrease_position_utils.
@@ -107,7 +108,7 @@ pub enum PositionStorageKey {
     Position(BytesN<32>),
 }
 
-// ─── Order-frozen flag (stored alongside OrderProps) ──────────────────────────
+// --- Order-frozen flag (stored alongside OrderProps) --------------------------
 
 #[contracttype]
 pub enum OrderStorageKey {
@@ -115,7 +116,7 @@ pub enum OrderStorageKey {
     OrderFrozen(BytesN<32>),
 }
 
-// ─── Contract ─────────────────────────────────────────────────────────────────
+// --- Contract -----------------------------------------------------------------
 
 #[contract]
 pub struct OrderHandler;
@@ -281,16 +282,23 @@ impl OrderHandler {
             OrderType::StopIncrease if index_price.min < order.trigger_price => {
                 panic_with_error!(&env, Error::UnsatisfiedTrigger);
             }
-            OrderType::LimitDecrease if index_price.max < order.trigger_price => {
+            OrderType::LimitDecrease
+                if (order.is_long && index_price.max < order.trigger_price)
+                    || (!order.is_long && index_price.min > order.trigger_price) =>
+            {
                 panic_with_error!(&env, Error::UnsatisfiedTrigger);
             }
-            OrderType::StopLossDecrease if index_price.min > order.trigger_price => {
+            OrderType::StopLossDecrease
+                if (order.is_long && index_price.min > order.trigger_price)
+                    || (!order.is_long && index_price.max < order.trigger_price) =>
+            {
                 panic_with_error!(&env, Error::UnsatisfiedTrigger);
             }
             _ => {}
         }
 
         // Dispatch by order type
+        let mut realized_pnl_usd = 0i128;
         match order.order_type {
             OrderType::MarketSwap | OrderType::LimitSwap => {
                 // Transfer collateral from vault to first market in path
@@ -341,7 +349,7 @@ impl OrderHandler {
 
             OrderType::MarketDecrease | OrderType::LimitDecrease |
             OrderType::StopLossDecrease | OrderType::Liquidation => {
-                decrease_position(&env, &DecreasePositionParams {
+                let result = decrease_position(&env, &DecreasePositionParams {
                     data_store:        &data_store,
                     caller:            &handler,
                     account:           &order.account,
@@ -355,13 +363,14 @@ impl OrderHandler {
                     collateral_price,
                     current_time:      env.ledger().timestamp(),
                 });
+                realized_pnl_usd = result.pnl_usd;
             }
         }
 
         // Remove order
         remove_order(&env, &data_store, &handler, &key, &order.account);
 
-        env.events().publish((symbol_short!("ord_exe"),), (key, order.account));
+        env.events().publish((symbol_short!("ord_exe"),), (key, order.account, realized_pnl_usd));
     }
 
     /// Cancel a pending order and refund collateral to the account.
@@ -454,14 +463,35 @@ impl OrderHandler {
         env.events().publish((symbol_short!("ord_frz"),), key);
     }
 
+    /// Register the liquidation handler contract that is allowed to delegate
+    /// forced closes into this contract.
+    pub fn set_liquidation_handler(env: Env, admin: Address, liquidation_handler: Address) {
+        admin.require_auth();
+
+        let stored_admin: Address = env.storage().instance().get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if stored_admin != admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+
+        env.storage().instance().set(&InstanceKey::LiquidationHandler, &liquidation_handler);
+    }
+
     /// Return a stored order by key, or None if not found.
     pub fn get_order(env: Env, key: BytesN<32>) -> Option<OrderProps> {
         env.storage().persistent().get(&OrderStorageKey::Order(key))
     }
 
-    /// Return a stored position by its position_key (sha256 hash), or None.
+    /// Return a stored position by account/market/collateral/side, or None.
     /// Used by liquidation_handler and adl_handler to check position health.
-    pub fn get_position(env: Env, key: BytesN<32>) -> Option<PositionProps> {
+    pub fn get_position(
+        env: Env,
+        account: Address,
+        market: Address,
+        collateral_token: Address,
+        is_long: bool,
+    ) -> Option<PositionProps> {
+        let key = position_key(&env, &account, &market, &collateral_token, is_long);
         env.storage().persistent().get(&PositionStorageKey::Position(key))
     }
 
@@ -470,20 +500,22 @@ impl OrderHandler {
     /// Positions live in order_handler storage, so liquidation must run here.
     pub fn liquidate_position(
         env: Env,
-        keeper: Address,  // must have LIQUIDATION_KEEPER role
         account: Address,
         market: Address,
         collateral_token: Address,
         is_long: bool,
     ) {
-        keeper.require_auth();
-        require_liquidation_keeper(&env, &keeper);
-
         let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let oracle: Address = env.storage().instance().get(&InstanceKey::Oracle)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let liquidation_handler: Address = env.storage().instance().get(&InstanceKey::LiquidationHandler)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::Unauthorized));
         let handler = env.current_contract_address();
+
+        if env.invoker() != liquidation_handler {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
 
         let market_props = load_market_props(&env, &data_store, &market);
         let oracle_client = OracleClient::new(&env, &oracle);
@@ -571,20 +603,12 @@ impl OrderHandler {
     }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// --- Helpers ------------------------------------------------------------------
 
 fn require_order_keeper(env: &Env, caller: &Address) {
     let role_store: Address = env.storage().instance().get(&InstanceKey::RoleStore)
         .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
     if !RoleStoreClient::new(env, &role_store).has_role(caller, &roles::order_keeper(env)) {
-        panic_with_error!(env, Error::Unauthorized);
-    }
-}
-
-fn require_liquidation_keeper(env: &Env, caller: &Address) {
-    let role_store: Address = env.storage().instance().get(&InstanceKey::RoleStore)
-        .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
-    if !RoleStoreClient::new(env, &role_store).has_role(caller, &roles::liquidation_keeper(env)) {
         panic_with_error!(env, Error::Unauthorized);
     }
 }
@@ -622,7 +646,7 @@ fn remove_order(env: &Env, data_store: &Address, caller: &Address, key: &BytesN<
 }
 
 
-// ─── Tests — Issue #50: StopIncrease order lifecycle ─────────────────────────
+// --- Tests — Issue #50: StopIncrease order lifecycle -------------------------
 //
 // Verifies that a StopIncrease order:
 //   • executes only when index price is at or above the trigger price, and
@@ -635,7 +659,7 @@ mod tests {
         token::StellarAssetClient,
         Env, Vec,
     };
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// --- Tests --------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -828,7 +852,7 @@ mod tests {
         })
     }
 
-    // ── Issue #50: trigger-boundary tests ─────────────────────────────────────
+    // -- Issue #50: trigger-boundary tests -------------------------------------
 
     /// StopIncrease executes when index price exactly equals the trigger price.
     #[test]
@@ -985,7 +1009,7 @@ mod tests {
         (hc, key)
     }
 
-    // ── Issue #47: collateral model guard ────────────────────────────────────
+    // -- Issue #47: collateral model guard ------------------------------------
 
     /// Creating an increase/swap order without pre-depositing collateral in the
     /// vault must revert with ZeroCollateral (canonical model — issue #47).
@@ -993,7 +1017,7 @@ mod tests {
     #[should_panic]
     fn create_order_without_collateral_reverts() {
         let w = setup();
-        // Vault has no tokens → record_transfer_in returns 0 → ZeroCollateral
+        // Vault has no tokens ? record_transfer_in returns 0 ? ZeroCollateral
         OrderHandlerClient::new(&w.env, &w.handler).create_order(&w.user, &CreateOrderParams {
             receiver:                  w.user.clone(),
             market:                    w.market_tk.clone(),
@@ -1021,7 +1045,7 @@ mod tests {
         let recorded = ov.get_recorded_balance(&w.long_tk);
         let on_chain = soroban_sdk::token::Client::new(&w.env, &w.long_tk)
             .balance(&w.vault);
-        assert_eq!(recorded, on_chain,   "vault recorded ≠ on-chain balance");
+        assert_eq!(recorded, on_chain,   "vault recorded ? on-chain balance");
         assert_eq!(recorded, COLLATERAL, "vault should hold exactly the deposited collateral");
     }
 
@@ -1054,7 +1078,7 @@ mod tests {
         // First order consumes the vault snapshot
         let _  = create_increase_order(&w, OrderType::MarketIncrease, 0);
 
-        // Second order — no new tokens deposited; record_transfer_in delta = 0 → ZeroCollateral
+        // Second order — no new tokens deposited; record_transfer_in delta = 0 ? ZeroCollateral
         OrderHandlerClient::new(&w.env, &w.handler).create_order(&w.user, &CreateOrderParams {
             receiver:                  w.user.clone(),
             market:                    w.market_tk.clone(),
@@ -1071,7 +1095,7 @@ mod tests {
         });
     }
 
-    // ── Issue #49: limit increase order lifecycle ─────────────────────────────
+    // -- Issue #49: limit increase order lifecycle -----------------------------
 
     /// LimitIncrease where oracle price > trigger_price must revert with
     /// UnsatisfiedTrigger before any state mutation occurs.
@@ -1080,13 +1104,13 @@ mod tests {
     fn limit_increase_unsatisfied_trigger_reverts() {
         let w = setup();
         let fp = gmx_math::FLOAT_PRECISION;
-        // trigger = $1 000; oracle index price = $2 000 → 2000 > 1000 → reverts
+        // trigger = $1 000; oracle index price = $2 000 ? 2000 > 1000 ? reverts
         let (hc, key) = create_increase_order(&w, OrderType::LimitIncrease, 1000 * fp);
         set_prices(&w);
         hc.execute_order(&w.keeper, &key);
     }
 
-    /// LimitIncrease where oracle price ≤ trigger_price must succeed:
+    /// LimitIncrease where oracle price = trigger_price must succeed:
     ///   • position created with correct fields,
     ///   • open interest increased in DataStore,
     ///   • order key removed from storage.
@@ -1094,7 +1118,7 @@ mod tests {
     fn limit_increase_satisfied_trigger_creates_position() {
         let w = setup();
         let fp = gmx_math::FLOAT_PRECISION;
-        // trigger = $3 000; oracle index = $2 000 → 2000 ≤ 3000 → satisfied
+        // trigger = $3 000; oracle index = $2 000 ? 2000 = 3000 ? satisfied
         let (hc, key) = create_increase_order(&w, OrderType::LimitIncrease, 3000 * fp);
         set_prices(&w);
 
@@ -1104,8 +1128,7 @@ mod tests {
         assert!(hc.get_order(&key).is_none(), "order should be removed after execution");
 
         // 2. Position must exist and have correct fields
-        let pk       = position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true);
-        let position = hc.get_position(&pk)
+        let position = hc.get_position(&w.user, &w.market_tk, &w.long_tk, &true)
             .expect("position must exist after limit increase execution");
 
         assert!(position.size_in_usd > 0,          "position size_in_usd must be positive");
@@ -1133,7 +1156,7 @@ mod tests {
         DepositHandlerClient::new(&w.env, &w.dep_handler).execute_deposit(&w.keeper, &k);
     }
 
-    // ── Issue #32: order storage cleanup tests ────────────────────────────────
+    // -- Issue #32: order storage cleanup tests --------------------------------
 
     /// After cancel_order, the record must be gone from local storage AND from
     /// both the global and per-account order lists in data_store.
@@ -1216,3 +1239,4 @@ mod tests {
             "account order list must not contain key after execute");
     }
 }
+

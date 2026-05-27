@@ -8,7 +8,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error,
-    Address, BytesN, Env, symbol_short,
+    Address, Env, symbol_short,
 };
 use gmx_types::{MarketProps, PriceProps, PositionProps};
 use gmx_math::{FLOAT_PRECISION, mul_div_wide};
@@ -16,12 +16,11 @@ use gmx_keys::{
     roles,
     market_index_token_key, market_long_token_key, market_short_token_key,
     max_pnl_factor_for_adl_key,
-    position_key,
 };
 use gmx_market_utils::{get_pool_value, get_pnl};
 use gmx_position_utils::get_position_pnl_usd;
 
-// ─── Storage keys ─────────────────────────────────────────────────────────────
+// --- Storage keys -------------------------------------------------------------
 
 #[contracttype]
 enum InstanceKey {
@@ -33,7 +32,7 @@ enum InstanceKey {
     OrderHandler,
 }
 
-// ─── Errors ───────────────────────────────────────────────────────────────────
+// --- Errors -------------------------------------------------------------------
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -48,7 +47,7 @@ pub enum Error {
     PositionNotFound   = 7,
 }
 
-// ─── External clients ─────────────────────────────────────────────────────────
+// --- External clients ---------------------------------------------------------
 
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "RoleStoreClient")]
@@ -81,10 +80,16 @@ trait IOrderHandler {
         is_long: bool,
         size_delta_usd: i128,
     );
-    fn get_position(env: Env, key: BytesN<32>) -> Option<PositionProps>;
+    fn get_position(
+        env: Env,
+        account: Address,
+        market: Address,
+        collateral_token: Address,
+        is_long: bool,
+    ) -> Option<PositionProps>;
 }
 
-// ─── Contract ─────────────────────────────────────────────────────────────────
+// --- Contract -----------------------------------------------------------------
 
 #[contract]
 pub struct AdlHandler;
@@ -195,8 +200,9 @@ impl AdlHandler {
         let index_price = oracle_client.get_primary_price(&market_props.index_token);
 
         // Verify the target position is profitable (ADL only closes profitable positions)
-        let pk = position_key(&env, &account, &market, &collateral_token, is_long);
-        let position: PositionProps = match OrderHandlerClient::new(&env, &order_handler).get_position(&pk) {
+        let position: PositionProps = match OrderHandlerClient::new(&env, &order_handler)
+            .get_position(&account, &market, &collateral_token, &is_long)
+        {
             Some(p) => p,
             None => panic_with_error!(&env, Error::PositionNotFound),
         };
@@ -217,7 +223,7 @@ impl AdlHandler {
     }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// --- Helpers ------------------------------------------------------------------
 
 fn load_market_props(env: &Env, data_store: &Address, market_token: &Address) -> MarketProps {
     let ds = DataStoreClient::new(env, data_store);
@@ -229,3 +235,4 @@ fn load_market_props(env: &Env, data_store: &Address, market_token: &Address) ->
         .unwrap_or_else(|| panic_with_error!(env, Error::InvalidInput));
     MarketProps { market_token: market_token.clone(), index_token, long_token, short_token }
 }
+

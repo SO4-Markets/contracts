@@ -15,11 +15,10 @@ use gmx_types::{MarketProps, PriceProps, PositionProps};
 use gmx_keys::{
     roles,
     market_index_token_key, market_long_token_key, market_short_token_key,
-    position_key,
 };
 use gmx_position_utils::is_liquidatable;
 
-// ─── Storage keys ─────────────────────────────────────────────────────────────
+// --- Storage keys -------------------------------------------------------------
 
 #[contracttype]
 enum InstanceKey {
@@ -31,7 +30,7 @@ enum InstanceKey {
     OrderHandler,
 }
 
-// ─── Errors ───────────────────────────────────────────────────────────────────
+// --- Errors -------------------------------------------------------------------
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -43,7 +42,7 @@ pub enum Error {
     NotLiquidatable     = 5,
 }
 
-// ─── External clients ─────────────────────────────────────────────────────────
+// --- External clients ---------------------------------------------------------
 
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "RoleStoreClient")]
@@ -69,16 +68,21 @@ trait IOracle {
 trait IOrderHandler {
     fn liquidate_position(
         env: Env,
-        keeper: Address,
         account: Address,
         market: Address,
         collateral_token: Address,
         is_long: bool,
     );
-    fn get_position(env: Env, key: BytesN<32>) -> Option<PositionProps>;
+    fn get_position(
+        env: Env,
+        account: Address,
+        market: Address,
+        collateral_token: Address,
+        is_long: bool,
+    ) -> Option<PositionProps>;
 }
 
-// ─── Contract ─────────────────────────────────────────────────────────────────
+// --- Contract -----------------------------------------------------------------
 
 #[contract]
 pub struct LiquidationHandler;
@@ -126,8 +130,9 @@ impl LiquidationHandler {
         let collateral_price = oracle_client.get_primary_price(&collateral_token).mid_price();
 
         // Read position from order_handler via a view call
-        let pk = position_key(&env, &account, &market, &collateral_token, is_long);
-        let position: PositionProps = match OrderHandlerClient::new(&env, &order_handler).get_position(&pk) {
+        let position: PositionProps = match OrderHandlerClient::new(&env, &order_handler)
+            .get_position(&account, &market, &collateral_token, &is_long)
+        {
             Some(p) => p,
             None => return false,
         };
@@ -167,8 +172,9 @@ impl LiquidationHandler {
         let collateral_price = oracle_client.get_primary_price(&collateral_token).mid_price();
 
         // Verify position is actually liquidatable before delegating
-        let pk = position_key(&env, &account, &market, &collateral_token, is_long);
-        let position: PositionProps = match OrderHandlerClient::new(&env, &order_handler).get_position(&pk) {
+        let position: PositionProps = match OrderHandlerClient::new(&env, &order_handler)
+            .get_position(&account, &market, &collateral_token, &is_long)
+        {
             Some(p) => p,
             None => panic_with_error!(&env, Error::NotLiquidatable),
         };
@@ -179,7 +185,7 @@ impl LiquidationHandler {
 
         // Delegate execution to order_handler (positions live there)
         OrderHandlerClient::new(&env, &order_handler)
-            .liquidate_position(&keeper, &account, &market, &collateral_token, &is_long);
+            .liquidate_position(&account, &market, &collateral_token, &is_long);
 
         env.events().publish(
             (symbol_short!("liq_req"),),
@@ -188,7 +194,7 @@ impl LiquidationHandler {
     }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// --- Helpers ------------------------------------------------------------------
 
 fn load_market_props(env: &Env, data_store: &Address, market_token: &Address) -> MarketProps {
     let ds = DataStoreClient::new(env, data_store);
@@ -200,3 +206,4 @@ fn load_market_props(env: &Env, data_store: &Address, market_token: &Address) ->
         .expect("market short token not found");
     MarketProps { market_token: market_token.clone(), index_token, long_token, short_token }
 }
+
