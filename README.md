@@ -919,7 +919,7 @@ contracts/
 
 SO4.market is being built in the open. All eight implementation phases are complete — the full protocol logic is live in Rust/Soroban. See the issue tracker for integration tests, optimisation tasks, and frontend work.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for deployment and upgrade workflow rules.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for deployment, and upgrade workflow rules.
 
 ---
 
