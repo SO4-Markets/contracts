@@ -59,7 +59,7 @@ pub fn swap(
     } else if token_in == &market.short_token {
         market.long_token.clone()
     } else {
-        soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(1));
+        soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(1u32));
     };
 
     // 2. Read prices from oracle
@@ -156,7 +156,7 @@ pub fn swap_with_path(
         if raw == 0 { 3 } else { raw } // default to 3 if not configured
     };
     if path_len as usize > max_len {
-        soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(2));
+        soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(2u32));
     }
 
     // 2. Reject duplicate market addresses in path (issue #56).
@@ -171,7 +171,7 @@ pub fn swap_with_path(
                     // Error code 3 = DuplicateMarketInPath
                     soroban_sdk::panic_with_error!(
                         env,
-                        soroban_sdk::contracterror::Error::from_u32(3)
+                        soroban_sdk::Error::from_contract_error(3u32)
                     );
                 }
                 j += 1;

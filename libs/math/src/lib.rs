@@ -59,7 +59,7 @@ pub fn mul_div_wide_up(env: &Env, a: i128, b: i128, denominator: i128) -> i128 {
     // only applies when product > 0 to avoid rounding negative values upward
     let zero = I256::from_i128(env, 0);
     let one  = I256::from_i128(env, 1);
-    let result = if product.cmp(&zero) > 0 {
+    let result = if product.cmp(&zero) == core::cmp::Ordering::Greater {
         let d_minus_one = d256.sub(&one);
         product.add(&d_minus_one).div(&d256)
     } else {

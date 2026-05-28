@@ -194,7 +194,7 @@ pub fn validate_position(
     if min_collateral_factor > 0 {
         let required_min = mul_div_wide(env, position.size_in_usd, min_collateral_factor, FLOAT_PRECISION);
         if collateral_usd < required_min {
-            soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(1));
+            soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(1u32));
         }
     }
 
@@ -204,13 +204,13 @@ pub fn validate_position(
     if max_leverage > 0 && collateral_usd > 0 {
         let effective_leverage = mul_div_wide(env, position.size_in_usd, FLOAT_PRECISION, collateral_usd);
         if effective_leverage > max_leverage {
-            soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(2));
+            soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(2u32));
         }
     }
 
     // 3. OPEN INTEREST check
     if validate_open_interest(env, data_store, market, position.is_long).is_err() {
-        soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(3));
+        soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(3u32));
     }
 }
 

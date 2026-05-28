@@ -18,8 +18,9 @@ use gmx_math::{TOKEN_PRECISION, mul_div_wide};
 use gmx_keys::{
     market_index_token_key, market_long_token_key, market_short_token_key,
     funding_amount_per_size_key, saved_funding_factor_per_second_key,
-    account_order_list_key, account_position_list_key,
-    account_deposit_list_key, account_withdrawal_list_key,
+    position_key,
+    order_list_key, account_order_list_key, account_position_list_key,
+    withdrawal_list_key, account_withdrawal_list_key,
 };
 use gmx_market_utils::{get_pool_value, get_open_interest_for_side};
 use gmx_position_utils::{get_position_pnl_usd, get_position_fees, is_liquidatable};
@@ -293,7 +294,7 @@ impl Reader {
         let start = (page - 1).saturating_mul(page_size);
         let end = start.saturating_add(page_size);
 
-        let keys: Vec<BytesN<32>> = ds.get_bytes32_set_at(&set_key, start, end);
+        let keys: Vec<BytesN<32>> = ds.get_bytes32_set_at(&set_key, &start, &end);
         let mut out: Vec<OrderProps> = Vec::new(&env);
         for i in 0..keys.len() {
             let k = keys.get_unchecked(i);
@@ -375,6 +376,56 @@ impl Reader {
         WithdrawalHandlerClient::new(&env, &withdrawal_handler).get_withdrawal(&key)
     }
 
+    // ── Withdrawal key enumeration (issue #24) ────────────────────────────────
+
+    /// Count of all pending withdrawal keys in DataStore.
+    pub fn get_withdrawal_count(env: Env, data_store: Address) -> u32 {
+        DataStoreClient::new(&env, &data_store).get_bytes32_set_count(&withdrawal_list_key(&env))
+    }
+
+    /// Paginated list of all withdrawal keys (raw BytesN<32>).
+    pub fn get_withdrawal_keys(env: Env, data_store: Address, start: u32, end: u32) -> Vec<BytesN<32>> {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_at(&withdrawal_list_key(&env), &start, &end)
+    }
+
+    /// Count of pending withdrawal keys for a specific account.
+    pub fn get_account_withdrawal_count(env: Env, data_store: Address, account: Address) -> u32 {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_count(&account_withdrawal_list_key(&env, &account))
+    }
+
+    /// Paginated list of withdrawal keys for a specific account.
+    pub fn get_account_withdrawal_keys(env: Env, data_store: Address, account: Address, start: u32, end: u32) -> Vec<BytesN<32>> {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_at(&account_withdrawal_list_key(&env, &account), &start, &end)
+    }
+
+    // ── Order key enumeration (issue #25) ─────────────────────────────────────
+
+    /// Count of all pending order keys in DataStore.
+    pub fn get_order_count(env: Env, data_store: Address) -> u32 {
+        DataStoreClient::new(&env, &data_store).get_bytes32_set_count(&order_list_key(&env))
+    }
+
+    /// Paginated list of all order keys (raw BytesN<32>).
+    pub fn get_order_keys(env: Env, data_store: Address, start: u32, end: u32) -> Vec<BytesN<32>> {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_at(&order_list_key(&env), &start, &end)
+    }
+
+    /// Count of pending order keys for a specific account.
+    pub fn get_account_order_count(env: Env, data_store: Address, account: Address) -> u32 {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_count(&account_order_list_key(&env, &account))
+    }
+
+    /// Paginated list of order keys for a specific account.
+    pub fn get_account_order_keys(env: Env, data_store: Address, account: Address, start: u32, end: u32) -> Vec<BytesN<32>> {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_at(&account_order_list_key(&env, &account), &start, &end)
+    }
+
     /// Return paginated account positions as enriched `PositionInfo` entries.
     pub fn get_account_positions(
         env: Env,
@@ -393,7 +444,7 @@ impl Reader {
         let start = (page - 1).saturating_mul(page_size);
         let end = start.saturating_add(page_size);
 
-        let keys: Vec<BytesN<32>> = ds.get_bytes32_set_at(&set_key, start, end);
+        let keys: Vec<BytesN<32>> = ds.get_bytes32_set_at(&set_key, &start, &end);
         let mut out: Vec<PositionInfo> = Vec::new(&env);
         for i in 0..keys.len() {
             let k = keys.get_unchecked(i);
