@@ -117,10 +117,10 @@ pub fn decrease_position(env: &Env, p: &DecreasePositionParams) -> DecreasePosit
     let execution_price = get_execution_price(env, index_price_mid, size_delta_usd, impact_usd, p.is_long, false);
     if p.acceptable_price != 0 {
         if p.is_long  && execution_price < p.acceptable_price {
-            soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(1));
+            soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(1u32));
         }
         if !p.is_long && execution_price > p.acceptable_price {
-            soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(2));
+            soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(2u32));
         }
     }
 

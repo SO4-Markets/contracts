@@ -116,10 +116,10 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
     let execution_price = get_execution_price(env, index_price, p.size_delta_usd, impact_usd, p.is_long, true);
     if p.acceptable_price != 0 {
         if p.is_long && execution_price > p.acceptable_price {
-            soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(1));
+            soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(1u32));
         }
         if !p.is_long && execution_price < p.acceptable_price {
-            soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(2));
+            soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(2u32));
         }
     }
 
@@ -140,7 +140,7 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
     // 8. Update collateral: add deposited, subtract fees
     position.collateral_amount += p.collateral_amount - fees.total_cost_amount;
     if position.collateral_amount < 0 {
-        soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(3));
+        soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(3u32));
     }
 
     // 9. Update position size and funding/borrowing trackers

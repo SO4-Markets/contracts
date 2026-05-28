@@ -114,6 +114,10 @@ pub enum OrderStorageKey {
     Order(BytesN<32>),
     OrderFrozen(BytesN<32>),
 }
+// OrderProps are stored in this contract's own persistent storage (not DataStore)
+// because DataStore supports only primitive/set types, not arbitrary structs.
+// DataStore holds only the index sets (order_list_key, account_order_list_key)
+// for enumeration. This matches the deposit and withdrawal handler patterns (issue #25).
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
 
@@ -676,6 +680,7 @@ mod tests {
     fn setup() -> World {
         let env = Env::default();
         env.mock_all_auths();
+        env.budget().reset_unlimited();
 
         let admin  = Address::generate(&env);
         let keeper = Address::generate(&env);
@@ -1156,5 +1161,232 @@ mod tests {
             hc.get_position(&pos_key).is_some(),
             "position must still be readable after upgrade"
         );
+    }
+
+    // ── Issue #59/#60: configured max swap path length enforced ───────────────
+
+    #[test]
+    #[should_panic]
+    fn swap_path_over_configured_max_reverts() {
+        let w = setup();
+        let env = &w.env;
+        seed_pool(&w);
+        set_prices(&w, 2000 * gmx_math::FLOAT_PRECISION);
+
+        DsClient::new(env, &w.ds)
+            .set_u128(&w.admin, &gmx_keys::max_swap_path_length_key(env), &1u128);
+
+        let user = Address::generate(env);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        soroban_sdk::token::Client::new(env, &w.long_tk)
+            .transfer(&user, &w.ord_vault, &1_000_0000i128);
+
+        let fake_market = Address::generate(env);
+        let hc = OrderHandlerClient::new(env, &w.ord_handler);
+        let key = hc.create_order(&user, &CreateOrderParams {
+            receiver: user.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: Vec::from_array(env, [w.market_tk.clone(), fake_market]),
+            size_delta_usd: 0, collateral_delta_amount: 1_000_0000i128,
+            trigger_price: 0, acceptable_price: 0,
+            execution_fee: 0, min_output_amount: 0,
+            order_type: OrderType::MarketSwap, is_long: false,
+        });
+        hc.execute_order(&w.keeper, &key);
+    }
+
+    #[test]
+    fn swap_path_at_configured_max_succeeds() {
+        let w = setup();
+        let env = &w.env;
+        seed_pool(&w);
+        set_prices(&w, 2000 * gmx_math::FLOAT_PRECISION);
+
+        DsClient::new(env, &w.ds)
+            .set_u128(&w.admin, &gmx_keys::max_swap_path_length_key(env), &1u128);
+
+        let user = Address::generate(env);
+        StellarAssetClient::new(env, &w.short_tk).mint(&user, &1_000_0000i128);
+        soroban_sdk::token::Client::new(env, &w.short_tk)
+            .transfer(&user, &w.ord_vault, &1_000_0000i128);
+
+        let hc = OrderHandlerClient::new(env, &w.ord_handler);
+        let key = hc.create_order(&user, &CreateOrderParams {
+            receiver: user.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.short_tk.clone(),
+            swap_path: Vec::from_array(env, [w.market_tk.clone()]),
+            size_delta_usd: 0, collateral_delta_amount: 1_000_0000i128,
+            trigger_price: 0, acceptable_price: 0,
+            execution_fee: 0, min_output_amount: 0,
+            order_type: OrderType::MarketSwap, is_long: false,
+        });
+        hc.execute_order(&w.keeper, &key);
+        assert!(hc.get_order(&key).is_none(), "order consumed after single-hop swap");
+        assert!(soroban_sdk::token::Client::new(env, &w.long_tk).balance(&user) > 0,
+            "user should receive long_tk from short->long swap");
+    }
+
+    // ── Issue #58: multi-hop swap invariant tests ─────────────────────────────
+
+    #[test]
+    fn two_hop_swap_pool_balances_preserved() {
+        let w = setup();
+        let env = &w.env;
+
+        let mid_tk = env.register_stellar_asset_contract_v2(w.admin.clone()).address();
+
+        let market_tk1 = env.register(MarketToken, ());
+        MtClient::new(env, &market_tk1).initialize(
+            &w.admin, &w.rs, &7u32,
+            &soroban_sdk::String::from_str(env, "Market1"),
+            &soroban_sdk::String::from_str(env, "M1"),
+        );
+        let market_tk2 = env.register(MarketToken, ());
+        MtClient::new(env, &market_tk2).initialize(
+            &w.admin, &w.rs, &7u32,
+            &soroban_sdk::String::from_str(env, "Market2"),
+            &soroban_sdk::String::from_str(env, "M2"),
+        );
+
+        let ds_c = DsClient::new(env, &w.ds);
+        ds_c.set_address(&w.admin, &gmx_keys::market_index_token_key(env, &market_tk1), &w.index_tk);
+        ds_c.set_address(&w.admin, &gmx_keys::market_long_token_key(env, &market_tk1),  &w.long_tk);
+        ds_c.set_address(&w.admin, &gmx_keys::market_short_token_key(env, &market_tk1), &mid_tk);
+        ds_c.set_address(&w.admin, &gmx_keys::market_index_token_key(env, &market_tk2), &w.index_tk);
+        ds_c.set_address(&w.admin, &gmx_keys::market_long_token_key(env, &market_tk2),  &mid_tk);
+        ds_c.set_address(&w.admin, &gmx_keys::market_short_token_key(env, &market_tk2), &w.short_tk);
+
+        let fp = gmx_math::FLOAT_PRECISION;
+        OClient::new(env, &w.oracle).set_prices_simple(&w.keeper, &Vec::from_array(env, [
+            TokenPrice { token: w.long_tk.clone(), min: 2000 * fp, max: 2000 * fp },
+            TokenPrice { token: mid_tk.clone(),    min: 1000 * fp, max: 1000 * fp },
+            TokenPrice { token: w.short_tk.clone(), min: fp,       max: fp },
+            TokenPrice { token: w.index_tk.clone(), min: 2000 * fp, max: 2000 * fp },
+        ]));
+
+        let pool1_long: u128 = 10_000_0000;
+        let pool1_mid:  u128 = 5_000_0000;
+        let pool2_mid:  u128 = 10_000_0000;
+        let pool2_short: u128 = 5_000_0000;
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&market_tk1, &(pool1_long as i128));
+        StellarAssetClient::new(env, &mid_tk).mint(&market_tk1, &(pool1_mid as i128));
+        StellarAssetClient::new(env, &mid_tk).mint(&market_tk2, &(pool2_mid as i128));
+        StellarAssetClient::new(env, &w.short_tk).mint(&market_tk2, &(pool2_short as i128));
+
+        ds_c.set_u128(&w.admin, &gmx_keys::pool_amount_key(env, &market_tk1, &w.long_tk), &pool1_long);
+        ds_c.set_u128(&w.admin, &gmx_keys::pool_amount_key(env, &market_tk1, &mid_tk),    &pool1_mid);
+        ds_c.set_u128(&w.admin, &gmx_keys::pool_amount_key(env, &market_tk2, &mid_tk),    &pool2_mid);
+        ds_c.set_u128(&w.admin, &gmx_keys::pool_amount_key(env, &market_tk2, &w.short_tk), &pool2_short);
+
+        let amount_in: i128 = 1_000;
+        let user = Address::generate(env);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &amount_in);
+        soroban_sdk::token::Client::new(env, &w.long_tk)
+            .transfer(&user, &w.ord_vault, &amount_in);
+
+        let hc = OrderHandlerClient::new(env, &w.ord_handler);
+        let key = hc.create_order(&user, &CreateOrderParams {
+            receiver: user.clone(),
+            market: market_tk1.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: Vec::from_array(env, [market_tk1.clone(), market_tk2.clone()]),
+            size_delta_usd: 0, collateral_delta_amount: amount_in,
+            trigger_price: 0, acceptable_price: 0,
+            execution_fee: 0, min_output_amount: 0,
+            order_type: OrderType::MarketSwap, is_long: false,
+        });
+        hc.execute_order(&w.keeper, &key);
+
+        let tk_client_long  = soroban_sdk::token::Client::new(env, &w.long_tk);
+        let tk_client_mid   = soroban_sdk::token::Client::new(env, &mid_tk);
+        let tk_client_short = soroban_sdk::token::Client::new(env, &w.short_tk);
+
+        let ds_pool1_long  = ds_c.get_u128(&gmx_keys::pool_amount_key(env, &market_tk1, &w.long_tk)) as i128;
+        let ds_pool1_mid   = ds_c.get_u128(&gmx_keys::pool_amount_key(env, &market_tk1, &mid_tk))    as i128;
+        let ds_pool2_mid   = ds_c.get_u128(&gmx_keys::pool_amount_key(env, &market_tk2, &mid_tk))    as i128;
+        let ds_pool2_short = ds_c.get_u128(&gmx_keys::pool_amount_key(env, &market_tk2, &w.short_tk)) as i128;
+
+        assert_eq!(tk_client_long.balance(&market_tk1),  ds_pool1_long,
+            "market_tk1 on-chain long_tk balance must match DataStore pool record");
+        assert_eq!(tk_client_mid.balance(&market_tk1),   ds_pool1_mid,
+            "market_tk1 on-chain mid_tk balance must match DataStore pool record");
+        assert_eq!(tk_client_mid.balance(&market_tk2),   ds_pool2_mid,
+            "market_tk2 on-chain mid_tk balance must match DataStore pool record");
+        assert_eq!(tk_client_short.balance(&market_tk2), ds_pool2_short,
+            "market_tk2 on-chain short_tk balance must match DataStore pool record");
+    }
+
+    #[test]
+    fn two_hop_swap_output_reaches_receiver() {
+        let w = setup();
+        let env = &w.env;
+
+        let mid_tk = env.register_stellar_asset_contract_v2(w.admin.clone()).address();
+
+        let market_tk1 = env.register(MarketToken, ());
+        MtClient::new(env, &market_tk1).initialize(
+            &w.admin, &w.rs, &7u32,
+            &soroban_sdk::String::from_str(env, "Market1"),
+            &soroban_sdk::String::from_str(env, "M1"),
+        );
+        let market_tk2 = env.register(MarketToken, ());
+        MtClient::new(env, &market_tk2).initialize(
+            &w.admin, &w.rs, &7u32,
+            &soroban_sdk::String::from_str(env, "Market2"),
+            &soroban_sdk::String::from_str(env, "M2"),
+        );
+
+        let ds_c = DsClient::new(env, &w.ds);
+        ds_c.set_address(&w.admin, &gmx_keys::market_index_token_key(env, &market_tk1), &w.index_tk);
+        ds_c.set_address(&w.admin, &gmx_keys::market_long_token_key(env, &market_tk1),  &w.long_tk);
+        ds_c.set_address(&w.admin, &gmx_keys::market_short_token_key(env, &market_tk1), &mid_tk);
+        ds_c.set_address(&w.admin, &gmx_keys::market_index_token_key(env, &market_tk2), &w.index_tk);
+        ds_c.set_address(&w.admin, &gmx_keys::market_long_token_key(env, &market_tk2),  &mid_tk);
+        ds_c.set_address(&w.admin, &gmx_keys::market_short_token_key(env, &market_tk2), &w.short_tk);
+
+        let fp = gmx_math::FLOAT_PRECISION;
+        OClient::new(env, &w.oracle).set_prices_simple(&w.keeper, &Vec::from_array(env, [
+            TokenPrice { token: w.long_tk.clone(), min: 2000 * fp, max: 2000 * fp },
+            TokenPrice { token: mid_tk.clone(),    min: 1000 * fp, max: 1000 * fp },
+            TokenPrice { token: w.short_tk.clone(), min: fp,       max: fp },
+            TokenPrice { token: w.index_tk.clone(), min: 2000 * fp, max: 2000 * fp },
+        ]));
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&market_tk1, &10_000_0000i128);
+        StellarAssetClient::new(env, &mid_tk).mint(&market_tk1,    &5_000_0000i128);
+        StellarAssetClient::new(env, &mid_tk).mint(&market_tk2,    &10_000_0000i128);
+        StellarAssetClient::new(env, &w.short_tk).mint(&market_tk2, &5_000_0000i128);
+
+        ds_c.set_u128(&w.admin, &gmx_keys::pool_amount_key(env, &market_tk1, &w.long_tk), &10_000_0000u128);
+        ds_c.set_u128(&w.admin, &gmx_keys::pool_amount_key(env, &market_tk1, &mid_tk),    &5_000_0000u128);
+        ds_c.set_u128(&w.admin, &gmx_keys::pool_amount_key(env, &market_tk2, &mid_tk),    &10_000_0000u128);
+        ds_c.set_u128(&w.admin, &gmx_keys::pool_amount_key(env, &market_tk2, &w.short_tk), &5_000_0000u128);
+
+        let amount_in: i128 = 1_000;
+        let user = Address::generate(env);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &amount_in);
+        soroban_sdk::token::Client::new(env, &w.long_tk)
+            .transfer(&user, &w.ord_vault, &amount_in);
+
+        let hc = OrderHandlerClient::new(env, &w.ord_handler);
+        let key = hc.create_order(&user, &CreateOrderParams {
+            receiver: user.clone(),
+            market: market_tk1.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: Vec::from_array(env, [market_tk1.clone(), market_tk2.clone()]),
+            size_delta_usd: 0, collateral_delta_amount: amount_in,
+            trigger_price: 0, acceptable_price: 0,
+            execution_fee: 0, min_output_amount: 0,
+            order_type: OrderType::MarketSwap, is_long: false,
+        });
+        hc.execute_order(&w.keeper, &key);
+
+        let short_received = soroban_sdk::token::Client::new(env, &w.short_tk).balance(&user);
+        assert!(short_received > 0,
+            "user must receive short_tk at end of two-hop swap (long_tk -> mid_tk -> short_tk)");
+        assert!(hc.get_order(&key).is_none(), "order consumed after two-hop swap");
     }
 }

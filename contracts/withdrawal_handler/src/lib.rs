@@ -64,6 +64,10 @@ enum InstanceKey {
 enum LocalKey {
     Withdrawal(BytesN<32>),
 }
+// WithdrawalProps are stored in this contract's own persistent storage (not DataStore)
+// because DataStore supports only primitive/set types, not arbitrary structs.
+// DataStore holds only the index sets (withdrawal_list_key, account_withdrawal_list_key)
+// for enumeration. This matches the deposit and order handler patterns (issue #24).
 
 // ─── Cross-contract clients ───────────────────────────────────────────────────
 

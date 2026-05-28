@@ -8,17 +8,19 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use soroban_sdk::{
-    contract, contractimpl, Address, BytesN, Env,
+    contract, contractimpl, Address, BytesN, Env, Vec,
 };
 use gmx_types::{
     MarketProps, PositionProps, PositionInfo, PositionFees, PriceProps,
-    PoolValueInfo, FundingInfo,
+    PoolValueInfo, FundingInfo, OrderProps, DepositProps, WithdrawalProps,
 };
 use gmx_math::{TOKEN_PRECISION, mul_div_wide};
 use gmx_keys::{
     market_index_token_key, market_long_token_key, market_short_token_key,
     funding_amount_per_size_key, saved_funding_factor_per_second_key,
     position_key,
+    order_list_key, account_order_list_key, account_position_list_key,
+    withdrawal_list_key, account_withdrawal_list_key,
 };
 use gmx_market_utils::{get_pool_value, get_open_interest_for_side};
 use gmx_position_utils::{get_position_pnl_usd, get_position_fees, is_liquidatable};
@@ -32,6 +34,8 @@ trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn get_i128(env: Env, key: BytesN<32>) -> i128;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
+    fn get_bytes32_set_count(env: Env, key: BytesN<32>) -> u32;
+    fn get_bytes32_set_at(env: Env, key: BytesN<32>, start: u32, end: u32) -> Vec<BytesN<32>>;
 }
 
 #[allow(dead_code)]
@@ -44,6 +48,20 @@ trait IOracle {
 #[soroban_sdk::contractclient(name = "OrderHandlerClient")]
 trait IOrderHandler {
     fn get_position(env: Env, key: BytesN<32>) -> Option<PositionProps>;
+    fn get_order(env: Env, key: BytesN<32>) -> Option<OrderProps>;
+}
+
+
+#[allow(dead_code)]
+#[soroban_sdk::contractclient(name = "DepositHandlerClient")]
+trait IDepositHandler {
+    fn get_deposit(env: Env, key: BytesN<32>) -> Option<DepositProps>;
+}
+
+#[allow(dead_code)]
+#[soroban_sdk::contractclient(name = "WithdrawalHandlerClient")]
+trait IWithdrawalHandler {
+    fn get_withdrawal(env: Env, key: BytesN<32>) -> Option<WithdrawalProps>;
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -248,5 +266,192 @@ impl Reader {
         let index_price      = oracle_client.get_primary_price(&market_props.index_token);
         let collateral_price = oracle_client.get_primary_price(&position.collateral_token).mid_price();
         is_liquidatable(&env, &data_store, &position, &market_props, collateral_price, &index_price)
+    }
+
+    /// Return a stored order by key, or None if not found.
+    pub fn get_order(
+        env: Env,
+        order_handler: Address,
+        key: BytesN<32>,
+    ) -> Option<OrderProps> {
+        OrderHandlerClient::new(&env, &order_handler).get_order(&key)
+    }
+
+    /// Return paginated orders for an account.
+    pub fn get_account_orders(
+        env: Env,
+        data_store: Address,
+        order_handler: Address,
+        account: Address,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<OrderProps> {
+        let ds = DataStoreClient::new(&env, &data_store);
+        let set_key = account_order_list_key(&env, &account);
+        if page == 0 || page_size == 0 {
+            return Vec::new(&env);
+        }
+        let start = (page - 1).saturating_mul(page_size);
+        let end = start.saturating_add(page_size);
+
+        let keys: Vec<BytesN<32>> = ds.get_bytes32_set_at(&set_key, &start, &end);
+        let mut out: Vec<OrderProps> = Vec::new(&env);
+        for i in 0..keys.len() {
+            let k = keys.get_unchecked(i);
+            if let Some(o) = OrderHandlerClient::new(&env, &order_handler).get_order(&k) {
+                out.push_back(o);
+            }
+        }
+        out
+    }
+
+    /// Get position info by canonical position key (BytesN<32>), returning enriched `PositionInfo`.
+    pub fn get_position_info_by_key(
+        env: Env,
+        data_store: Address,
+        oracle: Address,
+        order_handler: Address,
+        position_key: BytesN<32>,
+    ) -> Option<PositionInfo> {
+        let position: PositionProps = match OrderHandlerClient::new(&env, &order_handler).get_position(&position_key) {
+            Some(p) => p,
+            None => return None,
+        };
+
+        let market_props = Self::get_market(env.clone(), data_store.clone(), position.market.clone());
+        let oracle_client = OracleClient::new(&env, &oracle);
+
+        let index_price      = oracle_client.get_primary_price(&market_props.index_token);
+        let collateral_price = oracle_client.get_primary_price(&position.collateral_token).mid_price();
+
+        let (pnl_usd, uncapped_pnl_usd) = get_position_pnl_usd(
+            &env, &position, &index_price, position.size_in_usd,
+        );
+
+        let fees: PositionFees = get_position_fees(
+            &env, &data_store, &market_props, &position,
+            collateral_price, position.size_in_usd, false,
+        );
+
+        let borrowing_fee_usd = mul_div_wide(&env, fees.borrowing_fee_amount, collateral_price, TOKEN_PRECISION);
+        let funding_fee_usd   = mul_div_wide(&env, fees.funding_fee_amount,   collateral_price, TOKEN_PRECISION);
+        let position_fee_usd  = mul_div_wide(&env, fees.position_fee_amount,  collateral_price, TOKEN_PRECISION);
+
+        let collateral_usd = mul_div_wide(&env, position.collateral_amount, collateral_price, TOKEN_PRECISION);
+        let total_fees_usd = borrowing_fee_usd + funding_fee_usd + position_fee_usd;
+
+        let liquidation_price = if position.size_in_tokens > 0 {
+            let numerator = if position.is_long {
+                position.size_in_usd - collateral_usd + total_fees_usd
+            } else {
+                position.size_in_usd + collateral_usd - total_fees_usd
+            };
+            if numerator > 0 {
+                mul_div_wide(&env, numerator, TOKEN_PRECISION, position.size_in_tokens)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        Some(PositionInfo {
+            position,
+            pnl_usd,
+            uncapped_pnl_usd,
+            borrowing_fee_usd,
+            funding_fee_usd,
+            position_fee_usd,
+            liquidation_price,
+        })
+    }
+
+    /// Get a deposit by key (delegates to deposit_handler).
+    pub fn get_deposit(env: Env, deposit_handler: Address, key: BytesN<32>) -> Option<DepositProps> {
+        DepositHandlerClient::new(&env, &deposit_handler).get_deposit(&key)
+    }
+
+    /// Get a withdrawal by key (delegates to withdrawal_handler).
+    pub fn get_withdrawal(env: Env, withdrawal_handler: Address, key: BytesN<32>) -> Option<WithdrawalProps> {
+        WithdrawalHandlerClient::new(&env, &withdrawal_handler).get_withdrawal(&key)
+    }
+
+    // ── Withdrawal key enumeration (issue #24) ────────────────────────────────
+
+    /// Count of all pending withdrawal keys in DataStore.
+    pub fn get_withdrawal_count(env: Env, data_store: Address) -> u32 {
+        DataStoreClient::new(&env, &data_store).get_bytes32_set_count(&withdrawal_list_key(&env))
+    }
+
+    /// Paginated list of all withdrawal keys (raw BytesN<32>).
+    pub fn get_withdrawal_keys(env: Env, data_store: Address, start: u32, end: u32) -> Vec<BytesN<32>> {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_at(&withdrawal_list_key(&env), &start, &end)
+    }
+
+    /// Count of pending withdrawal keys for a specific account.
+    pub fn get_account_withdrawal_count(env: Env, data_store: Address, account: Address) -> u32 {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_count(&account_withdrawal_list_key(&env, &account))
+    }
+
+    /// Paginated list of withdrawal keys for a specific account.
+    pub fn get_account_withdrawal_keys(env: Env, data_store: Address, account: Address, start: u32, end: u32) -> Vec<BytesN<32>> {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_at(&account_withdrawal_list_key(&env, &account), &start, &end)
+    }
+
+    // ── Order key enumeration (issue #25) ─────────────────────────────────────
+
+    /// Count of all pending order keys in DataStore.
+    pub fn get_order_count(env: Env, data_store: Address) -> u32 {
+        DataStoreClient::new(&env, &data_store).get_bytes32_set_count(&order_list_key(&env))
+    }
+
+    /// Paginated list of all order keys (raw BytesN<32>).
+    pub fn get_order_keys(env: Env, data_store: Address, start: u32, end: u32) -> Vec<BytesN<32>> {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_at(&order_list_key(&env), &start, &end)
+    }
+
+    /// Count of pending order keys for a specific account.
+    pub fn get_account_order_count(env: Env, data_store: Address, account: Address) -> u32 {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_count(&account_order_list_key(&env, &account))
+    }
+
+    /// Paginated list of order keys for a specific account.
+    pub fn get_account_order_keys(env: Env, data_store: Address, account: Address, start: u32, end: u32) -> Vec<BytesN<32>> {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_at(&account_order_list_key(&env, &account), &start, &end)
+    }
+
+    /// Return paginated account positions as enriched `PositionInfo` entries.
+    pub fn get_account_positions(
+        env: Env,
+        data_store: Address,
+        oracle: Address,
+        order_handler: Address,
+        account: Address,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<PositionInfo> {
+        let ds = DataStoreClient::new(&env, &data_store);
+        let set_key = account_position_list_key(&env, &account);
+        if page == 0 || page_size == 0 {
+            return Vec::new(&env);
+        }
+        let start = (page - 1).saturating_mul(page_size);
+        let end = start.saturating_add(page_size);
+
+        let keys: Vec<BytesN<32>> = ds.get_bytes32_set_at(&set_key, &start, &end);
+        let mut out: Vec<PositionInfo> = Vec::new(&env);
+        for i in 0..keys.len() {
+            let k = keys.get_unchecked(i);
+            if let Some(pi) = Self::get_position_info_by_key(env.clone(), data_store.clone(), oracle.clone(), order_handler.clone(), k) {
+                out.push_back(pi);
+            }
+        }
+        out
     }
 }
