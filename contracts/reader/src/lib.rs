@@ -8,7 +8,7 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use soroban_sdk::{
-    contract, contractimpl, Address, BytesN, Env, Vec,
+    contract, contractimpl, Address, BytesN, Env,
 };
 use gmx_types::{
     MarketProps, PositionProps, PositionInfo, PositionFees, PriceProps,
@@ -18,7 +18,6 @@ use gmx_math::{TOKEN_PRECISION, mul_div_wide};
 use gmx_keys::{
     market_index_token_key, market_long_token_key, market_short_token_key,
     funding_amount_per_size_key, saved_funding_factor_per_second_key,
-    order_list_key, account_order_list_key,
 };
 use gmx_market_utils::{get_pool_value, get_open_interest_for_side};
 use gmx_position_utils::{get_position_pnl_usd, get_position_fees, is_liquidatable};
@@ -32,8 +31,6 @@ trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn get_i128(env: Env, key: BytesN<32>) -> i128;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
-    fn get_bytes32_set_count(env: Env, set_key: BytesN<32>) -> u32;
-    fn get_bytes32_set_at(env: Env, set_key: BytesN<32>, start: u32, end: u32) -> Vec<BytesN<32>>;
 }
 
 #[allow(dead_code)]
@@ -220,45 +217,5 @@ impl Reader {
         let index_price      = oracle_client.get_primary_price(&market.index_token);
         let collateral_price = oracle_client.get_primary_price(&position.collateral_token).mid_price();
         is_liquidatable(&env, &data_store, &position, &market, collateral_price, &index_price)
-    }
-
-    // ── Order list views (issue #29) ─────────────────────────────────────────
-
-    /// Total number of open orders across all accounts.
-    pub fn get_order_count(env: Env, data_store: Address) -> u32 {
-        DataStoreClient::new(&env, &data_store)
-            .get_bytes32_set_count(&order_list_key(&env))
-    }
-
-    /// Total number of open orders for a specific account.
-    pub fn get_account_order_count(env: Env, data_store: Address, account: Address) -> u32 {
-        DataStoreClient::new(&env, &data_store)
-            .get_bytes32_set_count(&account_order_list_key(&env, &account))
-    }
-
-    /// Paginated slice of global open order keys.
-    ///
-    /// `start` is inclusive, `end` is exclusive (same semantics as data_store's
-    /// `get_bytes32_set_at`). Returns an empty Vec when the range is out of bounds.
-    pub fn get_order_keys(
-        env: Env,
-        data_store: Address,
-        start: u32,
-        end: u32,
-    ) -> Vec<BytesN<32>> {
-        DataStoreClient::new(&env, &data_store)
-            .get_bytes32_set_at(&order_list_key(&env), start, end)
-    }
-
-    /// Paginated slice of open order keys for a specific account.
-    pub fn get_account_order_keys(
-        env: Env,
-        data_store: Address,
-        account: Address,
-        start: u32,
-        end: u32,
-    ) -> Vec<BytesN<32>> {
-        DataStoreClient::new(&env, &data_store)
-            .get_bytes32_set_at(&account_order_list_key(&env, &account), start, end)
     }
 }

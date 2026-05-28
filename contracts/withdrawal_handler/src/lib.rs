@@ -138,16 +138,6 @@ impl WithdrawalHandler {
         env.storage().instance().set(&InstanceKey::WithdrawalVault, &withdrawal_vault);
     }
 
-    // ── Upgrade ───────────────────────────────────────────────────────────────
-
-    /// Admin-gated contract upgrade. Preserves all pending withdrawal records.
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
-        let admin: Address = env.storage().instance().get(&InstanceKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        admin.require_auth();
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
-    }
-
     // ── Create withdrawal ─────────────────────────────────────────────────────
 
     /// Pull LP tokens from caller into the withdrawal_vault and record the withdrawal.
@@ -466,58 +456,6 @@ mod tests {
         });
         DepositHandlerClient::new(&w.env, &w.dep_handler).execute_deposit(&w.keeper, &dep_key);
         MtClient::new(&w.env, &w.market_tk).balance(user)
-    }
-
-    // ── Issue #9: upgrade entrypoint ─────────────────────────────────────────
-
-    /// Non-admin must not be able to upgrade the contract.
-    #[test]
-    #[should_panic]
-    fn upgrade_from_non_admin_reverts() {
-        let w = setup();
-        let attacker = Address::generate(&w.env);
-        let fake_hash = BytesN::from_array(&w.env, &[0u8; 32]);
-        WithdrawalHandlerClient::new(&w.env, &w.wth_handler).upgrade(&attacker, &fake_hash);
-    }
-
-    /// Pending withdrawal records written before upgrade are still readable after
-    /// (instance storage persists across wasm replacement — same contract ID).
-    #[test]
-    fn pending_withdrawal_survives_upgrade() {
-        let w = setup();
-        let env = &w.env;
-        let user = Address::generate(env);
-
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
-        set_prices(&w);
-        let lp = do_deposit(&w, &user, 1_000_0000, 0);
-        assert!(lp > 0);
-
-        // Create a pending withdrawal
-        let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler)
-            .create_withdrawal(&user, &CreateWithdrawalParams {
-                receiver: user.clone(), market: w.market_tk.clone(),
-                market_token_amount: lp, min_long_token_amount: 0,
-                min_short_token_amount: 0, execution_fee: 0,
-            });
-
-        // Simulate upgrade (same wasm hash — no-op in tests; the key invariant is
-        // that instance/persistent storage is not touched by update_current_contract_wasm)
-        let current_hash = env.deployer().upload_contract_wasm(
-            soroban_sdk::Bytes::from_slice(env, b""),
-        );
-        // In real Soroban the wasm hash upload would supply a real binary;
-        // in the test environment we just verify the record is still there after
-        // the admin call path is exercised.
-        let _ = current_hash; // suppress unused-variable warning
-
-        // Record must still be readable (upgrade does not wipe persistent storage)
-        assert!(
-            WithdrawalHandlerClient::new(env, &w.wth_handler)
-                .get_withdrawal(&wth_key)
-                .is_some(),
-            "withdrawal record must survive an upgrade"
-        );
     }
 
     // ── Issue #39: withdrawal input validation ────────────────────────────────
