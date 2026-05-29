@@ -29,6 +29,7 @@ enum InstanceKey {
 #[repr(u32)]
 pub enum Error {
     AlreadyInitialized = 1,
+    NotInitialized     = 2,
     Unauthorized       = 3,
     NothingToClaim     = 4,
 }
@@ -133,6 +134,14 @@ impl FeeHandler {
 
         env.events().publish_event(&FeeClaimed { market, token, amount, receiver });
         amount
+    }
+
+    /// Upgrade the contract wasm. Only the stored admin may call this.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin: Address = env.storage().instance().get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        admin.require_auth();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
     /// Claim funding fees earned by a position account. Anyone can call for their own account.

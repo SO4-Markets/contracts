@@ -79,6 +79,14 @@ impl ReferralStorage {
         env.storage().instance().set(&InstanceKey::Admin, &admin);
     }
 
+    /// Upgrade the contract wasm. Only the stored admin may call this.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin: Address = env.storage().instance().get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        admin.require_auth();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
     /// Register a new referral code; caller becomes the owner.
     pub fn register_code(env: Env, caller: Address, code: BytesN<32>) {
         caller.require_auth();

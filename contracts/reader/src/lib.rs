@@ -8,7 +8,8 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use soroban_sdk::{
-    contract, contractimpl, Address, BytesN, Env, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error,
+    Address, BytesN, Env, Vec,
 };
 use gmx_types::{
     MarketProps, PositionProps, PositionInfo, PositionFees, PriceProps,
@@ -25,6 +26,25 @@ use gmx_keys::{
 use gmx_market_utils::{get_pool_value, get_open_interest_for_side};
 use gmx_position_utils::{get_position_pnl_usd, get_position_fees, is_liquidatable};
 use gmx_pricing_utils::{get_execution_price, get_position_price_impact};
+
+// ─── Storage keys ─────────────────────────────────────────────────────────────
+
+#[contracttype]
+enum InstanceKey {
+    Initialized,
+    Admin,
+}
+
+// ─── Errors ───────────────────────────────────────────────────────────────────
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum Error {
+    NotInitialized     = 1,
+    AlreadyInitialized = 2,
+    Unauthorized       = 3,
+}
 
 // ─── External clients ─────────────────────────────────────────────────────────
 
@@ -71,6 +91,24 @@ pub struct Reader;
 
 #[contractimpl]
 impl Reader {
+    /// One-time setup — store the admin address.
+    pub fn initialize(env: Env, admin: Address) {
+        admin.require_auth();
+        if env.storage().instance().has(&InstanceKey::Initialized) {
+            panic_with_error!(&env, Error::AlreadyInitialized);
+        }
+        env.storage().instance().set(&InstanceKey::Initialized, &true);
+        env.storage().instance().set(&InstanceKey::Admin, &admin);
+    }
+
+    /// Upgrade the contract wasm. Only the stored admin may call this.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin: Address = env.storage().instance().get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        admin.require_auth();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
     // ── Market views ─────────────────────────────────────────────────────────
 
     /// Load full MarketProps for a given market_token address from data_store.
