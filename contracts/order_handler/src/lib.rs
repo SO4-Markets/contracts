@@ -302,6 +302,14 @@ impl OrderHandler {
             OrderType::StopLossDecrease if index_price.min > order.trigger_price => {
                 panic_with_error!(&env, Error::UnsatisfiedTrigger);
             }
+            // LimitSwap: execute only when the index price is at or below trigger_price.
+            // A non-zero trigger_price means the user wants to swap only when the
+            // index token is cheap enough (e.g. buy long_token when price <= trigger).
+            // When trigger_price == 0 the check is skipped; min_output_amount is the
+            // only guard in that case.
+            OrderType::LimitSwap if order.trigger_price > 0 && index_price.min > order.trigger_price => {
+                panic_with_error!(&env, Error::UnsatisfiedTrigger);
+            }
             _ => {}
         }
 
@@ -1160,6 +1168,186 @@ mod tests {
         assert!(
             hc.get_position(&pos_key).is_some(),
             "position must still be readable after upgrade"
+        );
+    }
+
+    // ── Issue #56: limit swap order lifecycle tests ───────────────────────────
+    //
+    // LimitSwap trigger semantics:
+    //   trigger_price > 0 → execute only when index_price.min <= trigger_price
+    //   trigger_price = 0 → no price gate; min_output_amount is the only guard
+    //
+    // "Stale or unfavorable price" = index_price.min > trigger_price → reverts.
+    // "Favorable price"            = index_price.min <= trigger_price → executes.
+
+    fn create_limit_swap_order(
+        w: &World,
+        user: &Address,
+        collateral: i128,
+        token_in: &Address,
+        trigger_price: i128,
+        min_output: i128,
+    ) -> BytesN<32> {
+        soroban_sdk::token::Client::new(&w.env, token_in)
+            .transfer(user, &w.ord_vault, &collateral);
+        OrderHandlerClient::new(&w.env, &w.ord_handler).create_order(user, &CreateOrderParams {
+            receiver:                 user.clone(),
+            market:                   w.market_tk.clone(),
+            initial_collateral_token: token_in.clone(),
+            swap_path:                Vec::from_array(&w.env, [w.market_tk.clone()]),
+            size_delta_usd:           0,
+            collateral_delta_amount:  collateral,
+            trigger_price,
+            acceptable_price:         0,
+            execution_fee:            0,
+            min_output_amount:        min_output,
+            order_type:               OrderType::LimitSwap,
+            is_long:                  false,
+        })
+    }
+
+    /// LimitSwap with index_price.min > trigger_price must revert (unfavorable price).
+    #[test]
+    #[should_panic]
+    fn limit_swap_above_trigger_price_reverts() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        seed_pool(&w);
+
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+
+        // Current price = 2000; trigger = 1500 → 2000 > 1500 → should revert
+        let trigger = 1500 * fp;
+        set_prices(&w, 2000 * fp);
+        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, trigger, 0);
+
+        // Price is still 2000, above the 1500 trigger → UnsatisfiedTrigger
+        set_prices(&w, 2000 * fp);
+        OrderHandlerClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
+    }
+
+    /// LimitSwap with index_price.min == trigger_price must execute.
+    #[test]
+    fn limit_swap_at_trigger_price_executes() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        seed_pool(&w);
+
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+
+        // trigger = 2000; price = 2000 → condition: 2000 <= 2000 → must execute
+        let trigger = 2000 * fp;
+        set_prices(&w, trigger);
+        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, trigger, 0);
+
+        set_prices(&w, trigger);
+        OrderHandlerClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
+
+        assert!(
+            OrderHandlerClient::new(&w.env, &w.ord_handler).get_order(&key).is_none(),
+            "order must be consumed after execution at trigger price"
+        );
+        assert!(
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&user) > 0,
+            "user should receive long_tk output"
+        );
+    }
+
+    /// LimitSwap with index_price.min < trigger_price must execute (favorable price).
+    #[test]
+    fn limit_swap_below_trigger_price_executes() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        seed_pool(&w);
+
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+
+        // trigger = 2500; current price = 2000 → 2000 <= 2500 → favorable
+        let trigger = 2500 * fp;
+        set_prices(&w, 2000 * fp);
+        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, trigger, 0);
+
+        set_prices(&w, 2000 * fp);
+        OrderHandlerClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
+
+        assert!(
+            OrderHandlerClient::new(&w.env, &w.ord_handler).get_order(&key).is_none(),
+            "order must be consumed after favorable execution"
+        );
+        assert!(
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&user) > 0,
+            "user should receive long_tk when limit swap executes at favorable price"
+        );
+    }
+
+    /// LimitSwap with trigger_price = 0 (no price gate) must always execute.
+    #[test]
+    fn limit_swap_no_trigger_always_executes() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        seed_pool(&w);
+
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+
+        set_prices(&w, 2000 * fp);
+        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, 0, 0);
+
+        set_prices(&w, 2000 * fp);
+        OrderHandlerClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
+
+        assert!(
+            OrderHandlerClient::new(&w.env, &w.ord_handler).get_order(&key).is_none(),
+            "limit swap with trigger_price=0 must always execute"
+        );
+    }
+
+    /// LimitSwap output below min_output_amount must revert.
+    #[test]
+    #[should_panic]
+    fn limit_swap_min_output_not_met_reverts() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        seed_pool(&w);
+
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+
+        set_prices(&w, 2000 * fp);
+        // min_output_amount = i128::MAX → impossible to satisfy
+        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, 0, i128::MAX);
+
+        set_prices(&w, 2000 * fp);
+        // Must revert with PriceTooLow because output < min_output_amount
+        OrderHandlerClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
+    }
+
+    /// LimitSwap output meeting min_output_amount must succeed and deliver tokens.
+    #[test]
+    fn limit_swap_min_output_met_succeeds() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        seed_pool(&w);
+
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+
+        set_prices(&w, 2000 * fp);
+        // min_output_amount = 1 → easy to satisfy
+        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, 0, 1);
+
+        set_prices(&w, 2000 * fp);
+        OrderHandlerClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
+
+        let received = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&user);
+        assert!(received >= 1,
+            "user must receive at least min_output_amount of long_tk");
+        assert!(
+            OrderHandlerClient::new(&w.env, &w.ord_handler).get_order(&key).is_none(),
+            "order must be consumed after successful limit swap"
         );
     }
 
