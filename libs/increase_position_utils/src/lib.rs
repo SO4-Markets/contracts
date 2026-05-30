@@ -18,7 +18,7 @@ use gmx_math::{TOKEN_PRECISION, mul_div_wide};
 use gmx_keys::{
     position_key, position_list_key, account_position_list_key,
     cumulative_borrowing_factor_key, funding_amount_per_size_key,
-    collateral_sum_key,
+    collateral_sum_key, claimable_fee_amount_key,
 };
 use gmx_market_utils::{
     apply_delta_to_pool_amount, apply_delta_to_open_interest,
@@ -165,8 +165,16 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
     DataStoreClient::new(env, p.data_store)
         .apply_delta_to_u128(p.caller, &col_sum_key, &(p.collateral_amount));
 
-    // 12. Pool gets the fee income
+    // 12. Pool gets the fee income; also track in claimable_fee_amount_key so
+    //     fee_handler.claim_fees can sweep it consistently across all fee paths.
     apply_delta_to_pool_amount(env, p.data_store, p.caller, p.market, p.collateral_token, fees.total_cost_amount);
+    if fees.total_cost_amount > 0 {
+        DataStoreClient::new(env, p.data_store).apply_delta_to_u128(
+            p.caller,
+            &claimable_fee_amount_key(env, &p.market.market_token, p.collateral_token),
+            &(fees.total_cost_amount as i128),
+        );
+    }
 
     // 13. Validate position (leverage, min collateral, max OI)
     validate_position(env, p.data_store, &position, p.market, p.collateral_price, p.index_token_price);

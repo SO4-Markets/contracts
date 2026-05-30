@@ -20,7 +20,7 @@ use gmx_math::{TOKEN_PRECISION, mul_div_wide};
 use gmx_keys::{
     position_key, position_list_key, account_position_list_key,
     cumulative_borrowing_factor_key, funding_amount_per_size_key,
-    collateral_sum_key,
+    collateral_sum_key, claimable_fee_amount_key,
 };
 use gmx_market_utils::{
     apply_delta_to_pool_amount, apply_delta_to_open_interest,
@@ -154,8 +154,16 @@ pub fn decrease_position(env: &Env, p: &DecreasePositionParams) -> DecreasePosit
         env, p.data_store, p.market, &position,
         p.collateral_price, size_delta_usd, for_positive_impact,
     );
-    // Fee income goes to pool
+    // Fee income goes to pool; also track in claimable_fee_amount_key so
+    // fee_handler.claim_fees can sweep it consistently across all fee paths.
     apply_delta_to_pool_amount(env, p.data_store, p.caller, p.market, p.collateral_token, fees.total_cost_amount);
+    if fees.total_cost_amount > 0 {
+        DataStoreClient::new(env, p.data_store).apply_delta_to_u128(
+            p.caller,
+            &claimable_fee_amount_key(env, &p.market.market_token, p.collateral_token),
+            &(fees.total_cost_amount as i128),
+        );
+    }
 
     // 9. Compute output amount
     // For a partial close, we return the collateral proportional to the size delta

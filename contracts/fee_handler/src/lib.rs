@@ -123,7 +123,7 @@ impl FeeHandler {
         let key = claimable_fee_amount_key(&env, &market, &token);
         let amount = ds.get_u128(&key);
         if amount == 0 {
-            panic_with_error!(&env, Error::NothingToClaim);
+            return 0;
         }
 
         ds.set_u128(&handler, &key, &0u128);
@@ -272,14 +272,15 @@ mod tests {
         assert_eq!(remaining, 0, "claimable fee in DataStore must be zero after claim");
     }
 
-    /// claim_fees panics with NothingToClaim when there is no accumulated fee.
+    /// claim_fees returns 0 (no transfer) when there is no accumulated fee —
+    /// consistent with claim_funding_fees zero-amount behaviour.
     #[test]
-    #[should_panic]
-    fn claim_fees_nothing_to_claim_reverts() {
+    fn claim_fees_returns_zero_when_nothing_to_claim() {
         let w = setup();
         let receiver = Address::generate(&w.env);
-        FeeHandlerClient::new(&w.env, &w.handler)
+        let claimed = FeeHandlerClient::new(&w.env, &w.handler)
             .claim_fees(&w.keeper, &w.market_tk, &w.long_tk, &receiver);
+        assert_eq!(claimed, 0, "claim_fees must return 0 when claimable balance is zero");
     }
 
     /// Non-keeper cannot call claim_fees — Unauthorized expected.

@@ -14,6 +14,7 @@ use gmx_types::{MarketProps, PriceProps};
 use gmx_keys::{
     market_long_token_key, market_short_token_key,
     market_index_token_key, max_swap_path_length_key,
+    claimable_fee_amount_key,
 };
 use gmx_market_utils::apply_delta_to_pool_amount;
 use gmx_pricing_utils::{
@@ -78,7 +79,7 @@ pub fn swap(
     let for_positive_impact = impact_usd >= 0;
 
     // 4. Compute output and fee
-    let (amount_out, _fee_amount) = get_swap_output_amount(
+    let (amount_out, fee_amount) = get_swap_output_amount(
         env, data_store, market,
         token_in, &token_out,
         amount_in, price_in, price_out,
@@ -92,9 +93,17 @@ pub fn swap(
     // 5. Apply swap impact to impact pool (denominated in token_out)
     apply_swap_impact_value(env, data_store, caller, market, &token_out, price_out, impact_usd);
 
-    // 6. Update pool amounts
+    // 6. Update pool amounts; track swap fee in claimable_fee_amount_key so
+    //    fee_handler.claim_fees sweeps all fee paths consistently.
     apply_delta_to_pool_amount(env, data_store, caller, market, token_in,   amount_in);
     apply_delta_to_pool_amount(env, data_store, caller, market, &token_out, -amount_out);
+    if fee_amount > 0 {
+        DataStoreClient::new(env, data_store).apply_delta_to_u128(
+            caller,
+            &claimable_fee_amount_key(env, &market.market_token, &token_out),
+            &fee_amount,
+        );
+    }
 
     // 7. Transfer token_out from market_token pool → receiver
     MarketTokenClient::new(env, &market.market_token)
