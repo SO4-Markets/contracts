@@ -1102,4 +1102,257 @@ mod tests {
             pool_delta, impact_amount
         );
     }
+
+    // ── Issue #246: unit tests for get_position_price_impact ─────────────────
+
+    /// Seed both OI sides (via the long_token collateral key) and the three
+    /// position impact parameters.  All OI values are in FLOAT_PRECISION units.
+    fn seed_position_market(
+        env: &Env,
+        ds: &Address,
+        caller: &Address,
+        market: &MarketProps,
+        long_oi: u128,
+        short_oi: u128,
+        neg_factor: i128,
+        pos_factor: i128,
+        exponent: i128,
+    ) {
+        let ds_c = DsClient::new(env, ds);
+        ds_c.set_u128(
+            caller,
+            &gmx_keys::open_interest_key(env, &market.market_token, &market.long_token, true),
+            &long_oi,
+        );
+        ds_c.set_u128(
+            caller,
+            &gmx_keys::open_interest_key(env, &market.market_token, &market.long_token, false),
+            &short_oi,
+        );
+        ds_c.set_u128(
+            caller,
+            &gmx_keys::position_impact_factor_key(env, &market.market_token, false),
+            &(neg_factor as u128),
+        );
+        ds_c.set_u128(
+            caller,
+            &gmx_keys::position_impact_factor_key(env, &market.market_token, true),
+            &(pos_factor as u128),
+        );
+        ds_c.set_u128(
+            caller,
+            &gmx_keys::position_impact_exponent_factor_key(env, &market.market_token),
+            &(exponent as u128),
+        );
+    }
+
+    /// Seed the position impact pool with a raw token balance.
+    fn seed_impact_pool(
+        env: &Env,
+        ds: &Address,
+        caller: &Address,
+        market: &MarketProps,
+        pool_tokens: u128,
+    ) {
+        DsClient::new(env, ds).set_u128(
+            caller,
+            &gmx_keys::position_impact_pool_amount_key(env, &market.market_token),
+            &pool_tokens,
+        );
+    }
+
+    /// When long_oi == short_oi the pool is perfectly balanced (initial_diff = 0).
+    /// A long-increase trade creates imbalance from scratch → negative impact.
+    ///
+    /// Derivation (linear exponent = FLOAT_PRECISION):
+    ///   initial_diff = |5_000·FP − 5_000·FP| = 0
+    ///   next_diff    = size_delta = 1_000·FP  (next_long − next_short)
+    ///   pow_factor(0,  FP) = 0  [value ≤ 0 special-case]
+    ///   pow_factor(1_000·FP, FP) = 1_000·FP  [linear special-case]
+    ///   raw    = neg_factor × (next_diff − 0) / FP
+    ///          = (FP/1_000) × 1_000·FP / FP = FP
+    ///   impact = −FP
+    #[test]
+    fn test_price_impact_usd_balanced_pool() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = setup(&env);
+        let market = make_market(&mt, &it, &lt, &st);
+
+        let oi = 5_000 * FLOAT_PRECISION as u128;
+        let neg_factor = FLOAT_PRECISION / 1_000;
+        let pos_factor = FLOAT_PRECISION / 2_000;
+
+        seed_position_market(
+            &env, &ds, &admin, &market, oi, oi, neg_factor, pos_factor, FLOAT_PRECISION,
+        );
+        seed_impact_pool(&env, &ds, &admin, &market, 100_000 * TOKEN_PRECISION as u128);
+
+        let size_delta = 1_000 * FLOAT_PRECISION;
+        let index_price = FLOAT_PRECISION; // $1 per token in FP units
+
+        let impact =
+            get_position_price_impact(&env, &ds, &market, true, size_delta, true, index_price);
+
+        assert_eq!(
+            impact, -FLOAT_PRECISION,
+            "balanced pool: long trade must produce negative impact = −FP, got {impact}"
+        );
+    }
+
+    /// When long_oi > short_oi a short-increase trade moves the pool toward
+    /// balance → positive impact (rebate to the trader).
+    ///
+    /// Derivation:
+    ///   long_oi = 6_000·FP, short_oi = 4_000·FP → initial_diff = 2_000·FP
+    ///   Short of 1_000·FP: next_short = 5_000·FP → next_diff = 1_000·FP
+    ///   next_diff < initial_diff → positive case
+    ///   raw = pos_factor × (2_000·FP − 1_000·FP) / FP
+    ///       = (FP/2_000) × 1_000·FP / FP = FP/2
+    ///   pool_usd = 1_000 tokens × FP / TOKEN_PRECISION = 1_000·FP ≫ raw → cap not binding
+    ///   impact = FP/2
+    #[test]
+    fn test_price_impact_usd_imbalanced_balancing_trade() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = setup(&env);
+        let market = make_market(&mt, &it, &lt, &st);
+
+        let long_oi = 6_000 * FLOAT_PRECISION as u128;
+        let short_oi = 4_000 * FLOAT_PRECISION as u128;
+        let neg_factor = FLOAT_PRECISION / 1_000;
+        let pos_factor = FLOAT_PRECISION / 2_000;
+
+        seed_position_market(
+            &env, &ds, &admin, &market, long_oi, short_oi, neg_factor, pos_factor, FLOAT_PRECISION,
+        );
+        // Pool large enough so the computed rebate is never capped
+        seed_impact_pool(&env, &ds, &admin, &market, 1_000 * TOKEN_PRECISION as u128);
+
+        let size_delta = 1_000 * FLOAT_PRECISION;
+        let index_price = FLOAT_PRECISION;
+
+        let impact =
+            get_position_price_impact(&env, &ds, &market, false, size_delta, true, index_price);
+
+        let expected = FLOAT_PRECISION / 2;
+        assert!(impact > 0, "balancing short must yield positive rebate, got {impact}");
+        assert_eq!(
+            impact, expected,
+            "balancing short: expected FP/2 = {expected}, got {impact}"
+        );
+    }
+
+    /// When long_oi > short_oi a long-increase trade deepens the imbalance
+    /// → negative impact (cost to the trader).
+    ///
+    /// Derivation:
+    ///   long_oi = 6_000·FP, short_oi = 4_000·FP → initial_diff = 2_000·FP
+    ///   Long of 1_000·FP: next_long = 7_000·FP → next_diff = 3_000·FP
+    ///   next_diff > initial_diff → worsening → negative
+    ///   raw = neg_factor × (3_000·FP − 2_000·FP) / FP
+    ///       = (FP/1_000) × 1_000·FP / FP = FP
+    ///   impact = −FP
+    #[test]
+    fn test_price_impact_usd_imbalanced_worsening_trade() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = setup(&env);
+        let market = make_market(&mt, &it, &lt, &st);
+
+        let long_oi = 6_000 * FLOAT_PRECISION as u128;
+        let short_oi = 4_000 * FLOAT_PRECISION as u128;
+        let neg_factor = FLOAT_PRECISION / 1_000;
+        let pos_factor = FLOAT_PRECISION / 2_000;
+
+        seed_position_market(
+            &env, &ds, &admin, &market, long_oi, short_oi, neg_factor, pos_factor, FLOAT_PRECISION,
+        );
+        seed_impact_pool(&env, &ds, &admin, &market, 100_000 * TOKEN_PRECISION as u128);
+
+        let size_delta = 1_000 * FLOAT_PRECISION;
+        let index_price = FLOAT_PRECISION;
+
+        let impact =
+            get_position_price_impact(&env, &ds, &market, true, size_delta, true, index_price);
+
+        assert!(impact < 0, "worsening long must produce negative impact, got {impact}");
+        assert_eq!(
+            impact, -FLOAT_PRECISION,
+            "worsening long-increase: expected −FP, got {impact}"
+        );
+    }
+
+    /// When both OI sides are zero (empty market) and impact factors have not
+    /// been configured (both = 0), any trade returns zero impact.
+    ///
+    /// Derivation: raw = 0 × Δ / FP = 0 for every size and direction.
+    #[test]
+    fn test_price_impact_usd_zero_oi() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = setup(&env);
+        let market = make_market(&mt, &it, &lt, &st);
+
+        seed_position_market(&env, &ds, &admin, &market, 0, 0, 0, 0, FLOAT_PRECISION);
+        seed_impact_pool(&env, &ds, &admin, &market, 0);
+
+        let size_delta = 1_000 * FLOAT_PRECISION;
+        let index_price = FLOAT_PRECISION;
+
+        let impact =
+            get_position_price_impact(&env, &ds, &market, true, size_delta, true, index_price);
+
+        assert_eq!(
+            impact, 0,
+            "zero OI with zero impact factors must return 0, got {impact}"
+        );
+    }
+
+    /// When the computed positive rebate exceeds the available impact pool
+    /// balance the protocol caps the payout at pool_usd.
+    ///
+    /// Derivation:
+    ///   long_oi = 6_000·FP, short_oi = 4_000·FP → initial_diff = 2_000·FP
+    ///   Short of 2_001·FP over-balances: next_short = 6_001·FP
+    ///   next_diff = |6_000 − 6_001|·FP = 1·FP  (< initial_diff → positive)
+    ///   raw = pos_factor × (2_000·FP − 1·FP) / FP
+    ///       = (FP/100) × 1_999·FP / FP = 1_999·FP/100  ≈ 19.99·FP
+    ///   pool_usd = 5 tokens × FP / TOKEN_PRECISION = 5·FP
+    ///   raw (≈ 19.99·FP) > pool_usd (5·FP) → capped
+    ///   impact = 5·FP  (= pool_usd)
+    #[test]
+    fn test_price_impact_usd_rebate_capped_at_pool_balance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = setup(&env);
+        let market = make_market(&mt, &it, &lt, &st);
+
+        let long_oi = 6_000 * FLOAT_PRECISION as u128;
+        let short_oi = 4_000 * FLOAT_PRECISION as u128;
+        let neg_factor = FLOAT_PRECISION / 1_000;
+        let pos_factor = FLOAT_PRECISION / 100; // aggressive factor to produce large raw rebate
+
+        seed_position_market(
+            &env, &ds, &admin, &market, long_oi, short_oi, neg_factor, pos_factor, FLOAT_PRECISION,
+        );
+        // Only 5 tokens in the pool → pool_usd = 5·FP, much less than raw rebate
+        let pool_tokens: u128 = 5 * TOKEN_PRECISION as u128;
+        seed_impact_pool(&env, &ds, &admin, &market, pool_tokens);
+
+        // Short of 2_001·FP over-balances (next_diff = 1·FP)
+        let size_delta = 2_001 * FLOAT_PRECISION;
+        let index_price = FLOAT_PRECISION; // $1 per token
+
+        let impact =
+            get_position_price_impact(&env, &ds, &market, false, size_delta, true, index_price);
+
+        // pool_usd = pool_tokens × index_price / TOKEN_PRECISION = 5·TOKEN_PRECISION × FP / TOKEN_PRECISION = 5·FP
+        let pool_usd = mul_div_wide(&env, pool_tokens as i128, index_price, TOKEN_PRECISION);
+        assert!(impact > 0, "over-balancing short must produce positive rebate, got {impact}");
+        assert_eq!(
+            impact, pool_usd,
+            "rebate must be capped at pool_usd={pool_usd}, got {impact}"
+        );
+    }
 }

@@ -988,7 +988,7 @@ mod tests {
         w: &World,
         order_type: OrderType,
         trigger_price: i128,
-    ) -> (OrderHandlerClient, BytesN<32>) {
+    ) -> (OrderHandlerClient<'_>, BytesN<32>) {
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
         let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
         let key = hc.create_order(

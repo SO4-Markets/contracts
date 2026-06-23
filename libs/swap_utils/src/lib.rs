@@ -239,8 +239,7 @@ pub fn swap_with_path(
         } else {
             // Tokens physically move from this market to the next market pool.
             // The next hop will find them already in the target pool contract.
-            let next_market = path.get(i + 1).unwrap();
-            next_market
+            path.get(i + 1).unwrap()
         };
 
         let (out_token, out_amount) = swap(

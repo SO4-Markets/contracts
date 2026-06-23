@@ -390,7 +390,7 @@ mod tests {
     use data_store::{DataStore, DataStoreClient as DsClient};
     use gmx_keys::roles;
     use gmx_math::{FLOAT_PRECISION, TOKEN_PRECISION};
-    use gmx_types::{PositionProps, PriceProps, TokenPrice};
+    use gmx_types::{PositionProps, PriceProps};
     use market_token::{MarketToken, MarketTokenClient as MtClient};
     use role_store::{RoleStore, RoleStoreClient as RsClient};
     use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Env};

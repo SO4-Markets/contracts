@@ -288,7 +288,7 @@ mod tests {
     use super::*;
     use data_store::{DataStore, DataStoreClient as DsClient};
     use gmx_keys::roles;
-    use gmx_math::{FLOAT_PRECISION, TOKEN_PRECISION};
+    use gmx_math::FLOAT_PRECISION;
     use gmx_types::{CreateOrderParams, OrderType, TokenPrice};
     use market_token::{MarketToken, MarketTokenClient as MtClient};
     use oracle::{Oracle, OracleClient as OClient};
@@ -296,9 +296,9 @@ mod tests {
     use order_vault::{OrderVault, OrderVaultClient as OVClient};
     use role_store::{RoleStore, RoleStoreClient as RsClient};
     use soroban_sdk::{
-        testutils::{Address as _, BytesN as _},
+        testutils::Address as _,
         token::StellarAssetClient,
-        BytesN, Env, Vec,
+        BytesN, Env,
     };
 
     const ONE_TOKEN: i128 = 10_000_000; // 10^7 (Stellar 7-decimal precision)

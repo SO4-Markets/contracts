@@ -26,7 +26,7 @@ use order_vault::{OrderVault, OrderVaultClient};
 use role_store::{RoleStore, RoleStoreClient};
 
 use gmx_keys::roles;
-use gmx_types::{OrderType, PriceProps, TokenPrice};
+use gmx_types::{OrderType, TokenPrice};
 
 const FLOAT_PRECISION: i128 = 1_000_000_000_000_000_000_000_000_000_000;
 const TOKEN_PRECISION: i128 = 10_000_000;
