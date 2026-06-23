@@ -80,7 +80,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "bytes": "0707070707070707070707070707070707070707070707070707070707070707"
+                  "bytes": "5245465f303037"
                 }
               ]
             }
@@ -127,7 +127,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "bytes": "0707070707070707070707070707070707070707070707070707070707070707"
+                  "bytes": "5245465f303037"
                 }
               ]
             }
@@ -221,7 +221,7 @@
                     "symbol": "CodeOwner"
                   },
                   {
-                    "bytes": "0707070707070707070707070707070707070707070707070707070707070707"
+                    "bytes": "5245465f303037"
                   }
                 ]
               },
@@ -325,7 +325,7 @@
               },
               "durability": "persistent",
               "val": {
-                "bytes": "0707070707070707070707070707070707070707070707070707070707070707"
+                "bytes": "5245465f303037"
               }
             }
           },

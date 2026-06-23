@@ -122,7 +122,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "bytes": "0505050505050505050505050505050505050505050505050505050505050505"
+                  "bytes": "434f44455f46"
                 }
               ]
             }
@@ -144,7 +144,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                 },
                 {
-                  "bytes": "0505050505050505050505050505050505050505050505050505050505050505"
+                  "bytes": "434f44455f46"
                 }
               ]
             }
@@ -169,7 +169,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "bytes": "0505050505050505050505050505050505050505050505050505050505050505"
+                  "bytes": "434f44455f46"
                 }
               ]
             }
@@ -263,7 +263,7 @@
                     "symbol": "CodeOwner"
                   },
                   {
-                    "bytes": "0505050505050505050505050505050505050505050505050505050505050505"
+                    "bytes": "434f44455f46"
                   }
                 ]
               },
@@ -384,7 +384,7 @@
               },
               "durability": "persistent",
               "val": {
-                "bytes": "0505050505050505050505050505050505050505050505050505050505050505"
+                "bytes": "434f44455f46"
               }
             }
           },

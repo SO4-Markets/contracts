@@ -5,14 +5,19 @@
 
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
-    BytesN, Env,
+    Bytes, BytesN, Env,
 };
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+/// Maximum number of bytes in a referral code.
+pub const MAX_REFERRAL_CODE_LENGTH: u32 = 20;
 
 // ─── Storage key types ────────────────────────────────────────────────────────
 
 #[contracttype]
 pub enum ReferralKey {
-    CodeOwner(BytesN<32>),
+    CodeOwner(Bytes),
     TraderCode(Address),
     ReferrerTier(Address),
     TierConfig(u32),
@@ -38,20 +43,20 @@ pub struct TierConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodeRegistered {
     pub caller: Address,
-    pub code: BytesN<32>,
+    pub code: Bytes,
 }
 
 #[contractevent(topics = ["ref_set"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraderCodeSet {
     pub trader: Address,
-    pub code: BytesN<32>,
+    pub code: Bytes,
 }
 
 #[contractevent(topics = ["ref_xfr"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodeOwnershipTransferred {
-    pub code: BytesN<32>,
+    pub code: Bytes,
     pub from: Address,
     pub to: Address,
 }
@@ -70,6 +75,32 @@ pub enum Error {
     InvalidTier = 6,
     InvalidInput = 7,
     NotCodeOwner = 8,
+    CodeTooLong = 9,
+    InvalidCodeCharacters = 10,
+    EmptyCode = 11,
+}
+
+// ─── Internal helpers ─────────────────────────────────────────────────────────
+
+/// Validates that `code` is non-empty, at most `MAX_REFERRAL_CODE_LENGTH` bytes,
+/// and consists solely of ASCII alphanumeric characters, hyphens, or underscores
+/// (`[A-Za-z0-9_-]`). Panics with the appropriate error on any violation.
+fn validate_code(env: &Env, code: &Bytes) {
+    let len = code.len();
+    if len == 0 {
+        panic_with_error!(env, Error::EmptyCode);
+    }
+    if len > MAX_REFERRAL_CODE_LENGTH {
+        panic_with_error!(env, Error::CodeTooLong);
+    }
+    for i in 0..len {
+        if let Some(byte) = code.get(i) {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' => {}
+                _ => panic_with_error!(env, Error::InvalidCodeCharacters),
+            }
+        }
+    }
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -102,8 +133,15 @@ impl ReferralStorage {
     }
 
     /// Register a new referral code; caller becomes the owner.
-    pub fn register_code(env: Env, caller: Address, code: BytesN<32>) {
+    ///
+    /// `code` must be 1–20 bytes of `[A-Za-z0-9_-]`. Reverts with:
+    /// - `EmptyCode` if `code` is empty
+    /// - `CodeTooLong` if `code.len() > MAX_REFERRAL_CODE_LENGTH`
+    /// - `InvalidCodeCharacters` if `code` contains disallowed bytes
+    /// - `CodeAlreadyTaken` if the code is already registered
+    pub fn register_code(env: Env, caller: Address, code: Bytes) {
         caller.require_auth();
+        validate_code(&env, &code);
         let key = ReferralKey::CodeOwner(code.clone());
         if env.storage().persistent().has(&key) {
             panic_with_error!(&env, Error::CodeAlreadyTaken);
@@ -113,7 +151,7 @@ impl ReferralStorage {
     }
 
     /// Set the referral code for a trader (links them to a referrer).
-    pub fn set_trader_referral_code(env: Env, trader: Address, code: BytesN<32>) {
+    pub fn set_trader_referral_code(env: Env, trader: Address, code: Bytes) {
         trader.require_auth();
         // Validate code exists
         if !env
@@ -131,7 +169,7 @@ impl ReferralStorage {
 
     /// Look up the referral code for a trader, and return the referrer's address.
     pub fn get_trader_referrer(env: Env, trader: Address) -> Option<Address> {
-        let code: BytesN<32> = env
+        let code: Bytes = env
             .storage()
             .persistent()
             .get(&ReferralKey::TraderCode(trader))?;
@@ -141,7 +179,7 @@ impl ReferralStorage {
     }
 
     /// Return the referral code for a trader, or None.
-    pub fn get_trader_referral_code(env: Env, trader: Address) -> Option<BytesN<32>> {
+    pub fn get_trader_referral_code(env: Env, trader: Address) -> Option<Bytes> {
         env.storage()
             .persistent()
             .get(&ReferralKey::TraderCode(trader))
@@ -193,7 +231,7 @@ impl ReferralStorage {
     ///
     /// Only the current code owner may call this. Requires auth from `from`.
     /// The new owner (`to`) immediately becomes the code's referrer for fee calculations.
-    pub fn transfer_code_ownership(env: Env, from: Address, to: Address, code: BytesN<32>) {
+    pub fn transfer_code_ownership(env: Env, from: Address, to: Address, code: Bytes) {
         from.require_auth();
         let key = ReferralKey::CodeOwner(code.clone());
         let current_owner: Address = env
@@ -210,7 +248,7 @@ impl ReferralStorage {
     }
 
     /// Return the owner address for a given referral code, or None if unregistered.
-    pub fn get_code_owner(env: Env, code: BytesN<32>) -> Option<Address> {
+    pub fn get_code_owner(env: Env, code: Bytes) -> Option<Address> {
         env.storage()
             .persistent()
             .get(&ReferralKey::CodeOwner(code))
@@ -218,7 +256,7 @@ impl ReferralStorage {
 
     /// Return the fee discount bps for a trader given their referral code, or 0 if none.
     pub fn get_trader_discount_bps(env: Env, trader: Address) -> u32 {
-        let code: BytesN<32> = match env
+        let code: Bytes = match env
             .storage()
             .persistent()
             .get(&ReferralKey::TraderCode(trader))
@@ -257,7 +295,7 @@ impl ReferralStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{testutils::Address as _, Bytes, Env};
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -280,12 +318,14 @@ mod tests {
         }
     }
 
-    fn client(w: &World) -> ReferralStorageClient {
+    fn client(w: &World) -> ReferralStorageClient<'_> {
         ReferralStorageClient::new(&w.env, &w.handler)
     }
 
-    fn make_code(env: &Env, seed: u8) -> BytesN<32> {
-        BytesN::from_array(env, &[seed; 32])
+    /// Produces a short, distinct, valid referral code for each seed value.
+    fn make_code(env: &Env, seed: u8) -> Bytes {
+        let suffix = b'A' + (seed % 26);
+        Bytes::from_slice(env, &[b'C', b'O', b'D', b'E', b'_', suffix])
     }
 
     // ─── Issue #89: tier number bounds ───────────────────────────────────────
@@ -404,7 +444,7 @@ mod tests {
 
         // Wire up a code → referrer → tier 1 path so get_trader_discount_bps resolves it.
         let referrer = Address::generate(&w.env);
-        let code = BytesN::from_array(&w.env, &[7u8; 32]);
+        let code = Bytes::from_slice(&w.env, b"REF_007");
         let trader = Address::generate(&w.env);
         client(&w).register_code(&referrer, &code);
         client(&w).set_referrer_tier(&w.admin, &referrer, &1u32);
@@ -423,7 +463,7 @@ mod tests {
     fn get_trader_discount_bps_returns_zero_for_unconfigured_tier() {
         let w = setup();
         let referrer = Address::generate(&w.env);
-        let code = BytesN::from_array(&w.env, &[9u8; 32]);
+        let code = Bytes::from_slice(&w.env, b"REF_009");
         let trader = Address::generate(&w.env);
         client(&w).register_code(&referrer, &code);
         // Assign tier 2 but do NOT configure TierConfig for tier 2.
@@ -453,7 +493,7 @@ mod tests {
         client(&w).set_tier_config(&w.admin, &0u32, &cfg);
 
         let referrer = Address::generate(&w.env);
-        let code = BytesN::from_array(&w.env, &[5u8; 32]);
+        let code = Bytes::from_slice(&w.env, b"REF_005");
         let trader = Address::generate(&w.env);
         client(&w).register_code(&referrer, &code);
         client(&w).set_referrer_tier(&w.admin, &referrer, &0u32);
@@ -573,5 +613,65 @@ mod tests {
         let discount = client(&w).get_trader_discount_bps(&trader);
         // tier 0 for bob: 1000 * 5000 / 10_000 = 500
         assert_eq!(discount, 500);
+    }
+
+    // ─── Issue #236: referral code length and character set validation ────────
+
+    /// Empty code must revert with EmptyCode.
+    #[test]
+    fn register_code_empty_reverts() {
+        let w = setup();
+        let caller = Address::generate(&w.env);
+        let code = Bytes::from_slice(&w.env, b"");
+        let result = client(&w).try_register_code(&caller, &code);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::EmptyCode as u32
+            )))
+        );
+    }
+
+    /// Code longer than MAX_REFERRAL_CODE_LENGTH must revert with CodeTooLong.
+    #[test]
+    fn register_code_too_long_reverts() {
+        let w = setup();
+        let caller = Address::generate(&w.env);
+        // 21 valid ASCII chars — one over the limit
+        let code = Bytes::from_slice(&w.env, b"ABCDEFGHIJKLMNOPQRSTU");
+        let result = client(&w).try_register_code(&caller, &code);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::CodeTooLong as u32
+            )))
+        );
+    }
+
+    /// Code with disallowed characters must revert with InvalidCodeCharacters.
+    #[test]
+    fn register_code_invalid_chars_reverts() {
+        let w = setup();
+        let caller = Address::generate(&w.env);
+        // '@' is not in [A-Za-z0-9_-]
+        let code = Bytes::from_slice(&w.env, b"CODE@2024");
+        let result = client(&w).try_register_code(&caller, &code);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::InvalidCodeCharacters as u32
+            )))
+        );
+    }
+
+    /// Code of exactly MAX_REFERRAL_CODE_LENGTH characters must succeed.
+    #[test]
+    fn register_code_exactly_max_length_succeeds() {
+        let w = setup();
+        let caller = Address::generate(&w.env);
+        // Exactly 20 valid ASCII chars
+        let code = Bytes::from_slice(&w.env, b"ABCDEFGHIJKLMNOPQRST");
+        client(&w).register_code(&caller, &code);
+        assert_eq!(client(&w).get_code_owner(&code), Some(caller));
     }
 }
