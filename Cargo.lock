@@ -6,6 +6,9 @@ version = 4
 name = "adl-handler"
 version = "0.1.0"
 dependencies = [
+ "data-store",
+ "deposit-handler",
+ "deposit-vault",
  "gmx-decrease-position-utils",
  "gmx-keys",
  "gmx-market-utils",
@@ -13,6 +16,11 @@ dependencies = [
  "gmx-position-utils",
  "gmx-pricing-utils",
  "gmx-types",
+ "market-token",
+ "oracle",
+ "order-handler",
+ "order-vault",
+ "role-store",
  "soroban-sdk",
 ]
 
@@ -801,16 +809,33 @@ checksum = "40404c3f5f511ec4da6fe866ddf6a717c309fdbb69fbbad7b0f3edab8f2e835f"
 name = "exchange-router"
 version = "0.1.0"
 dependencies = [
+ "data-store",
+ "deposit-handler",
+ "deposit-vault",
+ "gmx-keys",
+ "gmx-math",
  "gmx-types",
+ "liquidation-handler",
+ "market-token",
+ "oracle",
+ "order-handler",
+ "order-vault",
+ "role-store",
  "soroban-sdk",
+ "withdrawal-handler",
+ "withdrawal-vault",
 ]
 
 [[package]]
 name = "fee-handler"
 version = "0.1.0"
 dependencies = [
+ "data-store",
  "gmx-keys",
+ "gmx-math",
  "gmx-types",
+ "market-token",
+ "role-store",
  "soroban-sdk",
 ]
 
@@ -894,12 +919,17 @@ dependencies = [
 name = "gmx-decrease-position-utils"
 version = "0.1.0"
 dependencies = [
+ "data-store",
  "gmx-keys",
  "gmx-market-utils",
  "gmx-math",
  "gmx-position-utils",
  "gmx-pricing-utils",
+ "gmx-swap-utils",
  "gmx-types",
+ "market-token",
+ "oracle",
+ "role-store",
  "soroban-sdk",
 ]
 
@@ -907,12 +937,17 @@ dependencies = [
 name = "gmx-increase-position-utils"
 version = "0.1.0"
 dependencies = [
+ "data-store",
  "gmx-keys",
  "gmx-market-utils",
  "gmx-math",
  "gmx-position-utils",
  "gmx-pricing-utils",
  "gmx-types",
+ "market-token",
+ "oracle",
+ "order-vault",
+ "role-store",
  "soroban-sdk",
 ]
 
@@ -946,10 +981,12 @@ dependencies = [
 name = "gmx-position-utils"
 version = "0.1.0"
 dependencies = [
+ "data-store",
  "gmx-keys",
  "gmx-market-utils",
  "gmx-math",
  "gmx-types",
+ "role-store",
  "soroban-sdk",
 ]
 
@@ -957,10 +994,12 @@ dependencies = [
 name = "gmx-pricing-utils"
 version = "0.1.0"
 dependencies = [
+ "data-store",
  "gmx-keys",
  "gmx-market-utils",
  "gmx-math",
  "gmx-types",
+ "role-store",
  "soroban-sdk",
 ]
 
@@ -1216,6 +1255,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 name = "liquidation-handler"
 version = "0.1.0"
 dependencies = [
+ "data-store",
  "gmx-decrease-position-utils",
  "gmx-keys",
  "gmx-market-utils",
@@ -1223,6 +1263,11 @@ dependencies = [
  "gmx-position-utils",
  "gmx-pricing-utils",
  "gmx-types",
+ "market-token",
+ "oracle",
+ "order-handler",
+ "order-vault",
+ "role-store",
  "soroban-sdk",
 ]
 
@@ -1346,6 +1391,8 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "data-store",
+ "deposit-handler",
+ "deposit-vault",
  "gmx-decrease-position-utils",
  "gmx-increase-position-utils",
  "gmx-keys",
@@ -2131,6 +2178,21 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "test-faucet"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+ "test-token",
+]
+
+[[package]]
+name = "test-token"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
 ]
 
 [[package]]

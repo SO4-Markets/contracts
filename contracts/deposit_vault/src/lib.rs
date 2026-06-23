@@ -9,8 +9,8 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, contracterror, panic_with_error,
-    Address, BytesN, Env, token,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, BytesN,
+    Env,
 };
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -20,7 +20,8 @@ use soroban_sdk::{
 #[repr(u32)]
 pub enum Error {
     AlreadyInitialized = 1,
-    Unauthorized       = 2,
+    NotInitialized = 2,
+    Unauthorized = 3,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -57,21 +58,28 @@ impl DepositVault {
         if env.storage().instance().has(&InstanceKey::Initialized) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
-        env.storage().instance().set(&InstanceKey::Initialized, &true);
-        env.storage().instance().set(&InstanceKey::RoleStore, &role_store);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Initialized, &true);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::RoleStore, &role_store);
     }
 
     /// Snapshot the balance of `token` in this vault.
     /// Returns the amount received since the last snapshot (delta).
     /// Called by deposit_handler right after the user's transfer lands.
     pub fn record_transfer_in(env: Env, token: Address) -> i128 {
-        let current = token::Client::new(&env, &token)
-            .balance(&env.current_contract_address());
-        let recorded: i128 = env.storage().persistent()
+        let current = token::Client::new(&env, &token).balance(&env.current_contract_address());
+        let recorded: i128 = env
+            .storage()
+            .persistent()
             .get(&DataKey::TokenBalance(token.clone()))
             .unwrap_or(0);
         let delta = current - recorded;
-        env.storage().persistent().set(&DataKey::TokenBalance(token), &current);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenBalance(token), &current);
         delta
     }
 
@@ -86,17 +94,22 @@ impl DepositVault {
     ) {
         caller.require_auth();
         require_controller(&env, &caller);
-        token::Client::new(&env, &token)
-            .transfer(&env.current_contract_address(), &receiver, &amount);
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &receiver,
+            &amount,
+        );
         // Sync recorded balance
-        let new_bal = token::Client::new(&env, &token)
-            .balance(&env.current_contract_address());
-        env.storage().persistent().set(&DataKey::TokenBalance(token), &new_bal);
+        let new_bal = token::Client::new(&env, &token).balance(&env.current_contract_address());
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenBalance(token), &new_bal);
     }
 
     /// Read the last recorded balance for a token (for diagnostics).
     pub fn get_recorded_balance(env: Env, token: Address) -> i128 {
-        env.storage().persistent()
+        env.storage()
+            .persistent()
             .get(&DataKey::TokenBalance(token))
             .unwrap_or(0)
     }
@@ -105,7 +118,11 @@ impl DepositVault {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn require_controller(env: &Env, caller: &Address) {
-    let rs: Address = env.storage().instance().get(&InstanceKey::RoleStore).unwrap();
+    let rs: Address = env
+        .storage()
+        .instance()
+        .get(&InstanceKey::RoleStore)
+        .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
     if !RoleStoreClient::new(env, &rs).has_role(caller, &gmx_keys::roles::controller(env)) {
         panic_with_error!(env, Error::Unauthorized);
     }
@@ -116,9 +133,9 @@ fn require_controller(env: &Env, caller: &Address) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
-    use role_store::{RoleStore, RoleStoreClient as RsClient};
     use gmx_keys::roles;
+    use role_store::{RoleStore, RoleStoreClient as RsClient};
+    use soroban_sdk::{testutils::Address as _, Env};
 
     fn setup(env: &Env) -> (Address, Address, Address) {
         let admin = Address::generate(env);

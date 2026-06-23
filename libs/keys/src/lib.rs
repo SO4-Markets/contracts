@@ -22,9 +22,13 @@ fn push_str(buf: &mut Bytes, env: &Env, s: &str) {
 
 fn push_addr(buf: &mut Bytes, env: &Env, addr: &Address) {
     // Address::to_string() returns the strkey (G... or C...) as a soroban String.
-    // From<soroban_sdk::String> for Bytes is implemented in soroban-sdk.
+    // Copy the string bytes out using copy_into_slice, then append to the buffer.
     let s: soroban_sdk::String = addr.to_string();
-    let b: Bytes = s.into();
+    let str_len = s.len() as usize;
+    // Allocate a fixed-size stack buffer (strkeys are at most 56 chars).
+    let mut raw = [0u8; 64];
+    s.copy_into_slice(&mut raw[..str_len]);
+    let b = Bytes::from_slice(env, &raw[..str_len]);
     let len = b.len() as u16;
     buf.append(&Bytes::from_slice(env, &len.to_be_bytes()));
     buf.append(&b);
@@ -240,11 +244,7 @@ pub fn withdrawal_key(env: &Env, nonce: u64) -> BytesN<32> {
 // ─── Borrowing keys ───────────────────────────────────────────────────────────
 
 /// sha256("CUMULATIVE_BORROWING_FACTOR" ‖ market ‖ is_long)
-pub fn cumulative_borrowing_factor_key(
-    env: &Env,
-    market: &Address,
-    is_long: bool,
-) -> BytesN<32> {
+pub fn cumulative_borrowing_factor_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "CUMULATIVE_BORROWING_FACTOR");
     push_addr(&mut b, env, market);
@@ -303,6 +303,22 @@ pub fn claimable_fee_amount_key(env: &Env, market: &Address, token: &Address) ->
     push_str(&mut b, env, "CLAIMABLE_FEE_AMOUNT");
     push_addr(&mut b, env, market);
     push_addr(&mut b, env, token);
+    sha256(env, &b)
+}
+
+/// sha256("CLAIMABLE_UI_FEE_AMOUNT" ‖ token ‖ ui_receiver)
+///
+/// Stores the UI fee accrued for a specific receiver + token pair.
+/// Added for issue #85 — UI fee claiming.
+pub fn claimable_ui_fee_amount_key(
+    env: &Env,
+    token: &Address,
+    ui_receiver: &Address,
+) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "CLAIMABLE_UI_FEE_AMOUNT");
+    push_addr(&mut b, env, token);
+    push_addr(&mut b, env, ui_receiver);
     sha256(env, &b)
 }
 
@@ -460,7 +476,11 @@ pub fn max_leverage_key(env: &Env, market: &Address) -> BytesN<32> {
     sha256(env, &b)
 }
 
-pub fn position_fee_factor_key(env: &Env, market: &Address, for_positive_impact: bool) -> BytesN<32> {
+pub fn position_fee_factor_key(
+    env: &Env,
+    market: &Address,
+    for_positive_impact: bool,
+) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "POSITION_FEE_FACTOR");
     push_addr(&mut b, env, market);
@@ -530,7 +550,12 @@ pub fn swap_impact_exponent_factor_key(env: &Env, market: &Address) -> BytesN<32
     sha256(env, &b)
 }
 
-pub fn max_pnl_factor_key(env: &Env, pnl_factor_type: &BytesN<32>, market: &Address, is_long: bool) -> BytesN<32> {
+pub fn max_pnl_factor_key(
+    env: &Env,
+    pnl_factor_type: &BytesN<32>,
+    market: &Address,
+    is_long: bool,
+) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "MAX_PNL_FACTOR");
     b.extend_from_array(&pnl_factor_type.to_array());
@@ -591,21 +616,6 @@ pub fn ui_fee_factor_key(env: &Env, ui_fee_receiver: &Address) -> BytesN<32> {
     sha256(env, &b)
 }
 
-/// Claimable UI fee amount per (market, token, ui_fee_receiver)
-pub fn claimable_ui_fee_amount_key(
-    env: &Env,
-    market: &Address,
-    token: &Address,
-    ui_fee_receiver: &Address,
-) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "CLAIMABLE_UI_FEE_AMOUNT");
-    push_addr(&mut b, env, market);
-    push_addr(&mut b, env, token);
-    push_addr(&mut b, env, ui_fee_receiver);
-    sha256(env, &b)
-}
-
 /// ADL enabled flag per (market, is_long)
 pub fn is_adl_enabled_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
     let mut b = Bytes::new(env);
@@ -660,6 +670,14 @@ pub fn max_pnl_factor_for_deposits_key(env: &Env) -> BytesN<32> {
 pub fn max_pnl_factor_for_withdrawals_key(env: &Env) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "MAX_PNL_FACTOR_FOR_WITHDRAWALS");
+    sha256(env, &b)
+}
+
+// ─── Pause keys ──────────────────────────────────────────────────────────────
+
+pub fn global_pause_key(env: &Env) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "GLOBAL_PAUSE");
     sha256(env, &b)
 }
 

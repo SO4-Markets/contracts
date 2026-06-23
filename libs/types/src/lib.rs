@@ -22,7 +22,11 @@ impl PriceProps {
     }
 
     pub fn pick_price(&self, maximize: bool) -> i128 {
-        if maximize { self.max } else { self.min }
+        if maximize {
+            self.max
+        } else {
+            self.min
+        }
     }
 
     /// Longs profit from higher prices, shorts from lower.
@@ -112,42 +116,42 @@ pub struct OrderProps {
 /// User-supplied parameters for creating a deposit.
 #[contracttype]
 pub struct CreateDepositParams {
-    pub receiver:            Address,
-    pub market:              Address,
-    pub initial_long_token:  Address,
+    pub receiver: Address,
+    pub market: Address,
+    pub initial_long_token: Address,
     pub initial_short_token: Address,
-    pub long_token_amount:   i128,
-    pub short_token_amount:  i128,
-    pub min_market_tokens:   i128,
-    pub execution_fee:       i128,
+    pub long_token_amount: i128,
+    pub short_token_amount: i128,
+    pub min_market_tokens: i128,
+    pub execution_fee: i128,
 }
 
 /// User-supplied parameters for creating a withdrawal.
 #[contracttype]
 pub struct CreateWithdrawalParams {
-    pub receiver:               Address,
-    pub market:                 Address,
-    pub market_token_amount:    i128,
-    pub min_long_token_amount:  i128,
+    pub receiver: Address,
+    pub market: Address,
+    pub market_token_amount: i128,
+    pub min_long_token_amount: i128,
     pub min_short_token_amount: i128,
-    pub execution_fee:          i128,
+    pub execution_fee: i128,
 }
 
 /// User-supplied parameters for creating an order. Mirrors GMX BaseOrderUtils.CreateOrderParams.
 #[contracttype]
 pub struct CreateOrderParams {
-    pub receiver:                 Address,
-    pub market:                   Address,
+    pub receiver: Address,
+    pub market: Address,
     pub initial_collateral_token: Address,
-    pub swap_path:                Vec<Address>,
-    pub size_delta_usd:           i128,
-    pub collateral_delta_amount:  i128,
-    pub trigger_price:            i128,
-    pub acceptable_price:         i128,
-    pub execution_fee:            i128,
-    pub min_output_amount:        i128,
-    pub order_type:               OrderType,
-    pub is_long:                  bool,
+    pub swap_path: Vec<Address>,
+    pub size_delta_usd: i128,
+    pub collateral_delta_amount: i128,
+    pub trigger_price: i128,
+    pub acceptable_price: i128,
+    pub execution_fee: i128,
+    pub min_output_amount: i128,
+    pub order_type: OrderType,
+    pub is_long: bool,
 }
 
 // ─── Deposits / Withdrawals ───────────────────────────────────────────────────
@@ -227,12 +231,12 @@ pub struct PositionFees {
 /// Result of executing a position decrease (partial or full close).
 #[contracttype]
 pub struct DecreasePositionResult {
-    pub execution_price:       i128,  // FLOAT_PRECISION per whole token
-    pub pnl_usd:               i128,  // realised PnL (positive = profit, negative = loss)
-    pub output_amount:         i128,  // collateral token amount sent to receiver
+    pub execution_price: i128,         // FLOAT_PRECISION per whole token
+    pub pnl_usd: i128,                 // realised PnL (positive = profit, negative = loss)
+    pub output_amount: i128,           // collateral token amount sent to receiver
     pub secondary_output_amount: i128, // optional second token (e.g. from swap-on-close)
-    pub remaining_collateral:  i128,  // collateral left in position after fees & pnl
-    pub is_fully_closed:       bool,
+    pub remaining_collateral: i128,    // collateral left in position after fees & pnl
+    pub is_fully_closed: bool,
 }
 
 /// Rich position info including computed PnL and fees (returned by Reader).

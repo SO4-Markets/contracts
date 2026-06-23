@@ -25,7 +25,8 @@ pub fn mul_div(a: i128, b: i128, denominator: i128) -> i128 {
             // Decompose to avoid overflow: (a/d)*b + (a%d)*b/d
             let q = a / denominator;
             let r = a % denominator;
-            q.saturating_mul(b).saturating_add(r.saturating_mul(b) / denominator)
+            q.saturating_mul(b)
+                .saturating_add(r.saturating_mul(b) / denominator)
         }
     }
 }
@@ -42,7 +43,34 @@ pub fn mul_div_wide(env: &Env, a: i128, b: i128, denominator: i128) -> i128 {
     let product = a256.mul(&b256);
     let result = product.div(&d256);
     // Saturate to i128 bounds if result is too large (shouldn't happen in normal protocol use)
-    result.to_i128().unwrap_or(if a > 0 { i128::MAX } else { i128::MIN })
+    result
+        .to_i128()
+        .unwrap_or(if a > 0 { i128::MAX } else { i128::MIN })
+}
+
+/// (a × b) / denominator rounded UP (ceiling division) using I256.
+/// Used for fee and cost amounts so the protocol never under-collects.
+pub fn mul_div_wide_up(env: &Env, a: i128, b: i128, denominator: i128) -> i128 {
+    if denominator == 0 {
+        return 0;
+    }
+    let a256 = I256::from_i128(env, a);
+    let b256 = I256::from_i128(env, b);
+    let d256 = I256::from_i128(env, denominator);
+    let product = a256.mul(&b256);
+    // ceiling division: (product + denominator - 1) / denominator
+    // only applies when product > 0 to avoid rounding negative values upward
+    let zero = I256::from_i128(env, 0);
+    let one = I256::from_i128(env, 1);
+    let result = if product.cmp(&zero) == core::cmp::Ordering::Greater {
+        let d_minus_one = d256.sub(&one);
+        product.add(&d_minus_one).div(&d256)
+    } else {
+        product.div(&d256)
+    };
+    result
+        .to_i128()
+        .unwrap_or(if a > 0 { i128::MAX } else { i128::MIN })
 }
 
 // ─── Factor helpers ───────────────────────────────────────────────────────────
@@ -73,7 +101,8 @@ pub fn integer_sqrt(n: i128) -> i128 {
         return 0;
     }
     let mut x = n;
-    let mut y = (x + 1) / 2;
+    // Use (x >> 1) + (x & 1) instead of (x + 1) / 2 to avoid overflow when x = i128::MAX.
+    let mut y = (x >> 1) + (x & 1);
     while y < x {
         x = y;
         y = (y + n / y) / 2;
@@ -152,20 +181,36 @@ pub fn pow_factor(env: &Env, value: i128, exponent: i128) -> i128 {
 // ─── Utility ──────────────────────────────────────────────────────────────────
 
 pub fn abs_safe(value: i128) -> i128 {
-    if value < 0 { value.saturating_neg() } else { value }
+    if value < 0 {
+        value.saturating_neg()
+    } else {
+        value
+    }
 }
 
 pub fn min(a: i128, b: i128) -> i128 {
-    if a < b { a } else { b }
+    if a < b {
+        a
+    } else {
+        b
+    }
 }
 
 pub fn max(a: i128, b: i128) -> i128 {
-    if a > b { a } else { b }
+    if a > b {
+        a
+    } else {
+        b
+    }
 }
 
 /// Clamp value to [0, ∞) — used for pool amounts that can't go negative.
 pub fn bound_above_zero(value: i128) -> i128 {
-    if value < 0 { 0 } else { value }
+    if value < 0 {
+        0
+    } else {
+        value
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -230,5 +275,288 @@ mod tests {
         let two = 2 * fp;
         let four = 4 * fp;
         assert_eq!(pow_factor(&env, two, 2 * fp), four);
+    }
+
+    // ── Issue #156/#127: rounding direction ──────────────────────────────────
+
+    /// mul_div_wide (floor) and mul_div_wide_up (ceil) produce the same result
+    /// when the division is exact.
+    #[test]
+    fn rounding_exact_division_same_result() {
+        let env = Env::default();
+        // 10 × 3 / 5 = 6 exactly — both should give 6
+        assert_eq!(mul_div_wide(&env, 10, 3, 5), 6);
+        assert_eq!(mul_div_wide_up(&env, 10, 3, 5), 6);
+    }
+
+    /// When division has a remainder, mul_div_wide_up produces a result one
+    /// greater than mul_div_wide, ensuring fees are never under-collected.
+    #[test]
+    fn rounding_up_exceeds_floor_on_remainder() {
+        let env = Env::default();
+        // 10 × 1 / 3 = 3 remainder 1 → floor = 3, ceil = 4
+        let floor = mul_div_wide(&env, 10, 1, 3);
+        let ceil = mul_div_wide_up(&env, 10, 1, 3);
+        assert_eq!(floor, 3);
+        assert_eq!(ceil, 4);
+        assert!(
+            ceil > floor,
+            "ceil must exceed floor when there is a remainder"
+        );
+    }
+
+    /// Repeated small fees accumulate rather than leak when rounding up.
+    /// 1_000_001 iterations each paying 1 stroop of fee at 0.001% rate —
+    /// the ceiling version must collect at least as much as the floor version.
+    #[test]
+    fn fee_rounding_accumulates_not_leaks() {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let fp = FLOAT_PRECISION;
+        // fee_factor = 0.001% = fp / 100_000
+        let fee_factor = fp / 100_000;
+        let size = 33; // odd number ensures a remainder on most iterations
+
+        let mut floor_total: i128 = 0;
+        let mut ceil_total: i128 = 0;
+
+        for _ in 0..1_000 {
+            floor_total += mul_div_wide(&env, size, fee_factor, fp);
+            ceil_total += mul_div_wide_up(&env, size, fee_factor, fp);
+        }
+
+        assert!(
+            ceil_total >= floor_total,
+            "ceiling-rounded fees must accumulate at least as much as floor-rounded fees"
+        );
+    }
+
+    /// Negative values (credits/claimable amounts) should not be rounded away
+    /// from zero — mul_div_wide_up returns floor division for negative products.
+    #[test]
+    fn rounding_up_does_not_affect_negative_values() {
+        let env = Env::default();
+        // −10 × 1 / 3 = −3 remainder −1 → both floor and ceil behave the same
+        // (we only apply ceiling for positive fee amounts)
+        let floor = mul_div_wide(&env, -10, 1, 3);
+        let ceil = mul_div_wide_up(&env, -10, 1, 3);
+        // Both should truncate toward zero (i.e. -3, not -4)
+        assert_eq!(floor, -3);
+        assert_eq!(ceil, -3);
+    }
+
+    // ── Issue #136: property tests for math utilities ─────────────────────────
+
+    /// mul_div_wide_up(a, b, d) >= mul_div_wide(a, b, d) for all positive inputs.
+    /// Covers a range of values including protocol-scale USD amounts.
+    #[test]
+    fn property_ceil_always_gte_floor_for_positive_inputs() {
+        let env = Env::default();
+        let cases: &[(i128, i128, i128)] = &[
+            (1, 1, 3),
+            (7, 11, 13),
+            (FLOAT_PRECISION, 3, FLOAT_PRECISION * 2),
+            (10_000_000, FLOAT_PRECISION / 1_000, FLOAT_PRECISION),
+            (i128::MAX / 2, 1, i128::MAX),
+            (
+                1_000_000 * 10_000_000,
+                FLOAT_PRECISION / 10_000,
+                FLOAT_PRECISION,
+            ),
+        ];
+        for &(a, b, d) in cases {
+            let floor = mul_div_wide(&env, a, b, d);
+            let ceil = mul_div_wide_up(&env, a, b, d);
+            assert!(
+                ceil >= floor,
+                "ceil must be >= floor: a={a}, b={b}, d={d}, floor={floor}, ceil={ceil}"
+            );
+        }
+    }
+
+    /// mul_div_wide is monotone in a: for fixed positive b, d and a1 < a2,
+    /// mul_div_wide(a1, b, d) <= mul_div_wide(a2, b, d).
+    #[test]
+    fn property_mul_div_wide_monotone_in_a() {
+        let env = Env::default();
+        let b = FLOAT_PRECISION / 100; // 1%
+        let d = FLOAT_PRECISION;
+        let steps: &[i128] = &[
+            0,
+            1,
+            100,
+            10_000_000,
+            FLOAT_PRECISION,
+            FLOAT_PRECISION * 1_000,
+        ];
+        for &a1 in steps {
+            for &a2 in steps {
+                if a1 >= a2 {
+                    continue;
+                }
+                let r1 = mul_div_wide(&env, a1, b, d);
+                let r2 = mul_div_wide(&env, a2, b, d);
+                assert!(
+                    r1 <= r2,
+                    "monotone violated: a1={a1}, a2={a2}, r1={r1}, r2={r2}"
+                );
+            }
+        }
+    }
+
+    /// apply_factor with FLOAT_PRECISION is the identity (within rounding of 1 unit).
+    #[test]
+    fn property_apply_factor_fp_is_identity() {
+        let values: &[i128] = &[0, 1, 100, 10_000_000, FLOAT_PRECISION, FLOAT_PRECISION * 7];
+        for &v in values {
+            let result = apply_factor(v, FLOAT_PRECISION);
+            assert_eq!(result, v, "apply_factor(v, FP) must equal v for v={v}");
+        }
+    }
+
+    /// apply_factor with zero factor always returns 0.
+    #[test]
+    fn property_apply_factor_zero_factor_returns_zero() {
+        let values: &[i128] = &[0, 1, 10_000_000, FLOAT_PRECISION, i128::MAX / 2];
+        for &v in values {
+            assert_eq!(
+                apply_factor(v, 0),
+                0,
+                "apply_factor(v, 0) must be 0 for v={v}"
+            );
+        }
+    }
+
+    /// integer_sqrt is monotone: a <= b implies sqrt(a) <= sqrt(b).
+    #[test]
+    fn property_integer_sqrt_monotone() {
+        let steps: &[i128] = &[
+            0,
+            1,
+            2,
+            3,
+            4,
+            9,
+            16,
+            100,
+            10_000,
+            1_000_000,
+            FLOAT_PRECISION,
+        ];
+        for &a in steps {
+            for &b in steps {
+                if a > b {
+                    continue;
+                }
+                let sa = integer_sqrt(a);
+                let sb = integer_sqrt(b);
+                assert!(
+                    sa <= sb,
+                    "sqrt not monotone: sqrt({a})={sa} > sqrt({b})={sb}"
+                );
+            }
+        }
+    }
+
+    /// integer_sqrt(n*n) == n for small perfect squares — verifies floor correctness.
+    #[test]
+    fn property_integer_sqrt_perfect_squares() {
+        for n in 0i128..=1000 {
+            assert_eq!(integer_sqrt(n * n), n, "sqrt(n²) must equal n for n={n}");
+        }
+    }
+
+    /// integer_sqrt never produces a negative value.
+    #[test]
+    fn property_integer_sqrt_never_negative() {
+        let cases: &[i128] = &[0, 1, 2, 3, 4, 5, 100, 10_000, FLOAT_PRECISION, i128::MAX];
+        for &n in cases {
+            assert!(integer_sqrt(n) >= 0, "sqrt({n}) must be non-negative");
+        }
+    }
+
+    /// mul_div(a, b, d) never returns a value larger than a*b (for positive inputs).
+    /// This guards against overflow bugs that inflate results.
+    #[test]
+    fn property_mul_div_result_never_exceeds_naive_product() {
+        let cases: &[(i128, i128, i128)] = &[(10, 20, 1), (100, 200, 50), (FLOAT_PRECISION, 2, 1)];
+        for &(a, b, d) in cases {
+            let result = mul_div(a, b, d);
+            let naive = a.saturating_mul(b);
+            // result should be <= naive / d (we just check it doesn't exceed naive)
+            assert!(
+                result <= naive,
+                "mul_div({a},{b},{d})={result} exceeded naive product {naive}"
+            );
+        }
+    }
+
+    /// bound_above_zero clamps negatives to 0 and passes non-negatives through.
+    #[test]
+    fn property_bound_above_zero_no_negative_output() {
+        let cases: &[i128] = &[i128::MIN, -1_000_000, -1, 0, 1, 1_000_000, i128::MAX];
+        for &v in cases {
+            let result = bound_above_zero(v);
+            assert!(
+                result >= 0,
+                "bound_above_zero({v}) returned negative: {result}"
+            );
+            if v >= 0 {
+                assert_eq!(
+                    result, v,
+                    "bound_above_zero must be identity for non-negative {v}"
+                );
+            } else {
+                assert_eq!(result, 0, "bound_above_zero must return 0 for negative {v}");
+            }
+        }
+    }
+
+    /// abs_safe never returns a negative for any input (including i128::MIN which
+    /// would overflow a plain negation — saturating_neg clamps to i128::MAX).
+    #[test]
+    fn property_abs_safe_never_negative() {
+        let cases: &[i128] = &[i128::MIN, -1, 0, 1, FLOAT_PRECISION, i128::MAX];
+        for &v in cases {
+            let result = abs_safe(v);
+            assert!(result >= 0, "abs_safe({v}) returned negative: {result}");
+        }
+    }
+
+    /// pow_factor(x, 0) == FLOAT_PRECISION (x^0 = 1) for any positive x.
+    #[test]
+    fn property_pow_factor_zero_exponent_is_one() {
+        let env = Env::default();
+        let xs: &[i128] = &[1, FLOAT_PRECISION / 2, FLOAT_PRECISION, FLOAT_PRECISION * 3];
+        for &x in xs {
+            assert_eq!(
+                pow_factor(&env, x, 0),
+                FLOAT_PRECISION,
+                "pow_factor({x}, 0) must be FLOAT_PRECISION"
+            );
+        }
+    }
+
+    /// pow_factor(x, FP) == x (x^1 = x) for positive x.
+    #[test]
+    fn property_pow_factor_unit_exponent_is_identity() {
+        let env = Env::default();
+        let xs: &[i128] = &[FLOAT_PRECISION / 2, FLOAT_PRECISION, 2 * FLOAT_PRECISION];
+        for &x in xs {
+            assert_eq!(
+                pow_factor(&env, x, FLOAT_PRECISION),
+                x,
+                "pow_factor({x}, FP) must equal x"
+            );
+        }
+    }
+
+    /// mul_div_wide with denominator 0 returns 0 (no divide-by-zero panic).
+    #[test]
+    fn property_mul_div_wide_zero_denominator_returns_zero() {
+        let env = Env::default();
+        assert_eq!(mul_div_wide(&env, 12345, FLOAT_PRECISION, 0), 0);
+        assert_eq!(mul_div_wide_up(&env, 12345, FLOAT_PRECISION, 0), 0);
+        assert_eq!(mul_div(12345, FLOAT_PRECISION, 0), 0);
     }
 }

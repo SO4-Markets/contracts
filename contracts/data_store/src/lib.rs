@@ -1,10 +1,10 @@
 #![no_std]
 
-use soroban_sdk::{
-    contract, contractevent, contractimpl, contracttype, contracterror, panic_with_error,
-    BytesN, Env, Address, Vec,
-};
 use gmx_keys::roles;
+use soroban_sdk::{
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
+    BytesN, Env, Vec,
+};
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -12,10 +12,10 @@ use gmx_keys::roles;
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    NotInitialized    = 1,
+    NotInitialized = 1,
     AlreadyInitialized = 2,
-    Unauthorized      = 3,
-    Underflow         = 4, // apply_delta would cause underflow
+    Unauthorized = 3,
+    Underflow = 4, // apply_delta would cause underflow
 }
 
 // ─── Instance storage keys ────────────────────────────────────────────────────
@@ -73,15 +73,37 @@ impl DataStore {
         if env.storage().instance().has(&InstanceKey::Initialized) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
-        env.storage().instance().set(&InstanceKey::Initialized, &true);
-        env.storage().instance().set(&InstanceKey::RoleStore, &role_store);
-        env.events().publish_event(&DataStoreInitialized { role_store });
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Initialized, &true);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::RoleStore, &role_store);
+        env.events()
+            .publish_event(&DataStoreInitialized { role_store });
     }
 
     // ── u128 operations ──────────────────────────────────────────────────────
 
     pub fn get_u128(env: Env, key: BytesN<32>) -> u128 {
-        env.storage().persistent().get(&DataKey::U128(key)).unwrap_or(0)
+        env.storage()
+            .persistent()
+            .get(&DataKey::U128(key))
+            .unwrap_or(0)
+    }
+
+    /// Read multiple u128 values in one call to reduce cross-contract call overhead.
+    pub fn get_u128_batch(env: Env, keys: Vec<BytesN<32>>) -> Vec<u128> {
+        let mut results = Vec::new(&env);
+        for key in keys.iter() {
+            let val: u128 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::U128(key))
+                .unwrap_or(0);
+            results.push_back(val);
+        }
+        results
     }
 
     pub fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128 {
@@ -101,7 +123,11 @@ impl DataStore {
     pub fn apply_delta_to_u128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> u128 {
         caller.require_auth();
         require_controller(&env, &caller);
-        let current: u128 = env.storage().persistent().get(&DataKey::U128(key.clone())).unwrap_or(0);
+        let current: u128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::U128(key.clone()))
+            .unwrap_or(0);
         let next = if delta >= 0 {
             current.saturating_add(delta as u128)
         } else {
@@ -118,7 +144,11 @@ impl DataStore {
     pub fn increment_u128(env: Env, caller: Address, key: BytesN<32>, amount: u128) -> u128 {
         caller.require_auth();
         require_controller(&env, &caller);
-        let current: u128 = env.storage().persistent().get(&DataKey::U128(key.clone())).unwrap_or(0);
+        let current: u128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::U128(key.clone()))
+            .unwrap_or(0);
         let next = current.saturating_add(amount);
         env.storage().persistent().set(&DataKey::U128(key), &next);
         next
@@ -127,7 +157,11 @@ impl DataStore {
     pub fn decrement_u128(env: Env, caller: Address, key: BytesN<32>, amount: u128) -> u128 {
         caller.require_auth();
         require_controller(&env, &caller);
-        let current: u128 = env.storage().persistent().get(&DataKey::U128(key.clone())).unwrap_or(0);
+        let current: u128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::U128(key.clone()))
+            .unwrap_or(0);
         if amount > current {
             panic_with_error!(&env, Error::Underflow);
         }
@@ -139,7 +173,10 @@ impl DataStore {
     // ── i128 operations ──────────────────────────────────────────────────────
 
     pub fn get_i128(env: Env, key: BytesN<32>) -> i128 {
-        env.storage().persistent().get(&DataKey::I128(key)).unwrap_or(0)
+        env.storage()
+            .persistent()
+            .get(&DataKey::I128(key))
+            .unwrap_or(0)
     }
 
     pub fn set_i128(env: Env, caller: Address, key: BytesN<32>, value: i128) -> i128 {
@@ -158,7 +195,11 @@ impl DataStore {
     pub fn apply_delta_to_i128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> i128 {
         caller.require_auth();
         require_controller(&env, &caller);
-        let current: i128 = env.storage().persistent().get(&DataKey::I128(key.clone())).unwrap_or(0);
+        let current: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::I128(key.clone()))
+            .unwrap_or(0);
         let next = current.saturating_add(delta);
         env.storage().persistent().set(&DataKey::I128(key), &next);
         next
@@ -186,7 +227,10 @@ impl DataStore {
     // ── bool operations ───────────────────────────────────────────────────────
 
     pub fn get_bool(env: Env, key: BytesN<32>) -> bool {
-        env.storage().persistent().get(&DataKey::Bool(key)).unwrap_or(false)
+        env.storage()
+            .persistent()
+            .get(&DataKey::Bool(key))
+            .unwrap_or(false)
     }
 
     pub fn set_bool(env: Env, caller: Address, key: BytesN<32>, value: bool) -> bool {
@@ -211,7 +255,12 @@ impl DataStore {
             .unwrap_or(BytesN::from_array(&env, &[0u8; 32]))
     }
 
-    pub fn set_bytes32(env: Env, caller: Address, key: BytesN<32>, value: BytesN<32>) -> BytesN<32> {
+    pub fn set_bytes32(
+        env: Env,
+        caller: Address,
+        key: BytesN<32>,
+        value: BytesN<32>,
+    ) -> BytesN<32> {
         caller.require_auth();
         require_controller(&env, &caller);
         env.storage().persistent().set(&DataKey::B32(key), &value);
@@ -230,7 +279,9 @@ impl DataStore {
             .unwrap_or(Vec::new(&env));
         if !vec_contains_addr(&set, &value) {
             set.push_back(value);
-            env.storage().persistent().set(&DataKey::AddrSet(set_key), &set);
+            env.storage()
+                .persistent()
+                .set(&DataKey::AddrSet(set_key), &set);
         }
     }
 
@@ -243,7 +294,9 @@ impl DataStore {
             .get(&DataKey::AddrSet(set_key.clone()))
             .unwrap_or(Vec::new(&env));
         vec_remove_addr(&mut set, &value);
-        env.storage().persistent().set(&DataKey::AddrSet(set_key), &set);
+        env.storage()
+            .persistent()
+            .set(&DataKey::AddrSet(set_key), &set);
     }
 
     pub fn get_address_set_count(env: Env, set_key: BytesN<32>) -> u32 {
@@ -285,11 +338,18 @@ impl DataStore {
             .unwrap_or(Vec::new(&env));
         if !vec_contains_b32(&set, &value) {
             set.push_back(value);
-            env.storage().persistent().set(&DataKey::B32Set(set_key), &set);
+            env.storage()
+                .persistent()
+                .set(&DataKey::B32Set(set_key), &set);
         }
     }
 
-    pub fn remove_bytes32_from_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>) {
+    pub fn remove_bytes32_from_set(
+        env: Env,
+        caller: Address,
+        set_key: BytesN<32>,
+        value: BytesN<32>,
+    ) {
         caller.require_auth();
         require_controller(&env, &caller);
         let mut set: Vec<BytesN<32>> = env
@@ -298,7 +358,9 @@ impl DataStore {
             .get(&DataKey::B32Set(set_key.clone()))
             .unwrap_or(Vec::new(&env));
         vec_remove_b32(&mut set, &value);
-        env.storage().persistent().set(&DataKey::B32Set(set_key), &set);
+        env.storage()
+            .persistent()
+            .set(&DataKey::B32Set(set_key), &set);
     }
 
     pub fn get_bytes32_set_count(env: Env, set_key: BytesN<32>) -> u32 {
@@ -310,7 +372,12 @@ impl DataStore {
         set.len()
     }
 
-    pub fn get_bytes32_set_at(env: Env, set_key: BytesN<32>, start: u32, end: u32) -> Vec<BytesN<32>> {
+    pub fn get_bytes32_set_at(
+        env: Env,
+        set_key: BytesN<32>,
+        start: u32,
+        end: u32,
+    ) -> Vec<BytesN<32>> {
         let set: Vec<BytesN<32>> = env
             .storage()
             .persistent()
@@ -435,8 +502,8 @@ fn paginate_b32(env: &Env, vec: &Vec<BytesN<32>>, start: u32, end: u32) -> Vec<B
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
     use role_store::{RoleStore, RoleStoreClient as RoleClient};
+    use soroban_sdk::{testutils::Address as _, Env};
 
     fn setup() -> (Env, Address, Address, Address) {
         let env = Env::default();
@@ -570,5 +637,31 @@ mod tests {
         let n2 = client.increment_nonce(&admin);
         assert_eq!(n1, 1);
         assert_eq!(n2, 2);
+    }
+
+    // ── Issue #109: CONTROLLER authorization matrix ───────────────────────────
+
+    /// set_u128 must reject a caller that does not hold CONTROLLER.
+    #[test]
+    #[should_panic]
+    fn set_u128_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+        // impostor is not registered as CONTROLLER — must panic.
+        client.set_u128(&impostor, &key, &42u128);
+    }
+
+    /// set_address must reject a caller that does not hold CONTROLLER.
+    #[test]
+    #[should_panic]
+    fn set_address_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = soroban_sdk::BytesN::from_array(&env, &[2u8; 32]);
+        let value = Address::generate(&env);
+        client.set_address(&impostor, &key, &value);
     }
 }
