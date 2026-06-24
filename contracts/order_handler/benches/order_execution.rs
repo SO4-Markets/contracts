@@ -26,7 +26,7 @@ use order_vault::{OrderVault, OrderVaultClient};
 use role_store::{RoleStore, RoleStoreClient};
 
 use gmx_keys::roles;
-use gmx_types::{OrderType, TokenPrice};
+use gmx_types::{OrderType, SwapPath, TokenPrice};
 
 const FLOAT_PRECISION: i128 = 1_000_000_000_000_000_000_000_000_000_000;
 const TOKEN_PRECISION: i128 = 10_000_000;
@@ -128,7 +128,7 @@ fn do_create_order(w: &World, user: &Address) -> soroban_sdk::BytesN<32> {
             receiver: user.clone(),
             market: w.market_tk.clone(),
             initial_collateral_token: w.long_tk.clone(),
-            swap_path: Vec::new(&w.env),
+            swap_path: SwapPath::new(),
             size_delta_usd: SIZE_USD,
             collateral_delta_amount: COLLATERAL_AMOUNT,
             trigger_price: 0,
@@ -223,7 +223,7 @@ fn bench_full_cycle(c: &mut Criterion) {
                         receiver: user.clone(),
                         market: w.market_tk.clone(),
                         initial_collateral_token: w.long_tk.clone(),
-                        swap_path: Vec::new(&w.env),
+                        swap_path: SwapPath::new(),
                         size_delta_usd: SIZE_USD,
                         collateral_delta_amount: 0,
                         trigger_price: 0,
@@ -251,7 +251,7 @@ fn bench_full_cycle(c: &mut Criterion) {
             receiver: user.clone(),
             market: w.market_tk.clone(),
             initial_collateral_token: w.long_tk.clone(),
-            swap_path: Vec::new(&w.env),
+            swap_path: SwapPath::new(),
             size_delta_usd: SIZE_USD,
             collateral_delta_amount: 0,
             trigger_price: 0,
