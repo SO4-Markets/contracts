@@ -289,7 +289,7 @@ mod tests {
     use data_store::{DataStore, DataStoreClient as DsClient};
     use gmx_keys::roles;
     use gmx_math::FLOAT_PRECISION;
-    use gmx_types::{CreateOrderParams, OrderType, TokenPrice};
+    use gmx_types::{CreateOrderParams, OrderType, SwapPath, TokenPrice};
     use market_token::{MarketToken, MarketTokenClient as MtClient};
     use oracle::{Oracle, OracleClient as OClient};
     use order_handler::{OrderHandler, OrderHandlerClient as OHClient};
@@ -499,7 +499,7 @@ mod tests {
                 receiver: w.user.clone(),
                 market: w.market_tk.clone(),
                 initial_collateral_token: w.long_tk.clone(),
-                swap_path: soroban_sdk::Vec::new(&w.env),
+                swap_path: SwapPath::new(),
                 size_delta_usd: size_usd,
                 collateral_delta_amount: collateral_tokens,
                 trigger_price: 0,
@@ -531,7 +531,7 @@ mod tests {
                 receiver: w.user.clone(),
                 market: w.market_tk.clone(),
                 initial_collateral_token: w.short_tk.clone(),
-                swap_path: soroban_sdk::Vec::new(&w.env),
+                swap_path: SwapPath::new(),
                 size_delta_usd: size_usd,
                 collateral_delta_amount: collateral_tokens,
                 trigger_price: 0,

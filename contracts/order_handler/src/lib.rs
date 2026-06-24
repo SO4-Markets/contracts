@@ -25,7 +25,7 @@ use gmx_keys::{
 use gmx_swap_utils::swap_with_path;
 pub use gmx_types::CreateOrderParams;
 use gmx_types::PositionProps;
-use gmx_types::{MarketProps, OrderProps, OrderType, PriceProps};
+use gmx_types::{MarketProps, OrderProps, OrderType, PriceProps, SwapPath, MAX_SWAP_PATH_LENGTH};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     BytesN, Env,
@@ -62,6 +62,7 @@ pub enum Error {
     /// order_vault (via exchange_router SendTokens) before calling create_order.
     /// record_transfer_in returned zero, meaning no collateral arrived.
     ZeroCollateral = 10,
+    SwapPathTooLong = 11,
 }
 
 // ─── External contract clients ────────────────────────────────────────────────
@@ -213,6 +214,10 @@ impl OrderHandler {
     /// Returns the order key.
     pub fn create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32> {
         caller.require_auth();
+
+        if params.swap_path.len() as usize > MAX_SWAP_PATH_LENGTH {
+            panic_with_error!(&env, Error::SwapPathTooLong);
+        }
 
         let data_store: Address = env
             .storage()
@@ -653,7 +658,7 @@ impl OrderHandler {
                 index_token_price: &index_price,
                 collateral_price,
                 current_time: env.ledger().timestamp(),
-                swap_path: soroban_sdk::Vec::new(&env),
+                swap_path: SwapPath::new(),
                 oracle: &oracle,
             },
         );
@@ -711,7 +716,7 @@ impl OrderHandler {
                 index_token_price: &index_price,
                 collateral_price,
                 current_time: env.ledger().timestamp(),
-                swap_path: soroban_sdk::Vec::new(&env),
+                swap_path: SwapPath::new(),
                 oracle: &oracle,
             },
         );
@@ -997,7 +1002,7 @@ mod tests {
                 receiver: w.user.clone(),
                 market: w.market_tk.clone(),
                 initial_collateral_token: w.long_tk.clone(),
-                swap_path: Vec::new(&w.env),
+                swap_path: SwapPath::new(),
                 size_delta_usd: 2000 * gmx_math::FLOAT_PRECISION,
                 collateral_delta_amount: COLLATERAL,
                 trigger_price,
@@ -1029,7 +1034,7 @@ mod tests {
                 receiver: user.clone(),
                 market: w.market_tk.clone(),
                 initial_collateral_token: w.long_tk.clone(),
-                swap_path: Vec::new(&w.env),
+                swap_path: SwapPath::new(),
                 size_delta_usd: collateral,
                 collateral_delta_amount: collateral,
                 trigger_price,
@@ -1137,7 +1142,7 @@ mod tests {
                 receiver: w.user.clone(),
                 market: w.market_tk.clone(),
                 initial_collateral_token: w.long_tk.clone(),
-                swap_path: Vec::new(&w.env),
+                swap_path: SwapPath::new(),
                 size_delta_usd: 2000 * gmx_math::FLOAT_PRECISION,
                 collateral_delta_amount: COLLATERAL,
                 trigger_price: 0,
@@ -1198,7 +1203,7 @@ mod tests {
                 receiver: w.user.clone(),
                 market: w.market_tk.clone(),
                 initial_collateral_token: w.long_tk.clone(),
-                swap_path: Vec::new(&w.env),
+                swap_path: SwapPath::new(),
                 size_delta_usd: 2000 * gmx_math::FLOAT_PRECISION,
                 collateral_delta_amount: COLLATERAL,
                 trigger_price: 0,
@@ -1284,7 +1289,7 @@ mod tests {
                 receiver: user.clone(),
                 market: w.market_tk.clone(),
                 initial_collateral_token: w.long_tk.clone(),
-                swap_path: Vec::new(env),
+                swap_path: SwapPath::new(),
                 size_delta_usd: 500_000_0000i128,
                 collateral_delta_amount: 1_000_0000i128,
                 trigger_price: 0,
@@ -1334,7 +1339,7 @@ mod tests {
                 receiver: user.clone(),
                 market: w.market_tk.clone(),
                 initial_collateral_token: w.long_tk.clone(),
-                swap_path: Vec::new(env),
+                swap_path: SwapPath::new(),
                 size_delta_usd: 500_000_0000i128,
                 collateral_delta_amount: 1_000_0000i128,
                 trigger_price: 0,
@@ -1535,7 +1540,7 @@ mod tests {
                 receiver: user.clone(),
                 market: w.market_tk.clone(),
                 initial_collateral_token: token_in.clone(),
-                swap_path: Vec::from_array(&w.env, [w.market_tk.clone()]),
+                swap_path: SwapPath::from_array([w.market_tk.clone()]),
                 size_delta_usd: 0,
                 collateral_delta_amount: collateral,
                 trigger_price,
@@ -1735,7 +1740,7 @@ mod tests {
                 receiver: user.clone(),
                 market: w.market_tk.clone(),
                 initial_collateral_token: w.long_tk.clone(),
-                swap_path: Vec::from_array(env, [w.market_tk.clone(), fake_market]),
+                swap_path: SwapPath::from_array([w.market_tk.clone(), fake_market]),
                 size_delta_usd: 0,
                 collateral_delta_amount: 1_000_0000i128,
                 trigger_price: 0,
@@ -1777,7 +1782,7 @@ mod tests {
                 receiver: user.clone(),
                 market: w.market_tk.clone(),
                 initial_collateral_token: w.short_tk.clone(),
-                swap_path: Vec::from_array(env, [w.market_tk.clone()]),
+                swap_path: SwapPath::from_array([w.market_tk.clone()]),
                 size_delta_usd: 0,
                 collateral_delta_amount: 1_000_0000i128,
                 trigger_price: 0,
@@ -1932,7 +1937,7 @@ mod tests {
                 receiver: user.clone(),
                 market: market_tk1.clone(),
                 initial_collateral_token: w.long_tk.clone(),
-                swap_path: Vec::from_array(env, [market_tk1.clone(), market_tk2.clone()]),
+                swap_path: SwapPath::from_array([market_tk1.clone(), market_tk2.clone()]),
                 size_delta_usd: 0,
                 collateral_delta_amount: amount_in,
                 trigger_price: 0,
@@ -2106,7 +2111,7 @@ mod tests {
                 receiver: user.clone(),
                 market: market_tk1.clone(),
                 initial_collateral_token: w.long_tk.clone(),
-                swap_path: Vec::from_array(env, [market_tk1.clone(), market_tk2.clone()]),
+                swap_path: SwapPath::from_array([market_tk1.clone(), market_tk2.clone()]),
                 size_delta_usd: 0,
                 collateral_delta_amount: amount_in,
                 trigger_price: 0,

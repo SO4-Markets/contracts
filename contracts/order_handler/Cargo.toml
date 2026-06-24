@@ -34,3 +34,8 @@ criterion       = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "order_execution"
 harness = false
+
+[[bench]]
+name = "swap_path"
+path = "../../benches/swap_path.rs"
+harness = false
