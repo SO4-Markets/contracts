@@ -21,12 +21,15 @@ pub enum ReferralKey {
     TraderCode(Address),
     ReferrerTier(Address),
     TierConfig(u32),
+    ReferrerVolume(Address),
+    TierUpgradeThreshold(u32),
 }
 
 #[contracttype]
 enum InstanceKey {
     Initialized,
     Admin,
+    OrderHandler,
 }
 
 // ─── Config per tier ──────────────────────────────────────────────────────────
@@ -59,6 +62,15 @@ pub struct CodeOwnershipTransferred {
     pub code: Bytes,
     pub from: Address,
     pub to: Address,
+}
+
+#[contractevent(topics = ["ref_upg"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReferrerTierUpgraded {
+    pub referrer: Address,
+    pub old_tier: u32,
+    pub new_tier: u32,
+    pub cumulative_volume: u128,
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -287,6 +299,113 @@ impl ReferralStorage {
         };
         // discount = total_rebate * discount_share / 10_000
         config.total_rebate_bps * config.discount_share_bps / 10_000
+    }
+
+    // ── Issue #217: referral tier auto-upgrade ────────────────────────────────
+
+    /// Register the authorized order_handler address (admin only).
+    /// Only this address may call `increment_referrer_volume`.
+    pub fn set_order_handler(env: Env, admin: Address, order_handler: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if admin != stored_admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&InstanceKey::OrderHandler, &order_handler);
+    }
+
+    /// Set the cumulative volume threshold that triggers an upgrade to `tier` (admin only).
+    /// Tiers 0–2 are valid. Tier 0 is the base and has no threshold.
+    pub fn set_tier_upgrade_threshold(env: Env, admin: Address, tier: u32, threshold_usd: u128) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if admin != stored_admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        if tier == 0 || tier > 2 {
+            panic_with_error!(&env, Error::InvalidTier);
+        }
+        env.storage()
+            .persistent()
+            .set(&ReferralKey::TierUpgradeThreshold(tier), &threshold_usd);
+    }
+
+    /// Return the lifetime cumulative trading volume for a referrer, in USD (FLOAT_PRECISION).
+    pub fn get_referrer_cumulative_volume(env: Env, referrer: Address) -> u128 {
+        env.storage()
+            .persistent()
+            .get(&ReferralKey::ReferrerVolume(referrer))
+            .unwrap_or(0u128)
+    }
+
+    /// Called by the authorized order_handler after each trade settlement.
+    /// Increments `referrer`'s lifetime volume and auto-upgrades their tier if
+    /// the new cumulative total crosses any tier threshold (tier only goes up).
+    pub fn increment_referrer_volume(
+        env: Env,
+        caller: Address,
+        referrer: Address,
+        volume_usd: u128,
+    ) {
+        caller.require_auth();
+        let stored_handler: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::OrderHandler)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::Unauthorized));
+        if caller != stored_handler {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+
+        // Accumulate lifetime volume (never resets)
+        let vol_key = ReferralKey::ReferrerVolume(referrer.clone());
+        let prev_volume: u128 = env.storage().persistent().get(&vol_key).unwrap_or(0u128);
+        let cumulative_volume = prev_volume.saturating_add(volume_usd);
+        env.storage().persistent().set(&vol_key, &cumulative_volume);
+
+        // Auto-upgrade: find the highest tier whose threshold the referrer now qualifies for
+        let old_tier: u32 = env
+            .storage()
+            .persistent()
+            .get(&ReferralKey::ReferrerTier(referrer.clone()))
+            .unwrap_or(0u32);
+
+        let mut new_tier = old_tier;
+        let mut t = old_tier + 1;
+        while t <= 2 {
+            if let Some(threshold) = env
+                .storage()
+                .persistent()
+                .get::<_, u128>(&ReferralKey::TierUpgradeThreshold(t))
+            {
+                if cumulative_volume >= threshold {
+                    new_tier = t;
+                }
+            }
+            t += 1;
+        }
+
+        if new_tier > old_tier {
+            env.storage()
+                .persistent()
+                .set(&ReferralKey::ReferrerTier(referrer.clone()), &new_tier);
+            env.events().publish_event(&ReferrerTierUpgraded {
+                referrer,
+                old_tier,
+                new_tier,
+                cumulative_volume,
+            });
+        }
     }
 }
 
@@ -673,5 +792,86 @@ mod tests {
         let code = Bytes::from_slice(&w.env, b"ABCDEFGHIJKLMNOPQRST");
         client(&w).register_code(&caller, &code);
         assert_eq!(client(&w).get_code_owner(&code), Some(caller));
+    }
+
+    // ─── Issue #217: referral tier auto-upgrade ──────────────────────────────
+
+    /// increment_referrer_volume by an unauthorized caller must revert.
+    #[test]
+    #[should_panic]
+    fn increment_volume_unauthorized_caller_reverts() {
+        let w = setup();
+        let referrer = Address::generate(&w.env);
+        let impostor = Address::generate(&w.env);
+        // No order_handler configured — any caller should revert
+        client(&w).increment_referrer_volume(&impostor, &referrer, &1_000u128);
+    }
+
+    /// Lifetime volume accumulates and tier upgrades when threshold is crossed.
+    #[test]
+    fn auto_upgrade_tier_on_volume_threshold() {
+        let w = setup();
+        let referrer = Address::generate(&w.env);
+        let order_handler = Address::generate(&w.env);
+
+        client(&w).set_order_handler(&w.admin, &order_handler);
+        // Tier 1 threshold: 1_000; tier 2 threshold: 5_000
+        client(&w).set_tier_upgrade_threshold(&w.admin, &1u32, &1_000u128);
+        client(&w).set_tier_upgrade_threshold(&w.admin, &2u32, &5_000u128);
+
+        // Below tier-1 threshold: no upgrade
+        client(&w).increment_referrer_volume(&order_handler, &referrer, &500u128);
+        assert_eq!(
+            client(&w).get_referrer_cumulative_volume(&referrer),
+            500u128
+        );
+        // Tier should still be 0 (default)
+        // get_trader_discount_bps can't check tier directly, but no upgrade event means tier = 0
+
+        // Cross tier-1 threshold
+        client(&w).increment_referrer_volume(&order_handler, &referrer, &600u128);
+        assert_eq!(
+            client(&w).get_referrer_cumulative_volume(&referrer),
+            1_100u128
+        );
+
+        // Cross tier-2 threshold in one jump
+        client(&w).increment_referrer_volume(&order_handler, &referrer, &4_000u128);
+        assert_eq!(
+            client(&w).get_referrer_cumulative_volume(&referrer),
+            5_100u128
+        );
+
+        // Verify tier-2 discount is now applied
+        let code = Bytes::from_slice(&w.env, b"REFCODE");
+        let trader = Address::generate(&w.env);
+        client(&w).register_code(&referrer, &code);
+        client(&w).set_tier_config(
+            &w.admin,
+            &2u32,
+            &TierConfig { total_rebate_bps: 3_000, discount_share_bps: 5_000 },
+        );
+        client(&w).set_trader_referral_code(&trader, &code);
+        // discount = 3_000 * 5_000 / 10_000 = 1_500
+        assert_eq!(client(&w).get_trader_discount_bps(&trader), 1_500);
+    }
+
+    /// Volume never resets; tier only goes up.
+    #[test]
+    fn volume_accumulates_and_tier_never_decreases() {
+        let w = setup();
+        let referrer = Address::generate(&w.env);
+        let order_handler = Address::generate(&w.env);
+
+        client(&w).set_order_handler(&w.admin, &order_handler);
+        client(&w).set_tier_upgrade_threshold(&w.admin, &1u32, &1_000u128);
+
+        // Cross threshold → tier 1
+        client(&w).increment_referrer_volume(&order_handler, &referrer, &2_000u128);
+        assert_eq!(client(&w).get_referrer_cumulative_volume(&referrer), 2_000u128);
+
+        // Another increment below threshold — tier stays at 1 (not reset)
+        client(&w).increment_referrer_volume(&order_handler, &referrer, &1u128);
+        assert_eq!(client(&w).get_referrer_cumulative_volume(&referrer), 2_001u128);
     }
 }

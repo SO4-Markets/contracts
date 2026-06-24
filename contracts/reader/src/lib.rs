@@ -21,8 +21,8 @@ use gmx_position_utils::{get_position_fees, get_position_pnl_usd, is_liquidatabl
 use gmx_pricing_utils::{get_execution_price, get_position_price_impact};
 use gmx_types::{
     AdlCandidate, DepositProps, FundingInfo, FundingRateInfo, KeeperHeartbeatStatus, MarketProps,
-    OrderProps, PoolValueInfo, PositionFees, PositionInfo, PositionProps, PriceProps,
-    ProtocolStats, SwapEstimate, WithdrawalProps,
+    OrderProps, PoolValueInfo, PositionFees, PositionInfo, PositionLeverage, PositionProps,
+    PriceProps, ProtocolStats, SwapEstimate, WithdrawalProps,
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
@@ -850,6 +850,82 @@ impl Reader {
         }
         out
     }
+
+    /// Compute effective leverage for an open position at current oracle prices (issue #218).
+    ///
+    /// Net collateral = gross collateral − pending borrowing fee − pending funding fee.
+    /// Returns `None` when the position key does not exist.
+    /// Returns `effective_leverage_bps = u32::MAX` when net collateral has been fully
+    /// consumed by fees (net ≤ 0), signalling imminent liquidation.
+    pub fn get_position_leverage(
+        env: Env,
+        data_store: Address,
+        oracle: Address,
+        order_handler: Address,
+        position_key: BytesN<32>,
+    ) -> Option<PositionLeverage> {
+        let position: PositionProps =
+            match OrderHandlerClient::new(&env, &order_handler).get_position(&position_key) {
+                Some(p) => p,
+                None => return None,
+            };
+
+        let market_props =
+            Self::get_market(env.clone(), data_store.clone(), position.market.clone());
+        let oracle_client = OracleClient::new(&env, &oracle);
+        let index_price = oracle_client.get_primary_price(&market_props.index_token);
+        let collateral_price = oracle_client
+            .get_primary_price(&position.collateral_token)
+            .mid_price();
+
+        // Only borrowing + funding fees reduce net collateral (position fee is paid on open/close).
+        let fees: PositionFees = get_position_fees(
+            &env,
+            &data_store,
+            &market_props,
+            &position,
+            collateral_price,
+            position.size_in_usd,
+            false,
+        );
+
+        let borrowing_fee_usd =
+            mul_div_wide(&env, fees.borrowing_fee_amount, collateral_price, TOKEN_PRECISION);
+        let funding_fee_usd =
+            mul_div_wide(&env, fees.funding_fee_amount, collateral_price, TOKEN_PRECISION);
+        let gross_collateral_usd =
+            mul_div_wide(&env, position.collateral_amount, collateral_price, TOKEN_PRECISION);
+
+        let net_signed = gross_collateral_usd - borrowing_fee_usd - funding_fee_usd;
+        let net_collateral_usd = if net_signed > 0 { net_signed as u128 } else { 0u128 };
+        let position_size_usd = if position.size_in_usd > 0 {
+            position.size_in_usd as u128
+        } else {
+            0u128
+        };
+
+        let effective_leverage_bps = if net_collateral_usd == 0 {
+            u32::MAX
+        } else {
+            mul_div_wide(&env, position.size_in_usd, 100, net_signed) as u32
+        };
+
+        let is_liq = is_liquidatable(
+            &env,
+            &data_store,
+            &position,
+            &market_props,
+            collateral_price,
+            &index_price,
+        );
+
+        Some(PositionLeverage {
+            effective_leverage_bps,
+            net_collateral_usd,
+            position_size_usd,
+            is_liquidatable: is_liq,
+        })
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -860,11 +936,13 @@ mod tests {
     use data_store::{DataStore, DataStoreClient as DsClient};
     use gmx_keys::{
         claimable_fee_amount_key, market_index_token_key, market_long_token_key,
-        market_short_token_key, open_interest_key, pool_amount_key, roles,
+        market_short_token_key, open_interest_key, pool_amount_key, position_key, roles,
     };
-    use gmx_math::FLOAT_PRECISION;
-    use gmx_types::TokenPrice;
+    use gmx_math::{FLOAT_PRECISION, TOKEN_PRECISION};
+    use gmx_types::{PositionProps, TokenPrice};
     use oracle::{Oracle, OracleClient as OClient};
+    use order_handler::{OrderHandler, OrderHandlerClient as OHClient, PositionStorageKey};
+    use order_vault::{OrderVault, OrderVaultClient as OVClient};
     use role_store::{RoleStore, RoleStoreClient as RsClient};
     use soroban_sdk::{testutils::Address as _, Vec as SdkVec};
 
@@ -1084,6 +1162,138 @@ mod tests {
             markets.push_back(Address::generate(&w.env));
         }
         ReaderClient::new(&w.env, &w.reader).get_protocol_stats(&w.ds, &w.oracle, &markets);
+    }
+
+    // ── Issue #218: get_position_leverage ────────────────────────────────────
+
+    /// A position with 10,000 USD size and 500 USD net collateral (no fees) should
+    /// report effective_leverage_bps = 2000 (i.e. 20×).
+    #[test]
+    fn get_position_leverage_2000_bps() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+
+        let admin = Address::generate(&env);
+
+        let rs = env.register(RoleStore, ());
+        RsClient::new(&env, &rs).initialize(&admin);
+        RsClient::new(&env, &rs).grant_role(&admin, &admin, &roles::controller(&env));
+        RsClient::new(&env, &rs).grant_role(&admin, &admin, &roles::order_keeper(&env));
+
+        let ds = env.register(DataStore, ());
+        DsClient::new(&env, &ds).initialize(&admin, &rs);
+
+        let oracle = env.register(Oracle, ());
+        let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
+        OClient::new(&env, &oracle).initialize(&admin, &rs, &ds, &passphrase);
+
+        let reader = env.register(Reader, ());
+        ReaderClient::new(&env, &reader).initialize(&admin);
+
+        let index_tk = Address::generate(&env);
+        let long_tk = Address::generate(&env);
+        let short_tk = Address::generate(&env);
+        let market_tk = Address::generate(&env);
+        let trader = Address::generate(&env);
+
+        let ds_c = DsClient::new(&env, &ds);
+        ds_c.set_address(&admin, &market_index_token_key(&env, &market_tk), &index_tk);
+        ds_c.set_address(&admin, &market_long_token_key(&env, &market_tk), &long_tk);
+        ds_c.set_address(&admin, &market_short_token_key(&env, &market_tk), &short_tk);
+
+        let fp = FLOAT_PRECISION;
+        OClient::new(&env, &oracle).set_prices_simple(
+            &admin,
+            &SdkVec::from_array(
+                &env,
+                [
+                    TokenPrice { token: index_tk.clone(), min: fp, max: fp },
+                    TokenPrice { token: long_tk.clone(), min: fp, max: fp },
+                    TokenPrice { token: short_tk.clone(), min: fp, max: fp },
+                ],
+            ),
+        );
+
+        // Register order_handler; use a dummy vault address (not called in this test)
+        let dummy_vault = env.register(OrderVault, ());
+        OVClient::new(&env, &dummy_vault).initialize(&admin, &rs);
+        let ord_handler = env.register(OrderHandler, ());
+        OHClient::new(&env, &ord_handler).initialize(&admin, &rs, &ds, &oracle, &dummy_vault);
+        RsClient::new(&env, &rs).grant_role(&admin, &ord_handler, &roles::controller(&env));
+
+        // Build a synthetic position:
+        //   size_in_usd = 10_000 * FLOAT_PRECISION
+        //   collateral_amount = 500 tokens (long_tk at $1 each = $500)
+        //   No fees (all fee factors and per-size trackers are zero)
+        //   Expected: 10_000 * 100 / 500 = 2000 bps (20×)
+        let tk_prec = TOKEN_PRECISION as i128;
+        let position = PositionProps {
+            account: trader.clone(),
+            market: market_tk.clone(),
+            collateral_token: long_tk.clone(),
+            size_in_usd: 10_000i128 * fp,
+            size_in_tokens: 10_000i128 * tk_prec,
+            collateral_amount: 500i128 * tk_prec,
+            pending_impact_amount: 0,
+            borrowing_factor: 0,
+            funding_fee_amount_per_size: 0,
+            long_claim_fnd_per_size: 0,
+            short_claim_fnd_per_size: 0,
+            increased_at_time: 0,
+            decreased_at_time: 0,
+            is_long: true,
+        };
+
+        let pk = position_key(&env, &trader, &market_tk, &long_tk, true);
+        env.as_contract(&ord_handler, || {
+            env.storage()
+                .persistent()
+                .set(&PositionStorageKey::Position(pk.clone()), &position);
+        });
+
+        let result = ReaderClient::new(&env, &reader)
+            .get_position_leverage(&ds, &oracle, &ord_handler, &pk);
+
+        let lev = result.unwrap();
+        assert_eq!(lev.effective_leverage_bps, 2000);
+        assert_eq!(lev.position_size_usd, (10_000u128 * fp as u128));
+        assert_eq!(lev.net_collateral_usd, (500u128 * fp as u128));
+        assert!(!lev.is_liquidatable);
+    }
+
+    /// A non-existent position key must return None.
+    #[test]
+    fn get_position_leverage_none_for_missing_key() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let admin = Address::generate(&env);
+
+        let rs = env.register(RoleStore, ());
+        RsClient::new(&env, &rs).initialize(&admin);
+        RsClient::new(&env, &rs).grant_role(&admin, &admin, &roles::controller(&env));
+
+        let ds = env.register(DataStore, ());
+        DsClient::new(&env, &ds).initialize(&admin, &rs);
+
+        let oracle = env.register(Oracle, ());
+        let pass = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
+        OClient::new(&env, &oracle).initialize(&admin, &rs, &ds, &pass);
+
+        let vault = env.register(OrderVault, ());
+        OVClient::new(&env, &vault).initialize(&admin, &rs);
+
+        let ord = env.register(OrderHandler, ());
+        OHClient::new(&env, &ord).initialize(&admin, &rs, &ds, &oracle, &vault);
+
+        let reader = env.register(Reader, ());
+        ReaderClient::new(&env, &reader).initialize(&admin);
+
+        let missing_key = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+        let result =
+            ReaderClient::new(&env, &reader).get_position_leverage(&ds, &oracle, &ord, &missing_key);
+        assert!(result.is_none());
     }
 
     // ── ADL (Auto-Deleveraging) views ────────────────────────────────────────

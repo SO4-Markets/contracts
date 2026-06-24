@@ -17,7 +17,9 @@ gmx-position-utils = { path = "../../libs/position_utils" }
 gmx-pricing-utils  = { path = "../../libs/pricing_utils" }
 
 [dev-dependencies]
-soroban-sdk = { workspace = true, features = ["testutils"] }
-role-store  = { path = "../role_store" }
-data-store  = { path = "../data_store" }
-oracle      = { path = "../oracle", features = ["testutils"] }
+soroban-sdk   = { workspace = true, features = ["testutils"] }
+role-store    = { path = "../role_store" }
+data-store    = { path = "../data_store" }
+oracle        = { path = "../oracle", features = ["testutils"] }
+order-handler = { path = "../order_handler" }
+order-vault   = { path = "../order_vault" }

@@ -47,6 +47,7 @@ enum InstanceKey {
     DataStore,
     Oracle,
     OrderVault,
+    ReferralStorage,
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -74,6 +75,8 @@ pub enum Error {
     KeeperNotStale = 12,
     /// Position size/collateral ratio exceeds configured maximum leverage.
     MaxLeverageExceeded = 13,
+    /// `create_orders` received more than 5 orders in a single batch.
+    BatchSizeLimitExceeded = 14,
 }
 
 
@@ -164,6 +167,13 @@ trait IOracle {
 trait IOrderVault {
     fn record_transfer_in(env: Env, token: Address) -> i128;
     fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128);
+}
+
+#[allow(dead_code)]
+#[soroban_sdk::contractclient(name = "ReferralStorageClient")]
+trait IReferralStorage {
+    fn get_trader_referrer(env: Env, trader: Address) -> Option<Address>;
+    fn increment_referrer_volume(env: Env, caller: Address, referrer: Address, volume_usd: u128);
 }
 
 
@@ -357,6 +367,119 @@ impl OrderHandler {
             last_ledger: status.last_active_ledger,
             current_ledger: env.ledger().sequence() as u64,
         });
+    }
+
+    /// Register the referral_storage contract address (admin only — issue #217).
+    /// Once set, execute_order calls increment_referrer_volume after each trade.
+    pub fn set_referral_storage(env: Env, caller: Address, referral_storage: Address) {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if caller != admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&InstanceKey::ReferralStorage, &referral_storage);
+    }
+
+    /// Create up to 5 orders atomically in a single call (issue #219).
+    ///
+    /// All orders are created or none are (Soroban atomicity). For increase/swap orders,
+    /// the caller must pre-fund the order_vault via SendTokens before calling this.
+    /// `record_transfer_in` is called per increase/swap order to snapshot the delta.
+    ///
+    /// Returns the list of created order keys in the same order as `requests`.
+    pub fn create_orders(
+        env: Env,
+        caller: Address,
+        requests: soroban_sdk::Vec<CreateOrderParams>,
+    ) -> soroban_sdk::Vec<BytesN<32>> {
+        caller.require_auth();
+
+        if requests.len() > 5 {
+            panic_with_error!(&env, Error::BatchSizeLimitExceeded);
+        }
+
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let order_vault: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::OrderVault)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let handler = env.current_contract_address();
+        let ds = DataStoreClient::new(&env, &data_store);
+        let vault_client = OrderVaultClient::new(&env, &order_vault);
+
+        let mut keys: soroban_sdk::Vec<BytesN<32>> = soroban_sdk::Vec::new(&env);
+
+        let len = requests.len();
+        let mut i = 0u32;
+        while i < len {
+            let params = requests.get_unchecked(i);
+
+            let is_increase_or_swap = matches!(
+                params.order_type,
+                OrderType::MarketIncrease
+                    | OrderType::LimitIncrease
+                    | OrderType::StopIncrease
+                    | OrderType::MarketSwap
+                    | OrderType::LimitSwap
+            );
+
+            let collateral_delta_amount = if is_increase_or_swap {
+                let received = vault_client.record_transfer_in(&params.initial_collateral_token);
+                if received <= 0 {
+                    panic_with_error!(&env, Error::ZeroCollateral);
+                }
+                received
+            } else {
+                params.collateral_delta_amount
+            };
+
+            let nonce = ds.increment_nonce(&handler);
+            let key = order_key(&env, nonce);
+
+            let order = OrderProps {
+                account: caller.clone(),
+                receiver: params.receiver.clone(),
+                market: params.market.clone(),
+                initial_collateral_token: params.initial_collateral_token.clone(),
+                swap_path: params.swap_path.clone(),
+                size_delta_usd: params.size_delta_usd,
+                collateral_delta_amount,
+                trigger_price: params.trigger_price,
+                acceptable_price: params.acceptable_price,
+                execution_fee: params.execution_fee,
+                min_output_amount: params.min_output_amount,
+                order_type: params.order_type.clone(),
+                is_long: params.is_long,
+                updated_at_time: env.ledger().timestamp(),
+            };
+
+            env.storage()
+                .persistent()
+                .set(&OrderStorageKey::Order(key.clone()), &order);
+            ds.add_bytes32_to_set(&handler, &order_list_key(&env), &key);
+            ds.add_bytes32_to_set(&handler, &account_order_list_key(&env, &caller), &key);
+
+            env.events().publish(
+                (symbol_short!("ord_crt"),),
+                (key.clone(), caller.clone(), params.market.clone()),
+            );
+            keys.push_back(key);
+
+            i += 1;
+        }
+
+        keys
     }
 
     /// Create a new order and record collateral in the order vault.
@@ -745,6 +868,24 @@ impl OrderHandler {
 
         // Remove order
         remove_order(&env, &data_store, &handler, &key, &order.account);
+
+        // Issue #217: referral tier auto-upgrade — increment volume for the trader's referrer.
+        if order.size_delta_usd > 0 {
+            if let Some(ref_storage_addr) = env
+                .storage()
+                .instance()
+                .get::<_, Address>(&InstanceKey::ReferralStorage)
+            {
+                let ref_client = ReferralStorageClient::new(&env, &ref_storage_addr);
+                if let Some(referrer) = ref_client.get_trader_referrer(&order.account) {
+                    ref_client.increment_referrer_volume(
+                        &handler,
+                        &referrer,
+                        &(order.size_delta_usd as u128),
+                    );
+                }
+            }
+        }
 
         // Issue #249: record keeper liveness — stamp the ORDER_KEEPER role's last
         // activity with the current ledger so the protocol has an on-chain
@@ -2736,5 +2877,123 @@ mod tests {
         w.env.ledger().set_sequence_number(5000);
         let impostor = Address::generate(&w.env);
         hc.flag_stale_keeper(&impostor, &w.keeper, &order_keeper_role);
+    }
+
+    // ── Issue #219: create_orders (batch) ────────────────────────────────────
+
+    /// Batch with more than 5 orders must revert.
+    #[test]
+    #[should_panic]
+    fn create_orders_more_than_5_reverts() {
+        let w = setup();
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let mut requests = Vec::new(&w.env);
+        // Build 6 decrease orders (no collateral deposit needed)
+        for _ in 0..6 {
+            requests.push_back(CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                size_delta_usd: 100 * gmx_math::FLOAT_PRECISION,
+                collateral_delta_amount: 0,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketDecrease,
+                is_long: true,
+            });
+        }
+        hc.create_orders(&w.user, &requests);
+    }
+
+    /// Bracket order: 1 MarketIncrease (entry) + 1 StopLossDecrease (SL) + 1 LimitDecrease (TP)
+    /// created atomically. Only the increase order requires a vault deposit.
+    #[test]
+    fn create_orders_bracket_order_created_atomically() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+
+        // Pre-fund the vault for the increase leg
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let ds_c = DsClient::new(&w.env, &w.ds);
+
+        let requests = Vec::from_array(
+            &w.env,
+            [
+                // Entry: MarketIncrease
+                CreateOrderParams {
+                    receiver: w.user.clone(),
+                    market: w.market_tk.clone(),
+                    initial_collateral_token: w.long_tk.clone(),
+                    swap_path: Vec::new(&w.env),
+                    size_delta_usd: 2000 * fp,
+                    collateral_delta_amount: COLLATERAL,
+                    trigger_price: 0,
+                    acceptable_price: 0,
+                    execution_fee: 0,
+                    min_output_amount: 0,
+                    order_type: OrderType::MarketIncrease,
+                    is_long: true,
+                },
+                // Stop-loss: StopLossDecrease
+                CreateOrderParams {
+                    receiver: w.user.clone(),
+                    market: w.market_tk.clone(),
+                    initial_collateral_token: w.long_tk.clone(),
+                    swap_path: Vec::new(&w.env),
+                    size_delta_usd: 2000 * fp,
+                    collateral_delta_amount: 0,
+                    trigger_price: 1800 * fp,
+                    acceptable_price: 0,
+                    execution_fee: 0,
+                    min_output_amount: 0,
+                    order_type: OrderType::StopLossDecrease,
+                    is_long: true,
+                },
+                // Take-profit: LimitDecrease
+                CreateOrderParams {
+                    receiver: w.user.clone(),
+                    market: w.market_tk.clone(),
+                    initial_collateral_token: w.long_tk.clone(),
+                    swap_path: Vec::new(&w.env),
+                    size_delta_usd: 2000 * fp,
+                    collateral_delta_amount: 0,
+                    trigger_price: 2500 * fp,
+                    acceptable_price: 0,
+                    execution_fee: 0,
+                    min_output_amount: 0,
+                    order_type: OrderType::LimitDecrease,
+                    is_long: true,
+                },
+            ],
+        );
+
+        let keys = hc.create_orders(&w.user, &requests);
+
+        // All three orders must be created
+        assert_eq!(keys.len(), 3);
+        assert!(hc.get_order(&keys.get_unchecked(0)).is_some());
+        assert!(hc.get_order(&keys.get_unchecked(1)).is_some());
+        assert!(hc.get_order(&keys.get_unchecked(2)).is_some());
+
+        // All three keys must appear in the global order list
+        let order_list = gmx_keys::order_list_key(&w.env);
+        assert!(ds_c.contains_bytes32(&order_list, &keys.get_unchecked(0)));
+        assert!(ds_c.contains_bytes32(&order_list, &keys.get_unchecked(1)));
+        assert!(ds_c.contains_bytes32(&order_list, &keys.get_unchecked(2)));
+
+        // Verify order types were stored correctly
+        let entry = hc.get_order(&keys.get_unchecked(0)).unwrap();
+        let sl = hc.get_order(&keys.get_unchecked(1)).unwrap();
+        let tp = hc.get_order(&keys.get_unchecked(2)).unwrap();
+        assert!(matches!(entry.order_type, OrderType::MarketIncrease));
+        assert!(matches!(sl.order_type, OrderType::StopLossDecrease));
+        assert!(matches!(tp.order_type, OrderType::LimitDecrease));
+        assert_eq!(sl.trigger_price, 1800 * fp);
+        assert_eq!(tp.trigger_price, 2500 * fp);
     }
 }

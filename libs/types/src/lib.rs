@@ -341,4 +341,15 @@ pub struct SwapEstimate {
     pub reverts_if_executed: bool,        // true if any market is paused or insufficient liquidity
 }
 
+/// Position leverage breakdown returned by reader::get_position_leverage.
+/// leverage_bps = size_usd * 100 / net_collateral_usd (e.g. 2000 = 20×).
+/// If net_collateral_usd == 0, effective_leverage_bps == u32::MAX.
+#[contracttype]
+pub struct PositionLeverage {
+    pub effective_leverage_bps: u32,
+    pub net_collateral_usd: u128,
+    pub position_size_usd: u128,
+    pub is_liquidatable: bool,
+}
+
 use soroban_sdk::BytesN;

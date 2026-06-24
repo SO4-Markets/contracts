@@ -85,17 +85,20 @@ pub enum Error {
     NotInitialized = 2,
     Unauthorized = 3,
     Paused = 4,
+    BatchSizeLimitExceeded = 5,
 }
 
 // ─── External handler clients ─────────────────────────────────────────────────
+// Signatures must match the handler contract's public functions exactly.
 
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_bool(env: Env, key: BytesN<32>) -> bool;
     fn set_bool(env: Env, caller: Address, key: BytesN<32>, value: bool) -> bool;
+    fn set_position_manager(env: Env, caller: Address, market: Address, manager: Address) -> Address;
+    fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address>;
 }
-// Signatures must match the handler contract's public functions exactly.
 
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DepositHandlerClient")]
@@ -115,6 +118,7 @@ trait IWithdrawalHandler {
 #[soroban_sdk::contractclient(name = "OrderHandlerClient")]
 trait IOrderHandler {
     fn create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32>;
+    fn create_orders(env: Env, caller: Address, requests: Vec<CreateOrderParams>) -> Vec<BytesN<32>>;
     fn update_order(
         env: Env,
         caller: Address,
@@ -132,13 +136,6 @@ trait IOrderHandler {
 trait IFeeHandler {
     fn claim_funding_fees(env: Env, account: Address, market: Address, token: Address) -> u128;
     fn set_ui_fee_factor(env: Env, ui_receiver: Address, factor: u128);
-}
-
-#[allow(dead_code)]
-#[soroban_sdk::contractclient(name = "DataStoreClient")]
-trait IDataStore {
-    fn set_position_manager(env: Env, caller: Address, market: Address, manager: Address) -> Address;
-    fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address>;
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -441,6 +438,26 @@ impl ExchangeRouter {
         OrderHandlerClient::new(&env, &order_handler).create_order(&caller, &params)
     }
 
+    /// Create up to 5 orders atomically in a single call (issue #219).
+    ///
+    /// For increase/swap orders in the batch the caller must pre-fund the
+    /// order_vault via `SendTokens` before this call (one send per increase/swap leg).
+    /// Any failure reverts the entire batch (Soroban atomicity).
+    pub fn create_orders(
+        env: Env,
+        caller: Address,
+        requests: Vec<CreateOrderParams>,
+    ) -> Vec<BytesN<32>> {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+        let order_handler: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::OrderHandler)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        OrderHandlerClient::new(&env, &order_handler).create_orders(&caller, &requests)
+    }
+
     /// Forward update_order to the order_handler.
     pub fn update_order(env: Env, caller: Address, params: UpdateOrderParams) {
         caller.require_auth();
@@ -520,6 +537,8 @@ impl ExchangeRouter {
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let data_store_client = DataStoreClient::new(&env, &data_store);
         data_store_client.get_position_manager(&owner, &market)
+    }
+
     /// Set the UI fee factor for a receiver. Delegates auth enforcement to fee_handler.
     pub fn set_ui_fee_factor(env: Env, ui_receiver: Address, factor: u128) {
         let fee_handler: Address = env

@@ -1628,6 +1628,8 @@ dependencies = [
  "gmx-pricing-utils",
  "gmx-types",
  "oracle",
+ "order-handler",
+ "order-vault",
  "role-store",
  "soroban-sdk",
 ]
