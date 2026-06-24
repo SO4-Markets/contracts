@@ -1439,6 +1439,7 @@ dependencies = [
  "market-token",
  "oracle",
  "order-vault",
+ "referral-storage",
  "role-store",
  "soroban-sdk",
 ]

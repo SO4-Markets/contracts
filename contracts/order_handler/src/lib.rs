@@ -1355,7 +1355,7 @@ mod tests {
     use order_vault::{OrderVault, OrderVaultClient as OVClient};
     use role_store::{RoleStore, RoleStoreClient as RsClient};
     use soroban_sdk::{
-        testutils::{Address as _, BytesN as _},
+        testutils::{Address as _, BytesN as _, Ledger as _},
         token::StellarAssetClient,
         BytesN, Env, Vec,
     };
