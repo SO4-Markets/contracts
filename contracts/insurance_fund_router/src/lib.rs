@@ -78,10 +78,6 @@ pub struct InsuranceFundRouter;
 
 #[contractimpl]
 impl InsuranceFundRouter {
-    /// Store a market's insurance fund receiver and allocation bps in data_store.
-    ///
-    /// `caller` must be authorized and must hold whatever controller/admin role
-    /// data_store requires for `set_address`/`set_u128`.
     pub fn configure_insurance_fund(
         env: Env,
         data_store: Address,
@@ -110,10 +106,6 @@ impl InsuranceFundRouter {
         });
     }
 
-    /// Split liquidation penalty between insurance fund and treasury.
-    ///
-    /// Allocation of 0 bps returns the full amount to treasury and performs no
-    /// fund transfer, preserving current behaviour when insurance is disabled.
     pub fn route_liquidation_penalty(
         env: Env,
         data_store: Address,
@@ -154,7 +146,6 @@ impl InsuranceFundRouter {
         }
     }
 
-    /// Draw from insurance fund up to its balance before charging pool losses.
     pub fn cover_shortfall(
         env: Env,
         data_store: Address,
@@ -220,7 +211,13 @@ fn insurance_fund_allocation_bps_key(env: &Env, market: &Address) -> BytesN<32> 
 fn keyed_address(env: &Env, tag: &str, address: &Address) -> BytesN<32> {
     let mut bytes = Bytes::new(env);
     bytes.append(&Bytes::from_slice(env, tag.as_bytes()));
-    bytes.append(&Bytes::from_slice(env, address.to_string().to_string().as_bytes()));
+
+    let strkey = address.to_string();
+    let len = strkey.len() as usize;
+    let mut raw = [0u8; 64];
+    strkey.copy_into_slice(&mut raw[..len]);
+    bytes.append(&Bytes::from_slice(env, &raw[..len]));
+
     env.crypto().sha256(&bytes).into()
 }
 
