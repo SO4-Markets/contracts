@@ -7,31 +7,22 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use soroban_sdk::{
-    contract, contractimpl, Address, BytesN, Env, Vec,
 use gmx_keys::{
     account_deposit_list_key, account_order_list_key, account_position_list_key,
     account_withdrawal_list_key, claimable_fee_amount_key, deposit_list_key,
-    funding_amount_per_size_key, keeper_heartbeat_timeout_key, last_keeper_activity_key,
-    market_index_token_key, market_long_token_key, market_short_token_key, order_list_key,
-    position_key, saved_funding_factor_per_second_key, withdrawal_list_key,
-    DEFAULT_KEEPER_HEARTBEAT_TIMEOUT,
+    funding_amount_per_size_key, funding_updated_at_key, keeper_heartbeat_timeout_key,
+    last_keeper_activity_key, market_index_token_key, market_long_token_key,
+    market_short_token_key, open_interest_key, order_list_key, position_key,
+    saved_funding_factor_per_second_key, withdrawal_list_key, DEFAULT_KEEPER_HEARTBEAT_TIMEOUT,
 };
 use gmx_market_utils::{get_open_interest_for_side, get_pool_value};
 use gmx_math::{mul_div_wide, TOKEN_PRECISION};
 use gmx_position_utils::{get_position_fees, get_position_pnl_usd, is_liquidatable};
 use gmx_pricing_utils::{get_execution_price, get_position_price_impact};
 use gmx_types::{
-    MarketProps, PositionProps, PositionInfo, PositionFees, PriceProps,
-    PoolValueInfo, FundingInfo, AdlCandidate, SwapEstimate,
-};
-use gmx_math::{TOKEN_PRECISION, mul_div_wide};
-use gmx_keys::{
-    market_index_token_key, market_long_token_key, market_short_token_key,
-    funding_amount_per_size_key, saved_funding_factor_per_second_key,
-    position_key, position_list_key, account_position_list_key,
-    DepositProps, FundingInfo, KeeperHeartbeatStatus, MarketProps, OrderProps, PoolValueInfo,
-    PositionFees, PositionInfo, PositionProps, PriceProps, ProtocolStats, WithdrawalProps,
+    AdlCandidate, DepositProps, FundingInfo, FundingRateInfo, KeeperHeartbeatStatus, MarketProps,
+    OrderProps, PoolValueInfo, PositionFees, PositionInfo, PositionProps, PriceProps,
+    ProtocolStats, SwapEstimate, WithdrawalProps,
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
@@ -78,8 +69,6 @@ trait IDataStore {
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
     fn get_bytes32_set_count(env: Env, set_key: BytesN<32>) -> u32;
     fn get_bytes32_set_at(env: Env, set_key: BytesN<32>, start: u32, end: u32) -> Vec<BytesN<32>>;
-    fn get_bytes32_set_count(env: Env, key: BytesN<32>) -> u32;
-    fn get_bytes32_set_at(env: Env, key: BytesN<32>, start: u32, end: u32) -> Vec<BytesN<32>>;
 }
 
 #[allow(dead_code)]
@@ -233,6 +222,46 @@ impl Reader {
     /// market count and the ledger the snapshot was taken at. Lets the frontend
     /// fetch headline numbers in one call instead of N per-market round-trips.
     ///
+
+        /// Issue #207: per-hour funding rate view for the frontend.
+        pub fn get_funding_rate_info(
+            env: Env,
+            data_store: Address,
+            market_token: Address,
+        ) -> FundingRateInfo {
+            let ds = DataStoreClient::new(&env, &data_store);
+            const LEDGERS_PER_HOUR: i128 = 720;
+
+            let factor_key = saved_funding_factor_per_second_key(&env, &market_token);
+            let funding_factor_per_second = ds.get_i128(&factor_key);
+
+            let long_funding_rate_per_hour = funding_factor_per_second.saturating_mul(LEDGERS_PER_HOUR);
+            let short_funding_rate_per_hour = long_funding_rate_per_hour.saturating_neg();
+
+            let long_fnd_key = funding_amount_per_size_key(&env, &market_token, &market_token, true);
+            let short_fnd_key = funding_amount_per_size_key(&env, &market_token, &market_token, false);
+            let long_funding_amount_per_size = ds.get_i128(&long_fnd_key);
+            let short_funding_amount_per_size = ds.get_i128(&short_fnd_key);
+
+            let updated_at_key = funding_updated_at_key(&env, &market_token);
+            let funding_updated_at_ledger = ds.get_u128(&updated_at_key) as u64;
+
+            let long_oi_key = open_interest_key(&env, &market_token, &market_token, true);
+            let short_oi_key = open_interest_key(&env, &market_token, &market_token, false);
+            let long_open_interest_usd = ds.get_u128(&long_oi_key);
+            let short_open_interest_usd = ds.get_u128(&short_oi_key);
+
+            FundingRateInfo {
+                long_funding_rate_per_hour,
+                short_funding_rate_per_hour,
+                long_funding_amount_per_size,
+                short_funding_amount_per_size,
+                funding_updated_at_ledger,
+                long_open_interest_usd,
+                short_open_interest_usd,
+            }
+        }
+
     /// View-only: reads `data_store` and `oracle`, writes nothing.
     ///
     /// Panics with `TooManyMarkets` if `markets.len() > MAX_STATS_MARKETS`, which

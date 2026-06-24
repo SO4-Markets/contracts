@@ -19,14 +19,15 @@
 use gmx_decrease_position_utils::{decrease_position, DecreasePositionParams};
 use gmx_increase_position_utils::{increase_position, IncreasePositionParams};
 use gmx_keys::{
-    roles,
-    order_key, order_list_key, account_order_list_key,
-    market_index_token_key, market_long_token_key, market_short_token_key,
-    liquidation_execution_fee_key,
     account_order_list_key, keeper_heartbeat_timeout_key, last_keeper_activity_key,
-    market_index_token_key, market_long_token_key, market_short_token_key, order_key,
-    order_list_key, roles, DEFAULT_KEEPER_HEARTBEAT_TIMEOUT,
+    liquidation_execution_fee_key,
+    market_index_token_key, market_long_token_key, market_short_token_key,
+    max_leverage_key, order_key, order_list_key, position_fee_factor_key, position_key,
+    fee_tier_position_fee_factor_key, fee_tier_volume_threshold_key,
+    trader_volume_key, trader_volume_window_start_key,
+    roles, DEFAULT_KEEPER_HEARTBEAT_TIMEOUT,
 };
+use gmx_math::{mul_div_wide, FLOAT_PRECISION};
 use gmx_swap_utils::swap_with_path;
 pub use gmx_types::CreateOrderParams;
 use gmx_types::PositionProps;
@@ -66,12 +67,66 @@ pub enum Error {
     /// Increase/swap orders require collateral to have been transferred to
     /// order_vault (via exchange_router SendTokens) before calling create_order.
     /// record_transfer_in returned zero, meaning no collateral arrived.
-    ZeroCollateral        = 10,
-    UnauthorizedPositionManager = 11,  // Caller is neither owner nor authorized manager
     ZeroCollateral = 10,
+    UnauthorizedPositionManager = 11,
     /// `flag_stale_keeper` was called but the role's last activity is still
     /// within the configured heartbeat timeout (issue #249).
-    KeeperNotStale = 11,
+    KeeperNotStale = 12,
+    /// Position size/collateral ratio exceeds configured maximum leverage.
+    MaxLeverageExceeded = 13,
+}
+
+
+// ─── Position events (issue #205) ────────────────────────────────────────────
+
+#[contracttype]
+pub struct PositionOpenedEvent {
+    pub key: BytesN<32>,
+    pub account: Address,
+    pub market: Address,
+    pub size_in_usd: i128,
+    pub collateral_amount: i128,
+    pub is_long: bool,
+    pub avg_entry_price: i128,
+}
+
+#[contracttype]
+pub struct PositionIncreasedEvent {
+    pub key: BytesN<32>,
+    pub account: Address,
+    pub market: Address,
+    pub delta_size_usd: i128,
+    pub delta_collateral: i128,
+    pub new_size_usd: i128,
+    pub avg_entry_price: i128,
+}
+
+#[contracttype]
+pub struct PositionDecreasedEvent {
+    pub key: BytesN<32>,
+    pub account: Address,
+    pub market: Address,
+    pub delta_size_usd: i128,
+    pub pnl_usd: i128,
+    pub execution_price: i128,
+}
+
+#[contracttype]
+pub struct PositionClosedEvent {
+    pub key: BytesN<32>,
+    pub account: Address,
+    pub market: Address,
+    pub pnl_usd: i128,
+    pub execution_price: i128,
+}
+
+#[contracttype]
+pub struct PositionLiquidatedEvent {
+    pub key: BytesN<32>,
+    pub account: Address,
+    pub market: Address,
+    pub execution_price: i128,
+    pub remaining_collateral: i128,
 }
 
 // ─── External contract clients ────────────────────────────────────────────────
@@ -87,6 +142,9 @@ trait IRoleStore {
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
+    fn apply_delta_to_u128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> u128;
+    fn get_i128(env: Env, key: BytesN<32>) -> i128;
+    fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address>;
     fn increment_nonce(env: Env, caller: Address) -> u64;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
     fn add_bytes32_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
@@ -108,12 +166,6 @@ trait IOrderVault {
     fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128);
 }
 
-#[allow(dead_code)]
-#[soroban_sdk::contractclient(name = "DataStoreClient")]
-trait IDataStore {
-    fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address>;
-    fn get_u128(env: Env, key: BytesN<32>) -> u128;
-}
 
 // ─── Position storage key (must match increase/decrease position utils) ───────
 
@@ -411,12 +463,9 @@ impl OrderHandler {
         let key = order_key(&env, nonce);
 
         let order = OrderProps {
-            account:                  actual_owner.clone(),  // Always the position owner
-            receiver:                 actual_receiver,       // Enforced to be owner for position orders
+            account:                  actual_owner.clone(),
+            receiver:                 actual_receiver,
             market:                   params.market.clone(),
-            account: caller.clone(),
-            receiver: params.receiver,
-            market: params.market.clone(),
             initial_collateral_token: params.initial_collateral_token,
             swap_path: params.swap_path,
             size_delta_usd: params.size_delta_usd,
@@ -438,10 +487,6 @@ impl OrderHandler {
         ds.add_bytes32_to_set(&handler, &account_order_list_key(&env, &actual_owner), &key);
 
         env.events().publish((symbol_short!("ord_crt"),), (key.clone(), actual_owner, params.market));
-        env.events().publish(
-            (symbol_short!("ord_crt"),),
-            (key.clone(), caller, params.market),
-        );
         key
     }
 
@@ -560,7 +605,24 @@ impl OrderHandler {
                     &market.market_token,
                     &order.collateral_delta_amount,
                 );
-                increase_position(
+
+                // Issue #204: apply fee tier based on 30-day rolling volume
+                let effective_fee_factor =
+                    resolve_fee_tier(&env, &data_store, &handler, &order.account, &market.market_token, order.size_delta_usd);
+                let fee_key_pos = position_fee_factor_key(&env, &market.market_token, true);
+                let fee_key_neg = position_fee_factor_key(&env, &market.market_token, false);
+                let ds_client = DataStoreClient::new(&env, &data_store);
+                let original_fee_pos = ds_client.get_u128(&fee_key_pos);
+                let original_fee_neg = ds_client.get_u128(&fee_key_neg);
+                ds_client.set_u128(&handler, &fee_key_pos, &effective_fee_factor);
+                ds_client.set_u128(&handler, &fee_key_neg, &effective_fee_factor);
+
+                // Issue #205: snapshot pre-increase state for event
+                let pos_key = position_key(&env, &order.account, &market.market_token, &order.initial_collateral_token, order.is_long);
+                let pre_position: Option<PositionProps> = env.storage().persistent().get(&PositionStorageKey::Position(pos_key.clone()));
+                let is_new_position = pre_position.is_none();
+
+                let updated = increase_position(
                     &env,
                     &IncreasePositionParams {
                         data_store: &data_store,
@@ -578,13 +640,62 @@ impl OrderHandler {
                         current_time: env.ledger().timestamp(),
                     },
                 );
+
+                // Restore original fee factors
+                ds_client.set_u128(&handler, &fee_key_pos, &original_fee_pos);
+                ds_client.set_u128(&handler, &fee_key_neg, &original_fee_neg);
+
+                // Issue #206: enforce max leverage
+                let max_lev_key = max_leverage_key(&env, &market.market_token);
+                let max_leverage_bps = ds_client.get_u128(&max_lev_key);
+                if max_leverage_bps > 0 && updated.collateral_amount > 0 {
+                    let effective_bps = (updated.size_in_usd * 100 / updated.collateral_amount) as u128;
+                    if effective_bps > max_leverage_bps {
+                        panic_with_error!(&env, Error::MaxLeverageExceeded);
+                    }
+                }
+
+                // Issue #205: emit position event
+                let avg_price = if updated.size_in_tokens > 0 {
+                    mul_div_wide(&env, updated.size_in_usd, 1, updated.size_in_tokens)
+                } else {
+                    0
+                };
+                if is_new_position {
+                    env.events().publish(
+                        (symbol_short!("pos_open"),),
+                        PositionOpenedEvent {
+                            key: pos_key,
+                            account: order.account.clone(),
+                            market: market.market_token.clone(),
+                            size_in_usd: updated.size_in_usd,
+                            collateral_amount: updated.collateral_amount,
+                            is_long: order.is_long,
+                            avg_entry_price: avg_price,
+                        },
+                    );
+                } else {
+                    env.events().publish(
+                        (symbol_short!("pos_inc"),),
+                        PositionIncreasedEvent {
+                            key: pos_key,
+                            account: order.account.clone(),
+                            market: market.market_token.clone(),
+                            delta_size_usd: order.size_delta_usd,
+                            delta_collateral: order.collateral_delta_amount,
+                            new_size_usd: updated.size_in_usd,
+                            avg_entry_price: avg_price,
+                        },
+                    );
+                }
             }
 
             OrderType::MarketDecrease
             | OrderType::LimitDecrease
             | OrderType::StopLossDecrease
             | OrderType::Liquidation => {
-                decrease_position(
+                let pos_key = position_key(&env, &order.account, &market.market_token, &order.initial_collateral_token, order.is_long);
+                let result = decrease_position(
                     &env,
                     &DecreasePositionParams {
                         data_store: &data_store,
@@ -603,6 +714,32 @@ impl OrderHandler {
                         oracle: &oracle,
                     },
                 );
+
+                // Issue #205: emit decrease or close event
+                if result.is_fully_closed {
+                    env.events().publish(
+                        (symbol_short!("pos_cls"),),
+                        PositionClosedEvent {
+                            key: pos_key,
+                            account: order.account.clone(),
+                            market: market.market_token.clone(),
+                            pnl_usd: result.pnl_usd,
+                            execution_price: result.execution_price,
+                        },
+                    );
+                } else {
+                    env.events().publish(
+                        (symbol_short!("pos_dec"),),
+                        PositionDecreasedEvent {
+                            key: pos_key,
+                            account: order.account.clone(),
+                            market: market.market_token.clone(),
+                            delta_size_usd: order.size_delta_usd,
+                            pnl_usd: result.pnl_usd,
+                            execution_price: result.execution_price,
+                        },
+                    );
+                }
             }
         }
 
@@ -805,15 +942,13 @@ impl OrderHandler {
 
         // Handle keeper execution fee (feature #208): deduct from position collateral first
         let ds = DataStoreClient::new(&env, &data_store);
-        let keeper_fee_key = liquidation_execution_fee_key(&market);
+        let keeper_fee_key = liquidation_execution_fee_key(&env, &market);
         let keeper_execution_fee = ds.get_u128(&keeper_fee_key);
 
         if keeper_execution_fee > 0 {
-            // Keeper fee is deducted from position collateral.
-            // Transfer fee from order_vault to keeper.
-            // If position doesn't have enough collateral, take what's available.
-            let fee_to_transfer = if keeper_execution_fee <= position.collateral_amount {
-                keeper_execution_fee
+            let keeper_fee_i128 = keeper_execution_fee as i128;
+            let fee_to_transfer = if keeper_fee_i128 <= position.collateral_amount {
+                keeper_fee_i128
             } else {
                 position.collateral_amount
             };
@@ -823,27 +958,12 @@ impl OrderHandler {
                     &handler,
                     &collateral_token,
                     &keeper,
-                    fee_to_transfer as i128,
+                    &fee_to_transfer,
                 );
             }
         }
 
-        let result = decrease_position(&env, &DecreasePositionParams {
-            data_store:        &data_store,
-            caller:            &handler,
-            account:           &account,
-            receiver:          &account,
-            market:            &market_props,
-            collateral_token:  &collateral_token,
-            size_delta_usd:    position.size_in_usd,
-            acceptable_price:  0,
-            is_long,
-            index_token_price: &index_price,
-            collateral_price,
-            current_time:      env.ledger().timestamp(),
-            swap_path:         soroban_sdk::Vec::new(&env),
-            oracle:            &oracle,
-        });
+        let liq_pos_key = position_key(&env, &account, &market, &collateral_token, is_long);
         let result = decrease_position(
             &env,
             &DecreasePositionParams {
@@ -864,9 +984,16 @@ impl OrderHandler {
             },
         );
 
+        // Issue #205: structured liquidation event
         env.events().publish(
-            (symbol_short!("liq_exe"),),
-            (account, market, result.pnl_usd, result.execution_price),
+            (symbol_short!("pos_liq"),),
+            PositionLiquidatedEvent {
+                key: liq_pos_key,
+                account: account.clone(),
+                market: market.clone(),
+                execution_price: result.execution_price,
+                remaining_collateral: result.remaining_collateral,
+            },
         );
     }
 
@@ -927,6 +1054,56 @@ impl OrderHandler {
             (account, market, size_delta_usd, result.pnl_usd),
         );
     }
+}
+
+
+// ─── Fee tier resolution (issue #204) ────────────────────────────────────────
+
+/// Walk fee tiers 0-4, find the best (lowest) fee factor the trader qualifies for
+/// based on their 30-day rolling volume. Returns the qualifying fee factor or 0.
+fn resolve_fee_tier(
+    env: &Env,
+    data_store: &Address,
+    caller: &Address,
+    account: &Address,
+    market: &Address,
+    size_delta_usd: i128,
+) -> u128 {
+    const WINDOW_LEDGERS: u32 = 518_400; // 30 days × 24h × 720 ledgers/h
+    let ds = DataStoreClient::new(env, data_store);
+
+    let vol_key = trader_volume_key(env, account, market);
+    let win_key = trader_volume_window_start_key(env, account, market);
+
+    let current_ledger: u32 = env.ledger().sequence();
+    let window_start = ds.get_u128(&win_key) as u32;
+
+    // Reset window if expired
+    let current_volume = if current_ledger.saturating_sub(window_start) > WINDOW_LEDGERS {
+        ds.set_u128(caller, &win_key, &(current_ledger as u128));
+        ds.set_u128(caller, &vol_key, &(size_delta_usd as u128));
+        size_delta_usd as u128
+    } else {
+        ds.apply_delta_to_u128(caller, &vol_key, &size_delta_usd)
+    };
+
+    // Walk tiers 0-4, return best qualifying fee
+    let mut best_fee: u128 = 0;
+    for tier in 0u32..5u32 {
+        let thresh_key = fee_tier_volume_threshold_key(env, market, tier);
+        let threshold = ds.get_u128(&thresh_key);
+        if threshold == 0 {
+            break; // tier not configured
+        }
+        if current_volume >= threshold {
+            let factor_key = fee_tier_position_fee_factor_key(env, market, tier);
+            let fee_factor = ds.get_u128(&factor_key);
+            if fee_factor > 0 {
+                best_fee = fee_factor;
+            }
+        }
+    }
+    best_fee
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

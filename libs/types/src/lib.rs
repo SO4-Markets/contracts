@@ -245,6 +245,18 @@ pub struct FundingInfo {
     pub short_funding_amount_per_size: i128,
 }
 
+/// Detailed per-hour funding rate view for frontend display (issue #207).
+#[contracttype]
+pub struct FundingRateInfo {
+    pub long_funding_rate_per_hour: i128,
+    pub short_funding_rate_per_hour: i128,
+    pub long_funding_amount_per_size: i128,
+    pub short_funding_amount_per_size: i128,
+    pub funding_updated_at_ledger: u64,
+    pub long_open_interest_usd: u128,
+    pub short_open_interest_usd: u128,
+}
+
 /// Position fee breakdown.
 #[contracttype]
 pub struct PositionFees {

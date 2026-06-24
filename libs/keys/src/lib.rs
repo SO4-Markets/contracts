@@ -726,6 +726,44 @@ pub fn global_pause_key(env: &Env) -> BytesN<32> {
     sha256(env, &b)
 }
 
+// ─── Fee tier keys (issue #204) ───────────────────────────────────────────────
+
+/// Volume threshold (USD, FLOAT_PRECISION) required to qualify for fee tier N.
+pub fn fee_tier_volume_threshold_key(env: &Env, market: &Address, tier: u32) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "FEE_TIER_VOL_THRESH");
+    push_addr(&mut b, env, market);
+    b.push_back((tier & 0xff) as u8);
+    sha256(env, &b)
+}
+
+/// Position fee factor (FLOAT_PRECISION) for a specific fee tier in a market.
+pub fn fee_tier_position_fee_factor_key(env: &Env, market: &Address, tier: u32) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "FEE_TIER_POS_FEE");
+    push_addr(&mut b, env, market);
+    b.push_back((tier & 0xff) as u8);
+    sha256(env, &b)
+}
+
+/// 30-day rolling trade volume (USD, FLOAT_PRECISION) for a trader in a market.
+pub fn trader_volume_key(env: &Env, trader: &Address, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "TRADER_VOLUME");
+    push_addr(&mut b, env, trader);
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+/// Ledger sequence at which the trader's rolling volume window started.
+pub fn trader_volume_window_start_key(env: &Env, trader: &Address, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "TRADER_VOL_WIN");
+    push_addr(&mut b, env, trader);
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
