@@ -19,16 +19,22 @@
 use gmx_decrease_position_utils::{decrease_position, DecreasePositionParams};
 use gmx_increase_position_utils::{increase_position, IncreasePositionParams};
 use gmx_keys::{
-    account_order_list_key, market_index_token_key, market_long_token_key, market_short_token_key,
-    order_key, order_list_key, roles,
+    account_order_list_key, keeper_heartbeat_timeout_key, last_keeper_activity_key,
+    liquidation_execution_fee_key,
+    market_index_token_key, market_long_token_key, market_short_token_key,
+    max_leverage_key, order_key, order_list_key, position_fee_factor_key, position_key,
+    fee_tier_position_fee_factor_key, fee_tier_volume_threshold_key,
+    trader_volume_key, trader_volume_window_start_key,
+    roles, DEFAULT_KEEPER_HEARTBEAT_TIMEOUT,
 };
+use gmx_math::{mul_div_wide, FLOAT_PRECISION};
 use gmx_swap_utils::swap_with_path;
 pub use gmx_types::CreateOrderParams;
 use gmx_types::PositionProps;
 use gmx_types::{MarketProps, OrderProps, OrderType, PriceProps};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    BytesN, Env,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
+    symbol_short, Address, BytesN, Env,
 };
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
@@ -41,6 +47,7 @@ enum InstanceKey {
     DataStore,
     Oracle,
     OrderVault,
+    ReferralStorage,
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -62,6 +69,67 @@ pub enum Error {
     /// order_vault (via exchange_router SendTokens) before calling create_order.
     /// record_transfer_in returned zero, meaning no collateral arrived.
     ZeroCollateral = 10,
+    UnauthorizedPositionManager = 11,
+    /// `flag_stale_keeper` was called but the role's last activity is still
+    /// within the configured heartbeat timeout (issue #249).
+    KeeperNotStale = 12,
+    /// Position size/collateral ratio exceeds configured maximum leverage.
+    MaxLeverageExceeded = 13,
+    /// `create_orders` received more than 5 orders in a single batch.
+    BatchSizeLimitExceeded = 14,
+}
+
+
+// ─── Position events (issue #205) ────────────────────────────────────────────
+
+#[contracttype]
+pub struct PositionOpenedEvent {
+    pub key: BytesN<32>,
+    pub account: Address,
+    pub market: Address,
+    pub size_in_usd: i128,
+    pub collateral_amount: i128,
+    pub is_long: bool,
+    pub avg_entry_price: i128,
+}
+
+#[contracttype]
+pub struct PositionIncreasedEvent {
+    pub key: BytesN<32>,
+    pub account: Address,
+    pub market: Address,
+    pub delta_size_usd: i128,
+    pub delta_collateral: i128,
+    pub new_size_usd: i128,
+    pub avg_entry_price: i128,
+}
+
+#[contracttype]
+pub struct PositionDecreasedEvent {
+    pub key: BytesN<32>,
+    pub account: Address,
+    pub market: Address,
+    pub delta_size_usd: i128,
+    pub pnl_usd: i128,
+    pub execution_price: i128,
+}
+
+#[contracttype]
+pub struct PositionClosedEvent {
+    pub key: BytesN<32>,
+    pub account: Address,
+    pub market: Address,
+    pub pnl_usd: i128,
+    pub execution_price: i128,
+}
+
+#[contracttype]
+pub struct PositionLiquidatedEvent {
+    pub key: BytesN<32>,
+    pub account: Address,
+    pub market: Address,
+    pub execution_price: i128,
+    pub remaining_collateral: i128,
 }
 
 // ─── External contract clients ────────────────────────────────────────────────
@@ -76,6 +144,10 @@ trait IRoleStore {
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
+    fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
+    fn apply_delta_to_u128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> u128;
+    fn get_i128(env: Env, key: BytesN<32>) -> i128;
+    fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address>;
     fn increment_nonce(env: Env, caller: Address) -> u64;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
     fn add_bytes32_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
@@ -97,6 +169,14 @@ trait IOrderVault {
     fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128);
 }
 
+#[allow(dead_code)]
+#[soroban_sdk::contractclient(name = "ReferralStorageClient")]
+trait IReferralStorage {
+    fn get_trader_referrer(env: Env, trader: Address) -> Option<Address>;
+    fn increment_referrer_volume(env: Env, caller: Address, referrer: Address, volume_usd: u128);
+}
+
+
 // ─── Position storage key (must match increase/decrease position utils) ───────
 
 /// Positions are stored in this contract's persistent storage under this key.
@@ -117,6 +197,21 @@ pub enum OrderStorageKey {
 // because DataStore supports only primitive/set types, not arbitrary structs.
 // DataStore holds only the index sets (order_list_key, account_order_list_key)
 // for enumeration. This matches the deposit and withdrawal handler patterns (issue #25).
+
+// ─── Events ───────────────────────────────────────────────────────────────────
+
+/// Emitted when a keeper role is found stale (issue #249): the gap between the
+/// current ledger and the role's last recorded activity has exceeded the
+/// configured heartbeat timeout. Signals the admin that the keeper has gone
+/// silent and its role can be revoked.
+#[contractevent(topics = ["kpr_stale"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeeperHeartbeatMissed {
+    pub role: BytesN<32>,
+    pub keeper: Address,
+    pub last_ledger: u64,
+    pub current_ledger: u64,
+}
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
 
@@ -181,6 +276,212 @@ impl OrderHandler {
         env.storage().instance().set(&InstanceKey::Oracle, &new_oracle);
     }
 
+    /// Admin-configurable heartbeat timeout for a keeper `role`, in ledgers
+    /// (issue #249). When the gap since the role's last activity exceeds this,
+    /// the keeper is considered stale. Unset roles use
+    /// `DEFAULT_KEEPER_HEARTBEAT_TIMEOUT` (2880 ledgers, ~4h).
+    pub fn set_keeper_heartbeat_timeout(
+        env: Env,
+        caller: Address,
+        role: BytesN<32>,
+        timeout_ledgers: u64,
+    ) {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if caller != admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let handler = env.current_contract_address();
+        DataStoreClient::new(&env, &data_store).set_u128(
+            &handler,
+            &keeper_heartbeat_timeout_key(&env, &role),
+            &(timeout_ledgers as u128),
+        );
+    }
+
+    /// Read a keeper role's liveness status from data_store (issue #249).
+    ///
+    /// View-only. Returns the last-active ledger, the gap since then, and whether
+    /// that gap has exceeded the configured heartbeat timeout. A role that has
+    /// never recorded activity reports `last_active_ledger = 0` and is treated as
+    /// stale (its full lifetime exceeds any timeout).
+    pub fn check_keeper_heartbeat(
+        env: Env,
+        data_store: Address,
+        role: BytesN<32>,
+    ) -> gmx_types::KeeperHeartbeatStatus {
+        let last_active_ledger = DataStoreClient::new(&env, &data_store)
+            .get_u128(&last_keeper_activity_key(&env, &role))
+            as u64;
+        let current_ledger = env.ledger().sequence() as u64;
+        let ledgers_since_last_activity = current_ledger.saturating_sub(last_active_ledger);
+        let timeout = keeper_heartbeat_timeout(&env, &data_store, &role);
+        let is_stale = ledgers_since_last_activity > timeout;
+        gmx_types::KeeperHeartbeatStatus {
+            last_active_ledger,
+            ledgers_since_last_activity,
+            is_stale,
+        }
+    }
+
+    /// Flag a keeper as stale (issue #249). Admin-gated.
+    ///
+    /// Verifies the `role`'s heartbeat has lapsed and emits `KeeperHeartbeatMissed`
+    /// so the staleness is recorded on-chain. The admin can then revoke the
+    /// keeper's role via `role_store::revoke_role` — which has no timelock, so the
+    /// replacement can be wired immediately. Panics with `KeeperNotStale` if the
+    /// role is still within its heartbeat window, preventing premature flagging.
+    pub fn flag_stale_keeper(env: Env, caller: Address, keeper: Address, role: BytesN<32>) {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if caller != admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+
+        let status = Self::check_keeper_heartbeat(env.clone(), data_store.clone(), role.clone());
+        if !status.is_stale {
+            panic_with_error!(&env, Error::KeeperNotStale);
+        }
+
+        env.events().publish_event(&KeeperHeartbeatMissed {
+            role,
+            keeper,
+            last_ledger: status.last_active_ledger,
+            current_ledger: env.ledger().sequence() as u64,
+        });
+    }
+
+    /// Register the referral_storage contract address (admin only — issue #217).
+    /// Once set, execute_order calls increment_referrer_volume after each trade.
+    pub fn set_referral_storage(env: Env, caller: Address, referral_storage: Address) {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if caller != admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&InstanceKey::ReferralStorage, &referral_storage);
+    }
+
+    /// Create up to 5 orders atomically in a single call (issue #219).
+    ///
+    /// All orders are created or none are (Soroban atomicity). For increase/swap orders,
+    /// the caller must pre-fund the order_vault via SendTokens before calling this.
+    /// `record_transfer_in` is called per increase/swap order to snapshot the delta.
+    ///
+    /// Returns the list of created order keys in the same order as `requests`.
+    pub fn create_orders(
+        env: Env,
+        caller: Address,
+        requests: soroban_sdk::Vec<CreateOrderParams>,
+    ) -> soroban_sdk::Vec<BytesN<32>> {
+        caller.require_auth();
+
+        if requests.len() > 5 {
+            panic_with_error!(&env, Error::BatchSizeLimitExceeded);
+        }
+
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let order_vault: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::OrderVault)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let handler = env.current_contract_address();
+        let ds = DataStoreClient::new(&env, &data_store);
+        let vault_client = OrderVaultClient::new(&env, &order_vault);
+
+        let mut keys: soroban_sdk::Vec<BytesN<32>> = soroban_sdk::Vec::new(&env);
+
+        let len = requests.len();
+        let mut i = 0u32;
+        while i < len {
+            let params = requests.get_unchecked(i);
+
+            let is_increase_or_swap = matches!(
+                params.order_type,
+                OrderType::MarketIncrease
+                    | OrderType::LimitIncrease
+                    | OrderType::StopIncrease
+                    | OrderType::MarketSwap
+                    | OrderType::LimitSwap
+            );
+
+            let collateral_delta_amount = if is_increase_or_swap {
+                let received = vault_client.record_transfer_in(&params.initial_collateral_token);
+                if received <= 0 {
+                    panic_with_error!(&env, Error::ZeroCollateral);
+                }
+                received
+            } else {
+                params.collateral_delta_amount
+            };
+
+            let nonce = ds.increment_nonce(&handler);
+            let key = order_key(&env, nonce);
+
+            let order = OrderProps {
+                account: caller.clone(),
+                receiver: params.receiver.clone(),
+                market: params.market.clone(),
+                initial_collateral_token: params.initial_collateral_token.clone(),
+                swap_path: params.swap_path.clone(),
+                size_delta_usd: params.size_delta_usd,
+                collateral_delta_amount,
+                trigger_price: params.trigger_price,
+                acceptable_price: params.acceptable_price,
+                execution_fee: params.execution_fee,
+                min_output_amount: params.min_output_amount,
+                order_type: params.order_type.clone(),
+                is_long: params.is_long,
+                updated_at_time: env.ledger().timestamp(),
+            };
+
+            env.storage()
+                .persistent()
+                .set(&OrderStorageKey::Order(key.clone()), &order);
+            ds.add_bytes32_to_set(&handler, &order_list_key(&env), &key);
+            ds.add_bytes32_to_set(&handler, &account_order_list_key(&env, &caller), &key);
+
+            env.events().publish(
+                (symbol_short!("ord_crt"),),
+                (key.clone(), caller.clone(), params.market.clone()),
+            );
+            keys.push_back(key);
+
+            i += 1;
+        }
+
+        keys
+    }
+
     /// Create a new order and record collateral in the order vault.
     ///
     /// # Collateral model (canonical — issue #47)
@@ -237,6 +538,34 @@ impl OrderHandler {
                 | OrderType::MarketSwap
                 | OrderType::LimitSwap
         );
+        
+        // Determine if this is a position order (increase/decrease)
+        let is_position_order = matches!(
+            params.order_type,
+            OrderType::MarketIncrease | OrderType::LimitIncrease | OrderType::StopIncrease |
+            OrderType::MarketDecrease | OrderType::LimitDecrease | OrderType::StopLossDecrease
+        );
+
+        // Position manager authorization: 
+        // For position orders, verify caller is either the owner OR an authorized manager for this market.
+        // If caller is a manager, receiver must be the owner (cannot redirect funds).
+        let (actual_owner, actual_receiver) = if is_position_order {
+            // Check if caller is an authorized manager for this market
+            match ds.get_position_manager(&caller, &params.market) {
+                Some(owner) => {
+                    // Caller is a manager; position owner is stored in data_store
+                    // Receiver must be the owner (cannot redirect)
+                    (owner.clone(), owner)
+                }
+                None => {
+                    // Caller is not a manager; must be the owner
+                    (caller.clone(), params.receiver)
+                }
+            }
+        } else {
+            // For swap orders, no position manager check needed
+            (caller.clone(), params.receiver)
+        };
 
         // Snapshot vault balance and derive received amount (canonical model — issue #47).
         // Reverts with ZeroCollateral if caller skipped the SendTokens pre-step.
@@ -257,9 +586,9 @@ impl OrderHandler {
         let key = order_key(&env, nonce);
 
         let order = OrderProps {
-            account: caller.clone(),
-            receiver: params.receiver,
-            market: params.market.clone(),
+            account:                  actual_owner.clone(),
+            receiver:                 actual_receiver,
+            market:                   params.market.clone(),
             initial_collateral_token: params.initial_collateral_token,
             swap_path: params.swap_path,
             size_delta_usd: params.size_delta_usd,
@@ -278,12 +607,9 @@ impl OrderHandler {
             .set(&OrderStorageKey::Order(key.clone()), &order);
 
         ds.add_bytes32_to_set(&handler, &order_list_key(&env), &key);
-        ds.add_bytes32_to_set(&handler, &account_order_list_key(&env, &caller), &key);
+        ds.add_bytes32_to_set(&handler, &account_order_list_key(&env, &actual_owner), &key);
 
-        env.events().publish(
-            (symbol_short!("ord_crt"),),
-            (key.clone(), caller, params.market),
-        );
+        env.events().publish((symbol_short!("ord_crt"),), (key.clone(), actual_owner, params.market));
         key
     }
 
@@ -402,7 +728,24 @@ impl OrderHandler {
                     &market.market_token,
                     &order.collateral_delta_amount,
                 );
-                increase_position(
+
+                // Issue #204: apply fee tier based on 30-day rolling volume
+                let effective_fee_factor =
+                    resolve_fee_tier(&env, &data_store, &handler, &order.account, &market.market_token, order.size_delta_usd);
+                let fee_key_pos = position_fee_factor_key(&env, &market.market_token, true);
+                let fee_key_neg = position_fee_factor_key(&env, &market.market_token, false);
+                let ds_client = DataStoreClient::new(&env, &data_store);
+                let original_fee_pos = ds_client.get_u128(&fee_key_pos);
+                let original_fee_neg = ds_client.get_u128(&fee_key_neg);
+                ds_client.set_u128(&handler, &fee_key_pos, &effective_fee_factor);
+                ds_client.set_u128(&handler, &fee_key_neg, &effective_fee_factor);
+
+                // Issue #205: snapshot pre-increase state for event
+                let pos_key = position_key(&env, &order.account, &market.market_token, &order.initial_collateral_token, order.is_long);
+                let pre_position: Option<PositionProps> = env.storage().persistent().get(&PositionStorageKey::Position(pos_key.clone()));
+                let is_new_position = pre_position.is_none();
+
+                let updated = increase_position(
                     &env,
                     &IncreasePositionParams {
                         data_store: &data_store,
@@ -420,13 +763,62 @@ impl OrderHandler {
                         current_time: env.ledger().timestamp(),
                     },
                 );
+
+                // Restore original fee factors
+                ds_client.set_u128(&handler, &fee_key_pos, &original_fee_pos);
+                ds_client.set_u128(&handler, &fee_key_neg, &original_fee_neg);
+
+                // Issue #206: enforce max leverage
+                let max_lev_key = max_leverage_key(&env, &market.market_token);
+                let max_leverage_bps = ds_client.get_u128(&max_lev_key);
+                if max_leverage_bps > 0 && updated.collateral_amount > 0 {
+                    let effective_bps = (updated.size_in_usd * 100 / updated.collateral_amount) as u128;
+                    if effective_bps > max_leverage_bps {
+                        panic_with_error!(&env, Error::MaxLeverageExceeded);
+                    }
+                }
+
+                // Issue #205: emit position event
+                let avg_price = if updated.size_in_tokens > 0 {
+                    mul_div_wide(&env, updated.size_in_usd, 1, updated.size_in_tokens)
+                } else {
+                    0
+                };
+                if is_new_position {
+                    env.events().publish(
+                        (symbol_short!("pos_open"),),
+                        PositionOpenedEvent {
+                            key: pos_key,
+                            account: order.account.clone(),
+                            market: market.market_token.clone(),
+                            size_in_usd: updated.size_in_usd,
+                            collateral_amount: updated.collateral_amount,
+                            is_long: order.is_long,
+                            avg_entry_price: avg_price,
+                        },
+                    );
+                } else {
+                    env.events().publish(
+                        (symbol_short!("pos_inc"),),
+                        PositionIncreasedEvent {
+                            key: pos_key,
+                            account: order.account.clone(),
+                            market: market.market_token.clone(),
+                            delta_size_usd: order.size_delta_usd,
+                            delta_collateral: order.collateral_delta_amount,
+                            new_size_usd: updated.size_in_usd,
+                            avg_entry_price: avg_price,
+                        },
+                    );
+                }
             }
 
             OrderType::MarketDecrease
             | OrderType::LimitDecrease
             | OrderType::StopLossDecrease
             | OrderType::Liquidation => {
-                decrease_position(
+                let pos_key = position_key(&env, &order.account, &market.market_token, &order.initial_collateral_token, order.is_long);
+                let result = decrease_position(
                     &env,
                     &DecreasePositionParams {
                         data_store: &data_store,
@@ -445,11 +837,60 @@ impl OrderHandler {
                         oracle: &oracle,
                     },
                 );
+
+                // Issue #205: emit decrease or close event
+                if result.is_fully_closed {
+                    env.events().publish(
+                        (symbol_short!("pos_cls"),),
+                        PositionClosedEvent {
+                            key: pos_key,
+                            account: order.account.clone(),
+                            market: market.market_token.clone(),
+                            pnl_usd: result.pnl_usd,
+                            execution_price: result.execution_price,
+                        },
+                    );
+                } else {
+                    env.events().publish(
+                        (symbol_short!("pos_dec"),),
+                        PositionDecreasedEvent {
+                            key: pos_key,
+                            account: order.account.clone(),
+                            market: market.market_token.clone(),
+                            delta_size_usd: order.size_delta_usd,
+                            pnl_usd: result.pnl_usd,
+                            execution_price: result.execution_price,
+                        },
+                    );
+                }
             }
         }
 
         // Remove order
         remove_order(&env, &data_store, &handler, &key, &order.account);
+
+        // Issue #217: referral tier auto-upgrade — increment volume for the trader's referrer.
+        if order.size_delta_usd > 0 {
+            if let Some(ref_storage_addr) = env
+                .storage()
+                .instance()
+                .get::<_, Address>(&InstanceKey::ReferralStorage)
+            {
+                let ref_client = ReferralStorageClient::new(&env, &ref_storage_addr);
+                if let Some(referrer) = ref_client.get_trader_referrer(&order.account) {
+                    ref_client.increment_referrer_volume(
+                        &handler,
+                        &referrer,
+                        &(order.size_delta_usd as u128),
+                    );
+                }
+            }
+        }
+
+        // Issue #249: record keeper liveness — stamp the ORDER_KEEPER role's last
+        // activity with the current ledger so the protocol has an on-chain
+        // heartbeat. The handler holds CONTROLLER, so it may write to data_store.
+        record_keeper_activity(&env, &data_store, &handler, &roles::order_keeper(&env));
 
         env.events()
             .publish((symbol_short!("ord_exe"),), (key, order.account));
@@ -608,6 +1049,8 @@ impl OrderHandler {
             .instance()
             .get(&InstanceKey::Oracle)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let order_vault: Address = env.storage().instance().get(&InstanceKey::OrderVault)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
 
         let market_props = load_market_props(&env, &data_store, &market);
@@ -638,6 +1081,30 @@ impl OrderHandler {
             panic_with_error!(&env, Error::InvalidOrderType);
         }
 
+        // Handle keeper execution fee (feature #208): deduct from position collateral first
+        let ds = DataStoreClient::new(&env, &data_store);
+        let keeper_fee_key = liquidation_execution_fee_key(&env, &market);
+        let keeper_execution_fee = ds.get_u128(&keeper_fee_key);
+
+        if keeper_execution_fee > 0 {
+            let keeper_fee_i128 = keeper_execution_fee as i128;
+            let fee_to_transfer = if keeper_fee_i128 <= position.collateral_amount {
+                keeper_fee_i128
+            } else {
+                position.collateral_amount
+            };
+
+            if fee_to_transfer > 0 {
+                OrderVaultClient::new(&env, &order_vault).transfer_out(
+                    &handler,
+                    &collateral_token,
+                    &keeper,
+                    &fee_to_transfer,
+                );
+            }
+        }
+
+        let liq_pos_key = position_key(&env, &account, &market, &collateral_token, is_long);
         let result = decrease_position(
             &env,
             &DecreasePositionParams {
@@ -658,9 +1125,16 @@ impl OrderHandler {
             },
         );
 
+        // Issue #205: structured liquidation event
         env.events().publish(
-            (symbol_short!("liq_exe"),),
-            (account, market, result.pnl_usd, result.execution_price),
+            (symbol_short!("pos_liq"),),
+            PositionLiquidatedEvent {
+                key: liq_pos_key,
+                account: account.clone(),
+                market: market.clone(),
+                execution_price: result.execution_price,
+                remaining_collateral: result.remaining_collateral,
+            },
         );
     }
 
@@ -721,6 +1195,56 @@ impl OrderHandler {
             (account, market, size_delta_usd, result.pnl_usd),
         );
     }
+}
+
+
+// ─── Fee tier resolution (issue #204) ────────────────────────────────────────
+
+/// Walk fee tiers 0-4, find the best (lowest) fee factor the trader qualifies for
+/// based on their 30-day rolling volume. Returns the qualifying fee factor or 0.
+fn resolve_fee_tier(
+    env: &Env,
+    data_store: &Address,
+    caller: &Address,
+    account: &Address,
+    market: &Address,
+    size_delta_usd: i128,
+) -> u128 {
+    const WINDOW_LEDGERS: u32 = 518_400; // 30 days × 24h × 720 ledgers/h
+    let ds = DataStoreClient::new(env, data_store);
+
+    let vol_key = trader_volume_key(env, account, market);
+    let win_key = trader_volume_window_start_key(env, account, market);
+
+    let current_ledger: u32 = env.ledger().sequence();
+    let window_start = ds.get_u128(&win_key) as u32;
+
+    // Reset window if expired
+    let current_volume = if current_ledger.saturating_sub(window_start) > WINDOW_LEDGERS {
+        ds.set_u128(caller, &win_key, &(current_ledger as u128));
+        ds.set_u128(caller, &vol_key, &(size_delta_usd as u128));
+        size_delta_usd as u128
+    } else {
+        ds.apply_delta_to_u128(caller, &vol_key, &size_delta_usd)
+    };
+
+    // Walk tiers 0-4, return best qualifying fee
+    let mut best_fee: u128 = 0;
+    for tier in 0u32..5u32 {
+        let thresh_key = fee_tier_volume_threshold_key(env, market, tier);
+        let threshold = ds.get_u128(&thresh_key);
+        if threshold == 0 {
+            break; // tier not configured
+        }
+        if current_volume >= threshold {
+            let factor_key = fee_tier_position_fee_factor_key(env, market, tier);
+            let fee_factor = ds.get_u128(&factor_key);
+            if fee_factor > 0 {
+                best_fee = fee_factor;
+            }
+        }
+    }
+    best_fee
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -793,6 +1317,29 @@ fn remove_order(
     let ds = DataStoreClient::new(env, data_store);
     ds.remove_bytes32_from_set(caller, &order_list_key(env), key);
     ds.remove_bytes32_from_set(caller, &account_order_list_key(env, account), key);
+}
+
+/// Issue #249: stamp the current ledger sequence as `role`'s last activity.
+/// `caller` must hold CONTROLLER in data_store (the handler does).
+fn record_keeper_activity(env: &Env, data_store: &Address, caller: &Address, role: &BytesN<32>) {
+    let ledger = env.ledger().sequence() as u128;
+    DataStoreClient::new(env, data_store).set_u128(
+        caller,
+        &last_keeper_activity_key(env, role),
+        &ledger,
+    );
+}
+
+/// Read `role`'s configured heartbeat timeout, falling back to the default when
+/// unset (issue #249).
+fn keeper_heartbeat_timeout(env: &Env, data_store: &Address, role: &BytesN<32>) -> u64 {
+    let stored =
+        DataStoreClient::new(env, data_store).get_u128(&keeper_heartbeat_timeout_key(env, role));
+    if stored == 0 {
+        DEFAULT_KEEPER_HEARTBEAT_TIMEOUT
+    } else {
+        stored as u64
+    }
 }
 
 #[cfg(test)]
@@ -2200,5 +2747,253 @@ mod tests {
             &true,
             &0i128,
         );
+    }
+
+    // ── Issue #249: keeper heartbeat ──────────────────────────────────────────
+
+    /// Executing an order stamps the ORDER_KEEPER role's last activity at the
+    /// current ledger, and the heartbeat reads back as not-stale immediately after.
+    #[test]
+    fn execute_order_records_keeper_heartbeat() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        w.env.ledger().set_sequence_number(500);
+        let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+
+        let status = hc.check_keeper_heartbeat(&w.ds, &roles::order_keeper(&w.env));
+        assert_eq!(status.last_active_ledger, 500);
+        assert_eq!(status.ledgers_since_last_activity, 0);
+        assert!(!status.is_stale, "keeper must be live right after executing");
+    }
+
+    /// Full lifecycle: keeper executes, time advances past the timeout, the
+    /// heartbeat reports stale, the admin flags it, and the role is revocable
+    /// immediately (no timelock).
+    #[test]
+    fn keeper_goes_stale_after_timeout_and_role_is_revocable() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        let order_keeper_role = roles::order_keeper(&w.env);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+
+        // Keeper executes at ledger 1000 → activity recorded.
+        w.env.ledger().set_sequence_number(1000);
+        let (_, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+        assert!(!hc
+            .check_keeper_heartbeat(&w.ds, &order_keeper_role)
+            .is_stale);
+
+        // Advance past the default 2880-ledger timeout.
+        w.env.ledger().set_sequence_number(1000 + 2880 + 1);
+        let status = hc.check_keeper_heartbeat(&w.ds, &order_keeper_role);
+        assert_eq!(status.last_active_ledger, 1000);
+        assert!(status.is_stale, "keeper must be stale past the timeout");
+
+        // Admin flags the stale keeper (emits KeeperHeartbeatMissed).
+        hc.flag_stale_keeper(&w.admin, &w.keeper, &order_keeper_role);
+
+        // Role is revocable immediately — no timelock on revoke.
+        let rs_c = RsClient::new(&w.env, &w.rs);
+        assert!(rs_c.has_role(&w.keeper, &order_keeper_role));
+        rs_c.revoke_role(&w.admin, &w.keeper, &order_keeper_role);
+        assert!(
+            !rs_c.has_role(&w.keeper, &order_keeper_role),
+            "stale keeper's role must be revocable without waiting"
+        );
+    }
+
+    /// Admin-configured timeout overrides the default: a shorter window makes a
+    /// keeper stale sooner.
+    #[test]
+    fn custom_heartbeat_timeout_is_respected() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        let order_keeper_role = roles::order_keeper(&w.env);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+
+        // Tighten the timeout to 100 ledgers.
+        hc.set_keeper_heartbeat_timeout(&w.admin, &order_keeper_role, &100u64);
+
+        w.env.ledger().set_sequence_number(2000);
+        let (_, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+
+        // 50 ledgers later — within the window.
+        w.env.ledger().set_sequence_number(2050);
+        assert!(!hc
+            .check_keeper_heartbeat(&w.ds, &order_keeper_role)
+            .is_stale);
+
+        // 101 ledgers later — past the window.
+        w.env.ledger().set_sequence_number(2101);
+        assert!(hc
+            .check_keeper_heartbeat(&w.ds, &order_keeper_role)
+            .is_stale);
+    }
+
+    /// `flag_stale_keeper` must revert if the keeper is still within its window.
+    #[test]
+    #[should_panic]
+    fn flag_stale_keeper_reverts_when_keeper_is_live() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        let order_keeper_role = roles::order_keeper(&w.env);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+
+        w.env.ledger().set_sequence_number(3000);
+        let (_, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+
+        // Still live → flagging must panic with KeeperNotStale.
+        hc.flag_stale_keeper(&w.admin, &w.keeper, &order_keeper_role);
+    }
+
+    /// Only the admin may flag a stale keeper.
+    #[test]
+    #[should_panic]
+    fn flag_stale_keeper_by_non_admin_panics() {
+        let w = setup();
+        let order_keeper_role = roles::order_keeper(&w.env);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        // Never recorded activity → stale, but caller is not admin.
+        w.env.ledger().set_sequence_number(5000);
+        let impostor = Address::generate(&w.env);
+        hc.flag_stale_keeper(&impostor, &w.keeper, &order_keeper_role);
+    }
+
+    // ── Issue #219: create_orders (batch) ────────────────────────────────────
+
+    /// Batch with more than 5 orders must revert.
+    #[test]
+    #[should_panic]
+    fn create_orders_more_than_5_reverts() {
+        let w = setup();
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let mut requests = Vec::new(&w.env);
+        // Build 6 decrease orders (no collateral deposit needed)
+        for _ in 0..6 {
+            requests.push_back(CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                size_delta_usd: 100 * gmx_math::FLOAT_PRECISION,
+                collateral_delta_amount: 0,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketDecrease,
+                is_long: true,
+            });
+        }
+        hc.create_orders(&w.user, &requests);
+    }
+
+    /// Bracket order: 1 MarketIncrease (entry) + 1 StopLossDecrease (SL) + 1 LimitDecrease (TP)
+    /// created atomically. Only the increase order requires a vault deposit.
+    #[test]
+    fn create_orders_bracket_order_created_atomically() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+
+        // Pre-fund the vault for the increase leg
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let ds_c = DsClient::new(&w.env, &w.ds);
+
+        let requests = Vec::from_array(
+            &w.env,
+            [
+                // Entry: MarketIncrease
+                CreateOrderParams {
+                    receiver: w.user.clone(),
+                    market: w.market_tk.clone(),
+                    initial_collateral_token: w.long_tk.clone(),
+                    swap_path: Vec::new(&w.env),
+                    size_delta_usd: 2000 * fp,
+                    collateral_delta_amount: COLLATERAL,
+                    trigger_price: 0,
+                    acceptable_price: 0,
+                    execution_fee: 0,
+                    min_output_amount: 0,
+                    order_type: OrderType::MarketIncrease,
+                    is_long: true,
+                },
+                // Stop-loss: StopLossDecrease
+                CreateOrderParams {
+                    receiver: w.user.clone(),
+                    market: w.market_tk.clone(),
+                    initial_collateral_token: w.long_tk.clone(),
+                    swap_path: Vec::new(&w.env),
+                    size_delta_usd: 2000 * fp,
+                    collateral_delta_amount: 0,
+                    trigger_price: 1800 * fp,
+                    acceptable_price: 0,
+                    execution_fee: 0,
+                    min_output_amount: 0,
+                    order_type: OrderType::StopLossDecrease,
+                    is_long: true,
+                },
+                // Take-profit: LimitDecrease
+                CreateOrderParams {
+                    receiver: w.user.clone(),
+                    market: w.market_tk.clone(),
+                    initial_collateral_token: w.long_tk.clone(),
+                    swap_path: Vec::new(&w.env),
+                    size_delta_usd: 2000 * fp,
+                    collateral_delta_amount: 0,
+                    trigger_price: 2500 * fp,
+                    acceptable_price: 0,
+                    execution_fee: 0,
+                    min_output_amount: 0,
+                    order_type: OrderType::LimitDecrease,
+                    is_long: true,
+                },
+            ],
+        );
+
+        let keys = hc.create_orders(&w.user, &requests);
+
+        // All three orders must be created
+        assert_eq!(keys.len(), 3);
+        assert!(hc.get_order(&keys.get_unchecked(0)).is_some());
+        assert!(hc.get_order(&keys.get_unchecked(1)).is_some());
+        assert!(hc.get_order(&keys.get_unchecked(2)).is_some());
+
+        // All three keys must appear in the global order list
+        let order_list = gmx_keys::order_list_key(&w.env);
+        assert!(ds_c.contains_bytes32(&order_list, &keys.get_unchecked(0)));
+        assert!(ds_c.contains_bytes32(&order_list, &keys.get_unchecked(1)));
+        assert!(ds_c.contains_bytes32(&order_list, &keys.get_unchecked(2)));
+
+        // Verify order types were stored correctly
+        let entry = hc.get_order(&keys.get_unchecked(0)).unwrap();
+        let sl = hc.get_order(&keys.get_unchecked(1)).unwrap();
+        let tp = hc.get_order(&keys.get_unchecked(2)).unwrap();
+        assert!(matches!(entry.order_type, OrderType::MarketIncrease));
+        assert!(matches!(sl.order_type, OrderType::StopLossDecrease));
+        assert!(matches!(tp.order_type, OrderType::LimitDecrease));
+        assert_eq!(sl.trigger_price, 1800 * fp);
+        assert_eq!(tp.trigger_price, 2500 * fp);
     }
 }

@@ -85,17 +85,20 @@ pub enum Error {
     NotInitialized = 2,
     Unauthorized = 3,
     Paused = 4,
+    BatchSizeLimitExceeded = 5,
 }
 
 // ─── External handler clients ─────────────────────────────────────────────────
+// Signatures must match the handler contract's public functions exactly.
 
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_bool(env: Env, key: BytesN<32>) -> bool;
     fn set_bool(env: Env, caller: Address, key: BytesN<32>, value: bool) -> bool;
+    fn set_position_manager(env: Env, caller: Address, market: Address, manager: Address) -> Address;
+    fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address>;
 }
-// Signatures must match the handler contract's public functions exactly.
 
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DepositHandlerClient")]
@@ -115,6 +118,7 @@ trait IWithdrawalHandler {
 #[soroban_sdk::contractclient(name = "OrderHandlerClient")]
 trait IOrderHandler {
     fn create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32>;
+    fn create_orders(env: Env, caller: Address, requests: Vec<CreateOrderParams>) -> Vec<BytesN<32>>;
     fn update_order(
         env: Env,
         caller: Address,
@@ -434,6 +438,26 @@ impl ExchangeRouter {
         OrderHandlerClient::new(&env, &order_handler).create_order(&caller, &params)
     }
 
+    /// Create up to 5 orders atomically in a single call (issue #219).
+    ///
+    /// For increase/swap orders in the batch the caller must pre-fund the
+    /// order_vault via `SendTokens` before this call (one send per increase/swap leg).
+    /// Any failure reverts the entire batch (Soroban atomicity).
+    pub fn create_orders(
+        env: Env,
+        caller: Address,
+        requests: Vec<CreateOrderParams>,
+    ) -> Vec<BytesN<32>> {
+        caller.require_auth();
+        Self::require_not_paused(&env);
+        let order_handler: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::OrderHandler)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        OrderHandlerClient::new(&env, &order_handler).create_orders(&caller, &requests)
+    }
+
     /// Forward update_order to the order_handler.
     pub fn update_order(env: Env, caller: Address, params: UpdateOrderParams) {
         caller.require_auth();
@@ -488,6 +512,31 @@ impl ExchangeRouter {
             );
             i += 1;
         }
+    }
+
+    /// Set or revoke a position manager for the caller on a specific market.
+    ///
+    /// A position manager is authorized to create, increase, decrease, or close
+    /// positions on behalf of the owner, but cannot redirect collateral receipts.
+    /// The manager cannot override the receiver — funds always go to the owner.
+    ///
+    /// Call with zero_address to revoke an existing manager.
+    pub fn set_position_manager(env: Env, caller: Address, market: Address, manager: Address) {
+        caller.require_auth();
+        let data_store: Address = env.storage().instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let data_store_client = DataStoreClient::new(&env, &data_store);
+        data_store_client.set_position_manager(&caller, &market, &manager);
+    }
+
+    /// Query the current position manager for an account on a specific market.
+    pub fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address> {
+        let data_store: Address = env.storage().instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let data_store_client = DataStoreClient::new(&env, &data_store);
+        data_store_client.get_position_manager(&owner, &market)
     }
 
     /// Set the UI fee factor for a receiver. Delegates auth enforcement to fee_handler.

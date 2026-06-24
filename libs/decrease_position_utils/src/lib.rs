@@ -562,12 +562,8 @@ mod tests {
     }
 
     fn make_market(w: &World) -> MarketProps {
-        MarketProps {
-            market_token: w.market_tk.clone(),
-            index_token: w.index_tk.clone(),
-            long_token: w.long_tk.clone(),
-            short_token: w.short_tk.clone(),
-        }
+        // Issue #248: build via the shared constructor instead of a per-field literal.
+        MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk)
     }
 
     // ── Task 1: fee delta, PnL, output verification ───────────────────────────

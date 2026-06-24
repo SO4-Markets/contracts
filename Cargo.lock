@@ -827,6 +827,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fee-batch-sweeper"
+version = "0.1.0"
+dependencies = [
+ "fee-handler",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "fee-handler"
 version = "0.1.0"
 dependencies = [
@@ -1182,6 +1190,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e04e2fd2b8188ea827b32ef11de88377086d690286ab35747ef7f9bf3ccb590"
 
 [[package]]
+name = "insurance-fund-router"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "is-terminal"
 version = "0.4.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1313,6 +1328,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "market-util-reader"
+version = "0.1.0"
+dependencies = [
+ "gmx-keys",
+ "gmx-market-utils",
+ "gmx-types",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1383,6 +1408,14 @@ dependencies = [
  "gmx-keys",
  "gmx-types",
  "role-store",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "order-cleanup"
+version = "0.1.0"
+dependencies = [
+ "gmx-types",
  "soroban-sdk",
 ]
 
@@ -1588,12 +1621,17 @@ dependencies = [
 name = "reader"
 version = "0.1.0"
 dependencies = [
+ "data-store",
  "gmx-keys",
  "gmx-market-utils",
  "gmx-math",
  "gmx-position-utils",
  "gmx-pricing-utils",
  "gmx-types",
+ "oracle",
+ "order-handler",
+ "order-vault",
+ "role-store",
  "soroban-sdk",
 ]
 

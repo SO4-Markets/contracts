@@ -1,0 +1,17 @@
+[package]
+name = "market-util-reader"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+gmx-keys = { path = "../../libs/keys" }
+gmx-types = { path = "../../libs/types" }
+gmx-market-utils = { path = "../../libs/market_utils" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

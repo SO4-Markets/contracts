@@ -1,0 +1,15 @@
+[package]
+name = "order-cleanup"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+gmx-types = { path = "../../libs/types" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

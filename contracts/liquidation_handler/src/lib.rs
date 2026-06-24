@@ -237,7 +237,8 @@ impl LiquidationHandler {
             panic_with_error!(&env, Error::NotLiquidatable);
         }
 
-        // Delegate execution to order_handler (positions live there)
+        // Delegate execution to order_handler (positions live there).
+        // order_handler emits the structured pos_liq event with result details.
         OrderHandlerClient::new(&env, &order_handler).liquidate_position(
             &keeper,
             &account,
@@ -246,8 +247,9 @@ impl LiquidationHandler {
             &is_long,
         );
 
+        // Emit keeper-level confirmation (separate from the position event in order_handler)
         env.events()
-            .publish((symbol_short!("liq_req"),), (account, market, is_long));
+            .publish((symbol_short!("liq_done"),), (keeper, account, market, is_long));
     }
 }
 
