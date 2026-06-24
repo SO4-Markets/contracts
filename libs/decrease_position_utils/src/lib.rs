@@ -30,8 +30,8 @@ use gmx_pricing_utils::{
     apply_position_impact_value, get_execution_price, get_position_price_impact,
 };
 use gmx_swap_utils::swap_with_path;
-use gmx_types::{DecreasePositionResult, MarketProps, PositionProps, PriceProps};
-use soroban_sdk::{contracttype, Address, BytesN, Env, Vec};
+use gmx_types::{DecreasePositionResult, MarketProps, PositionProps, PriceProps, SwapPath};
+use soroban_sdk::{contracttype, Address, BytesN, Env};
 
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
@@ -81,7 +81,7 @@ pub struct DecreasePositionParams<'a> {
     pub current_time: u64,
     /// Swap path for the output token. Empty = return collateral token; non-empty = swap to
     /// the requested output token via the given market hops.
-    pub swap_path: Vec<Address>,
+    pub swap_path: SwapPath,
     /// Oracle address, used when swap_path is non-empty.
     pub oracle: &'a Address,
 }
@@ -254,6 +254,15 @@ pub fn decrease_position(env: &Env, p: &DecreasePositionParams) -> DecreasePosit
         position.collateral_amount
     };
 
+    apply_delta_to_pool_amount(
+        env,
+        p.data_store,
+        p.caller,
+        p.market,
+        p.collateral_token,
+        -collateral_delta,
+    );
+
     let raw_output = collateral_delta + pnl_token_amount - fees.total_cost_amount;
     let output_amount = raw_output.max(0);
 
@@ -296,10 +305,12 @@ pub fn decrease_position(env: &Env, p: &DecreasePositionParams) -> DecreasePosit
     // 12. Collateral sum
     let col_sum_key =
         collateral_sum_key(env, &p.market.market_token, p.collateral_token, p.is_long);
+    // Collateral sum tracks posted collateral, not realised PnL paid out by the pool.
+    // Reducing by output_amount would underflow on profitable closes because output includes PnL.
     DataStoreClient::new(env, p.data_store).apply_delta_to_u128(
         p.caller,
         &col_sum_key,
-        &(-output_amount),
+        &(-collateral_delta),
     );
 
     // 13. Persist or remove position
@@ -390,7 +401,7 @@ mod tests {
     use data_store::{DataStore, DataStoreClient as DsClient};
     use gmx_keys::roles;
     use gmx_math::{FLOAT_PRECISION, TOKEN_PRECISION};
-    use gmx_types::{PositionProps, PriceProps};
+    use gmx_types::{PositionProps, PriceProps, SwapPath};
     use market_token::{MarketToken, MarketTokenClient as MtClient};
     use role_store::{RoleStore, RoleStoreClient as RsClient};
     use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Env};
@@ -607,7 +618,7 @@ mod tests {
                     index_token_price: &price,
                     collateral_price: index_price,
                     current_time: 2_000,
-                    swap_path: Vec::new(&w.env),
+                    swap_path: SwapPath::new(),
                     oracle: &w.admin, // unused; no swap path
                 },
             )
@@ -682,7 +693,7 @@ mod tests {
                     index_token_price: &price,
                     collateral_price: index_price,
                     current_time: 2_000,
-                    swap_path: Vec::new(&w.env),
+                    swap_path: SwapPath::new(),
                     oracle: &w.admin,
                 },
             )
@@ -733,7 +744,7 @@ mod tests {
                     index_token_price: &price,
                     collateral_price: close_price,
                     current_time: 2_000,
-                    swap_path: Vec::new(&w.env),
+                    swap_path: SwapPath::new(),
                     oracle: &w.admin,
                 },
             )
@@ -796,7 +807,7 @@ mod tests {
                     index_token_price: &price,
                     collateral_price: index_price,
                     current_time: 2_000,
-                    swap_path: Vec::new(&w.env),
+                    swap_path: SwapPath::new(),
                     oracle: &w.admin,
                 },
             )
