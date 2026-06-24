@@ -244,11 +244,7 @@ pub fn withdrawal_key(env: &Env, nonce: u64) -> BytesN<32> {
 // ─── Borrowing keys ───────────────────────────────────────────────────────────
 
 /// sha256("CUMULATIVE_BORROWING_FACTOR" ‖ market ‖ is_long)
-pub fn cumulative_borrowing_factor_key(
-    env: &Env,
-    market: &Address,
-    is_long: bool,
-) -> BytesN<32> {
+pub fn cumulative_borrowing_factor_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "CUMULATIVE_BORROWING_FACTOR");
     push_addr(&mut b, env, market);
@@ -307,6 +303,22 @@ pub fn claimable_fee_amount_key(env: &Env, market: &Address, token: &Address) ->
     push_str(&mut b, env, "CLAIMABLE_FEE_AMOUNT");
     push_addr(&mut b, env, market);
     push_addr(&mut b, env, token);
+    sha256(env, &b)
+}
+
+/// sha256("CLAIMABLE_UI_FEE_AMOUNT" ‖ token ‖ ui_receiver)
+///
+/// Stores the UI fee accrued for a specific receiver + token pair.
+/// Added for issue #85 — UI fee claiming.
+pub fn claimable_ui_fee_amount_key(
+    env: &Env,
+    token: &Address,
+    ui_receiver: &Address,
+) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "CLAIMABLE_UI_FEE_AMOUNT");
+    push_addr(&mut b, env, token);
+    push_addr(&mut b, env, ui_receiver);
     sha256(env, &b)
 }
 
@@ -464,7 +476,11 @@ pub fn max_leverage_key(env: &Env, market: &Address) -> BytesN<32> {
     sha256(env, &b)
 }
 
-pub fn position_fee_factor_key(env: &Env, market: &Address, for_positive_impact: bool) -> BytesN<32> {
+pub fn position_fee_factor_key(
+    env: &Env,
+    market: &Address,
+    for_positive_impact: bool,
+) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "POSITION_FEE_FACTOR");
     push_addr(&mut b, env, market);
@@ -534,7 +550,12 @@ pub fn swap_impact_exponent_factor_key(env: &Env, market: &Address) -> BytesN<32
     sha256(env, &b)
 }
 
-pub fn max_pnl_factor_key(env: &Env, pnl_factor_type: &BytesN<32>, market: &Address, is_long: bool) -> BytesN<32> {
+pub fn max_pnl_factor_key(
+    env: &Env,
+    pnl_factor_type: &BytesN<32>,
+    market: &Address,
+    is_long: bool,
+) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "MAX_PNL_FACTOR");
     b.extend_from_array(&pnl_factor_type.to_array());
@@ -573,6 +594,34 @@ pub fn keeper_public_key_prefix(env: &Env) -> BytesN<32> {
     sha256(env, &b)
 }
 
+/// sha256("LAST_KEEPER_ACTIVITY" ‖ role)
+///
+/// Ledger sequence of the most recent successful execution by a holder of
+/// `role`. Updated by handlers on every successful keeper action so the protocol
+/// has an on-chain liveness signal per keeper role (issue #249).
+pub fn last_keeper_activity_key(env: &Env, role: &BytesN<32>) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "LAST_KEEPER_ACTIVITY");
+    b.extend_from_array(&role.to_array());
+    sha256(env, &b)
+}
+
+/// sha256("KEEPER_HEARTBEAT_TIMEOUT" ‖ role)
+///
+/// Maximum number of ledgers a keeper `role` may go silent before it is
+/// considered stale. Admin-configured; falls back to
+/// `DEFAULT_KEEPER_HEARTBEAT_TIMEOUT` when unset (issue #249).
+pub fn keeper_heartbeat_timeout_key(env: &Env, role: &BytesN<32>) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "KEEPER_HEARTBEAT_TIMEOUT");
+    b.extend_from_array(&role.to_array());
+    sha256(env, &b)
+}
+
+/// Default keeper heartbeat timeout: 2880 ledgers (~4 hours at ~5s/ledger).
+/// Used when `keeper_heartbeat_timeout_key(role)` is unset in data_store.
+pub const DEFAULT_KEEPER_HEARTBEAT_TIMEOUT: u64 = 2880;
+
 /// Market token wasm hash (for factory to deploy LP tokens)
 pub fn market_token_wasm_hash_key(env: &Env) -> BytesN<32> {
     let mut b = Bytes::new(env);
@@ -591,21 +640,6 @@ pub fn max_swap_path_length_key(env: &Env) -> BytesN<32> {
 pub fn ui_fee_factor_key(env: &Env, ui_fee_receiver: &Address) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "UI_FEE_FACTOR");
-    push_addr(&mut b, env, ui_fee_receiver);
-    sha256(env, &b)
-}
-
-/// Claimable UI fee amount per (market, token, ui_fee_receiver)
-pub fn claimable_ui_fee_amount_key(
-    env: &Env,
-    market: &Address,
-    token: &Address,
-    ui_fee_receiver: &Address,
-) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "CLAIMABLE_UI_FEE_AMOUNT");
-    push_addr(&mut b, env, market);
-    push_addr(&mut b, env, token);
     push_addr(&mut b, env, ui_fee_receiver);
     sha256(env, &b)
 }
@@ -681,6 +715,14 @@ pub fn max_pnl_factor_for_deposits_key(env: &Env) -> BytesN<32> {
 pub fn max_pnl_factor_for_withdrawals_key(env: &Env) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "MAX_PNL_FACTOR_FOR_WITHDRAWALS");
+    sha256(env, &b)
+}
+
+// ─── Pause keys ──────────────────────────────────────────────────────────────
+
+pub fn global_pause_key(env: &Env) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "GLOBAL_PAUSE");
     sha256(env, &b)
 }
 

@@ -9,7 +9,18 @@
 
 use soroban_sdk::{
     contract, contractimpl, Address, BytesN, Env, Vec,
+use gmx_keys::{
+    account_deposit_list_key, account_order_list_key, account_position_list_key,
+    account_withdrawal_list_key, claimable_fee_amount_key, deposit_list_key,
+    funding_amount_per_size_key, keeper_heartbeat_timeout_key, last_keeper_activity_key,
+    market_index_token_key, market_long_token_key, market_short_token_key, order_list_key,
+    position_key, saved_funding_factor_per_second_key, withdrawal_list_key,
+    DEFAULT_KEEPER_HEARTBEAT_TIMEOUT,
 };
+use gmx_market_utils::{get_open_interest_for_side, get_pool_value};
+use gmx_math::{mul_div_wide, TOKEN_PRECISION};
+use gmx_position_utils::{get_position_fees, get_position_pnl_usd, is_liquidatable};
+use gmx_pricing_utils::{get_execution_price, get_position_price_impact};
 use gmx_types::{
     MarketProps, PositionProps, PositionInfo, PositionFees, PriceProps,
     PoolValueInfo, FundingInfo, AdlCandidate, SwapEstimate,
@@ -19,10 +30,43 @@ use gmx_keys::{
     market_index_token_key, market_long_token_key, market_short_token_key,
     funding_amount_per_size_key, saved_funding_factor_per_second_key,
     position_key, position_list_key, account_position_list_key,
+    DepositProps, FundingInfo, KeeperHeartbeatStatus, MarketProps, OrderProps, PoolValueInfo,
+    PositionFees, PositionInfo, PositionProps, PriceProps, ProtocolStats, WithdrawalProps,
 };
-use gmx_market_utils::{get_pool_value, get_open_interest_for_side};
-use gmx_position_utils::{get_position_pnl_usd, get_position_fees, is_liquidatable};
-use gmx_pricing_utils::{get_execution_price, get_position_price_impact};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
+    Vec,
+};
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+/// Upper bound on the number of markets `get_protocol_stats` will aggregate in a
+/// single call (issue #251). Bounds the per-call instruction cost — each market
+/// requires several cross-contract reads — so a large `markets` vec cannot push
+/// the call past Soroban's budget. Callers with more markets must paginate by
+/// invoking the view across multiple subsets and summing client-side.
+const MAX_STATS_MARKETS: u32 = 20;
+
+// ─── Storage keys ─────────────────────────────────────────────────────────────
+
+#[contracttype]
+enum InstanceKey {
+    Initialized,
+    Admin,
+}
+
+// ─── Errors ───────────────────────────────────────────────────────────────────
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum Error {
+    NotInitialized = 1,
+    AlreadyInitialized = 2,
+    Unauthorized = 3,
+    /// `get_protocol_stats` was passed more than `MAX_STATS_MARKETS` markets.
+    TooManyMarkets = 4,
+}
 
 // ─── External clients ─────────────────────────────────────────────────────────
 
@@ -34,6 +78,8 @@ trait IDataStore {
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
     fn get_bytes32_set_count(env: Env, set_key: BytesN<32>) -> u32;
     fn get_bytes32_set_at(env: Env, set_key: BytesN<32>, start: u32, end: u32) -> Vec<BytesN<32>>;
+    fn get_bytes32_set_count(env: Env, key: BytesN<32>) -> u32;
+    fn get_bytes32_set_at(env: Env, key: BytesN<32>, start: u32, end: u32) -> Vec<BytesN<32>>;
 }
 
 #[allow(dead_code)]
@@ -46,6 +92,19 @@ trait IOracle {
 #[soroban_sdk::contractclient(name = "OrderHandlerClient")]
 trait IOrderHandler {
     fn get_position(env: Env, key: BytesN<32>) -> Option<PositionProps>;
+    fn get_order(env: Env, key: BytesN<32>) -> Option<OrderProps>;
+}
+
+#[allow(dead_code)]
+#[soroban_sdk::contractclient(name = "DepositHandlerClient")]
+trait IDepositHandler {
+    fn get_deposit(env: Env, key: BytesN<32>) -> Option<DepositProps>;
+}
+
+#[allow(dead_code)]
+#[soroban_sdk::contractclient(name = "WithdrawalHandlerClient")]
+trait IWithdrawalHandler {
+    fn get_withdrawal(env: Env, key: BytesN<32>) -> Option<WithdrawalProps>;
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -55,18 +114,49 @@ pub struct Reader;
 
 #[contractimpl]
 impl Reader {
+    /// One-time setup — store the admin address.
+    pub fn initialize(env: Env, admin: Address) {
+        admin.require_auth();
+        if env.storage().instance().has(&InstanceKey::Initialized) {
+            panic_with_error!(&env, Error::AlreadyInitialized);
+        }
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Initialized, &true);
+        env.storage().instance().set(&InstanceKey::Admin, &admin);
+    }
+
+    /// Upgrade the contract wasm. Only the stored admin may call this.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        admin.require_auth();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
     // ── Market views ─────────────────────────────────────────────────────────
 
     /// Load full MarketProps for a given market_token address from data_store.
     pub fn get_market(env: Env, data_store: Address, market_token: Address) -> MarketProps {
         let ds = DataStoreClient::new(&env, &data_store);
-        let index_token = ds.get_address(&market_index_token_key(&env, &market_token))
+        let index_token = ds
+            .get_address(&market_index_token_key(&env, &market_token))
             .expect("market index token not found");
-        let long_token = ds.get_address(&market_long_token_key(&env, &market_token))
+        let long_token = ds
+            .get_address(&market_long_token_key(&env, &market_token))
             .expect("market long token not found");
-        let short_token = ds.get_address(&market_short_token_key(&env, &market_token))
+        let short_token = ds
+            .get_address(&market_short_token_key(&env, &market_token))
             .expect("market short token not found");
-        MarketProps { market_token, index_token, long_token, short_token }
+        MarketProps {
+            market_token,
+            index_token,
+            long_token,
+            short_token,
+        }
     }
 
     /// Get the full pool value breakdown for a market at current oracle prices.
@@ -79,49 +169,179 @@ impl Reader {
     ) -> PoolValueInfo {
         let market = Self::get_market(env.clone(), data_store.clone(), market_token);
         let oracle_client = OracleClient::new(&env, &oracle);
-        let long_price  = oracle_client.get_primary_price(&market.long_token).mid_price();
-        let short_price = oracle_client.get_primary_price(&market.short_token).mid_price();
-        let index_price = oracle_client.get_primary_price(&market.index_token).mid_price();
-        get_pool_value(&env, &data_store, &market, long_price, short_price, index_price, maximize)
+        let long_price = oracle_client
+            .get_primary_price(&market.long_token)
+            .mid_price();
+        let short_price = oracle_client
+            .get_primary_price(&market.short_token)
+            .mid_price();
+        let index_price = oracle_client
+            .get_primary_price(&market.index_token)
+            .mid_price();
+        get_pool_value(
+            &env,
+            &data_store,
+            &market,
+            long_price,
+            short_price,
+            index_price,
+            maximize,
+        )
     }
 
     /// Get open interest for both sides of a market.
     /// Returns (long_oi_usd, short_oi_usd).
-    pub fn get_open_interest(
-        env: Env,
-        data_store: Address,
-        market_token: Address,
-    ) -> (i128, i128) {
+    pub fn get_open_interest(env: Env, data_store: Address, market_token: Address) -> (i128, i128) {
         let market = Self::get_market(env.clone(), data_store.clone(), market_token);
-        let long_oi  = get_open_interest_for_side(&env, &data_store, &market, true)  as i128;
+        let long_oi = get_open_interest_for_side(&env, &data_store, &market, true) as i128;
         let short_oi = get_open_interest_for_side(&env, &data_store, &market, false) as i128;
         (long_oi, short_oi)
     }
 
     /// Get the aggregate funding state for a market.
-    pub fn get_funding_info(
-        env: Env,
-        data_store: Address,
-        market_token: Address,
-    ) -> FundingInfo {
+    pub fn get_funding_info(env: Env, data_store: Address, market_token: Address) -> FundingInfo {
         let market = Self::get_market(env.clone(), data_store.clone(), market_token.clone());
         let ds = DataStoreClient::new(&env, &data_store);
 
-        let funding_factor_per_second = ds.get_i128(
-            &saved_funding_factor_per_second_key(&env, &market_token)
-        );
+        let funding_factor_per_second =
+            ds.get_i128(&saved_funding_factor_per_second_key(&env, &market_token));
         // Long side tracks funding in long_token collateral; short in short_token
-        let long_funding_amount_per_size = ds.get_i128(
-            &funding_amount_per_size_key(&env, &market_token, &market.long_token, true)
-        );
-        let short_funding_amount_per_size = ds.get_i128(
-            &funding_amount_per_size_key(&env, &market_token, &market.short_token, false)
-        );
+        let long_funding_amount_per_size = ds.get_i128(&funding_amount_per_size_key(
+            &env,
+            &market_token,
+            &market.long_token,
+            true,
+        ));
+        let short_funding_amount_per_size = ds.get_i128(&funding_amount_per_size_key(
+            &env,
+            &market_token,
+            &market.short_token,
+            false,
+        ));
 
         FundingInfo {
             funding_factor_per_second,
             long_funding_amount_per_size,
             short_funding_amount_per_size,
+        }
+    }
+
+    /// Aggregate protocol-wide statistics across the supplied markets (issue #251).
+    ///
+    /// Returns total pool value (TVL), long/short open interest, and accumulated
+    /// (unclaimed) fees — all in USD at the current oracle prices — plus the
+    /// market count and the ledger the snapshot was taken at. Lets the frontend
+    /// fetch headline numbers in one call instead of N per-market round-trips.
+    ///
+    /// View-only: reads `data_store` and `oracle`, writes nothing.
+    ///
+    /// Panics with `TooManyMarkets` if `markets.len() > MAX_STATS_MARKETS`, which
+    /// bounds the per-call compute cost. An empty `markets` vec is valid and
+    /// returns all-zero stats (with `market_count = 0`). A market whose pool value
+    /// is zero simply contributes zero — no special-casing, no panic.
+    pub fn get_protocol_stats(
+        env: Env,
+        data_store: Address,
+        oracle: Address,
+        markets: Vec<Address>,
+    ) -> ProtocolStats {
+        if markets.len() > MAX_STATS_MARKETS {
+            panic_with_error!(&env, Error::TooManyMarkets);
+        }
+
+        let ds = DataStoreClient::new(&env, &data_store);
+        let oracle_client = OracleClient::new(&env, &oracle);
+
+        let mut total_pool_value_usd: i128 = 0;
+        let mut total_long_open_interest_usd: i128 = 0;
+        let mut total_short_open_interest_usd: i128 = 0;
+        let mut total_accumulated_fees_usd: i128 = 0;
+
+        for i in 0..markets.len() {
+            let market_token = markets.get_unchecked(i);
+            let market = Self::get_market(env.clone(), data_store.clone(), market_token.clone());
+
+            let long_price = oracle_client.get_primary_price(&market.long_token);
+            let short_price = oracle_client.get_primary_price(&market.short_token);
+            let index_price = oracle_client.get_primary_price(&market.index_token);
+
+            // Pool value (TVL contribution). Use the conservative (minimized) pool
+            // value so headline TVL never overstates what LPs could withdraw.
+            let pool = get_pool_value(
+                &env,
+                &data_store,
+                &market,
+                long_price.mid_price(),
+                short_price.mid_price(),
+                index_price.mid_price(),
+                false,
+            );
+            total_pool_value_usd += pool.pool_value;
+
+            // Open interest is already tracked in USD (FLOAT_PRECISION).
+            total_long_open_interest_usd +=
+                get_open_interest_for_side(&env, &data_store, &market, true) as i128;
+            total_short_open_interest_usd +=
+                get_open_interest_for_side(&env, &data_store, &market, false) as i128;
+
+            // Unclaimed fees are stored as raw token amounts per (market, token);
+            // convert each side to USD with that token's oracle price.
+            let long_fee = ds.get_u128(&claimable_fee_amount_key(
+                &env,
+                &market_token,
+                &market.long_token,
+            )) as i128;
+            let short_fee = ds.get_u128(&claimable_fee_amount_key(
+                &env,
+                &market_token,
+                &market.short_token,
+            )) as i128;
+            total_accumulated_fees_usd +=
+                mul_div_wide(&env, long_fee, long_price.mid_price(), TOKEN_PRECISION);
+            total_accumulated_fees_usd +=
+                mul_div_wide(&env, short_fee, short_price.mid_price(), TOKEN_PRECISION);
+        }
+
+        ProtocolStats {
+            total_pool_value_usd,
+            total_long_open_interest_usd,
+            total_short_open_interest_usd,
+            total_accumulated_fees_usd,
+            market_count: markets.len(),
+            computed_at_ledger: env.ledger().sequence() as u64,
+        }
+    }
+
+    /// Read a keeper role's liveness status from data_store (issue #249).
+    ///
+    /// View-only mirror of the heartbeat check so the frontend / monitoring can
+    /// surface stale keepers without calling into order_handler. Returns the
+    /// last-active ledger, the gap since then, and whether that gap exceeds the
+    /// role's configured heartbeat timeout (falling back to the 2880-ledger
+    /// default when unset). A role with no recorded activity reports
+    /// `last_active_ledger = 0` and is treated as stale.
+    pub fn check_keeper_heartbeat(
+        env: Env,
+        data_store: Address,
+        role: BytesN<32>,
+    ) -> KeeperHeartbeatStatus {
+        let ds = DataStoreClient::new(&env, &data_store);
+        let last_active_ledger =
+            ds.get_u128(&last_keeper_activity_key(&env, &role)) as u64;
+        let current_ledger = env.ledger().sequence() as u64;
+        let ledgers_since_last_activity = current_ledger.saturating_sub(last_active_ledger);
+
+        let stored_timeout = ds.get_u128(&keeper_heartbeat_timeout_key(&env, &role));
+        let timeout = if stored_timeout == 0 {
+            DEFAULT_KEEPER_HEARTBEAT_TIMEOUT
+        } else {
+            stored_timeout as u64
+        };
+
+        KeeperHeartbeatStatus {
+            last_active_ledger,
+            ledgers_since_last_activity,
+            is_stale: ledgers_since_last_activity > timeout,
         }
     }
 
@@ -143,37 +363,65 @@ impl Reader {
     ) -> Option<PositionInfo> {
         // Read position from canonical location (order_handler storage)
         let pk = position_key(&env, &account, &market, &collateral_token, is_long);
-        let position: PositionProps = match OrderHandlerClient::new(&env, &order_handler).get_position(&pk) {
-            Some(p) => p,
-            None => return None,
-        };
+        let position: PositionProps =
+            match OrderHandlerClient::new(&env, &order_handler).get_position(&pk) {
+                Some(p) => p,
+                None => return None,
+            };
 
-        let market_props = Self::get_market(env.clone(), data_store.clone(), position.market.clone());
+        let market_props =
+            Self::get_market(env.clone(), data_store.clone(), position.market.clone());
         let oracle_client = OracleClient::new(&env, &oracle);
 
-        let index_price      = oracle_client.get_primary_price(&market_props.index_token);
-        let collateral_price = oracle_client.get_primary_price(&position.collateral_token).mid_price();
+        let index_price = oracle_client.get_primary_price(&market_props.index_token);
+        let collateral_price = oracle_client
+            .get_primary_price(&position.collateral_token)
+            .mid_price();
 
         // PnL for the full position size
-        let (pnl_usd, uncapped_pnl_usd) = get_position_pnl_usd(
-            &env, &position, &index_price, position.size_in_usd,
-        );
+        let (pnl_usd, uncapped_pnl_usd) =
+            get_position_pnl_usd(&env, &position, &index_price, position.size_in_usd);
 
         // Fees in collateral token units
         let fees: PositionFees = get_position_fees(
-            &env, &data_store, &market_props, &position,
-            collateral_price, position.size_in_usd, false,
+            &env,
+            &data_store,
+            &market_props,
+            &position,
+            collateral_price,
+            position.size_in_usd,
+            false,
         );
 
         // Convert fee amounts (collateral token raw) → USD (FLOAT_PRECISION)
-        let borrowing_fee_usd = mul_div_wide(&env, fees.borrowing_fee_amount, collateral_price, TOKEN_PRECISION);
-        let funding_fee_usd   = mul_div_wide(&env, fees.funding_fee_amount,   collateral_price, TOKEN_PRECISION);
-        let position_fee_usd  = mul_div_wide(&env, fees.position_fee_amount,  collateral_price, TOKEN_PRECISION);
+        let borrowing_fee_usd = mul_div_wide(
+            &env,
+            fees.borrowing_fee_amount,
+            collateral_price,
+            TOKEN_PRECISION,
+        );
+        let funding_fee_usd = mul_div_wide(
+            &env,
+            fees.funding_fee_amount,
+            collateral_price,
+            TOKEN_PRECISION,
+        );
+        let position_fee_usd = mul_div_wide(
+            &env,
+            fees.position_fee_amount,
+            collateral_price,
+            TOKEN_PRECISION,
+        );
 
         // Approximate liquidation price:
         // For a long:  liq_price = (size_usd - collateral_usd + fees_usd) / size_in_tokens × TOKEN_PRECISION
         // For a short: liq_price = (size_usd + collateral_usd - fees_usd) / size_in_tokens × TOKEN_PRECISION
-        let collateral_usd = mul_div_wide(&env, position.collateral_amount, collateral_price, TOKEN_PRECISION);
+        let collateral_usd = mul_div_wide(
+            &env,
+            position.collateral_amount,
+            collateral_price,
+            TOKEN_PRECISION,
+        );
         let total_fees_usd = borrowing_fee_usd + funding_fee_usd + position_fee_usd;
 
         let liquidation_price = if position.size_in_tokens > 0 {
@@ -216,13 +464,28 @@ impl Reader {
     ) -> i128 {
         let market = Self::get_market(env.clone(), data_store.clone(), market_token);
         let oracle_client = OracleClient::new(&env, &oracle);
-        let index_price = oracle_client.get_primary_price(&market.index_token).mid_price();
+        let index_price = oracle_client
+            .get_primary_price(&market.index_token)
+            .mid_price();
 
         let impact_usd = get_position_price_impact(
-            &env, &data_store, &market, is_long, size_delta_usd, is_increase, index_price,
+            &env,
+            &data_store,
+            &market,
+            is_long,
+            size_delta_usd,
+            is_increase,
+            index_price,
         );
 
-        get_execution_price(&env, index_price, size_delta_usd, impact_usd, is_long, is_increase)
+        get_execution_price(
+            &env,
+            index_price,
+            size_delta_usd,
+            impact_usd,
+            is_long,
+            is_increase,
+        )
     }
 
     /// Return whether a position is currently liquidatable at oracle prices.
@@ -240,16 +503,558 @@ impl Reader {
     ) -> bool {
         // Read position from canonical location (order_handler storage)
         let pk = position_key(&env, &account, &market, &collateral_token, is_long);
-        let position: PositionProps = match OrderHandlerClient::new(&env, &order_handler).get_position(&pk) {
-            Some(p) => p,
-            None => return false,
+        let position: PositionProps =
+            match OrderHandlerClient::new(&env, &order_handler).get_position(&pk) {
+                Some(p) => p,
+                None => return false,
+            };
+
+        let market_props =
+            Self::get_market(env.clone(), data_store.clone(), position.market.clone());
+        let oracle_client = OracleClient::new(&env, &oracle);
+        let index_price = oracle_client.get_primary_price(&market_props.index_token);
+        let collateral_price = oracle_client
+            .get_primary_price(&position.collateral_token)
+            .mid_price();
+        is_liquidatable(
+            &env,
+            &data_store,
+            &position,
+            &market_props,
+            collateral_price,
+            &index_price,
+        )
+    }
+
+    /// Return a stored order by key, or None if not found.
+    pub fn get_order(env: Env, order_handler: Address, key: BytesN<32>) -> Option<OrderProps> {
+        OrderHandlerClient::new(&env, &order_handler).get_order(&key)
+    }
+
+    /// Return paginated orders for an account.
+    pub fn get_account_orders(
+        env: Env,
+        data_store: Address,
+        order_handler: Address,
+        account: Address,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<OrderProps> {
+        let ds = DataStoreClient::new(&env, &data_store);
+        let set_key = account_order_list_key(&env, &account);
+        if page == 0 || page_size == 0 {
+            return Vec::new(&env);
+        }
+        let start = (page - 1).saturating_mul(page_size);
+        let end = start.saturating_add(page_size);
+
+        let keys: Vec<BytesN<32>> = ds.get_bytes32_set_at(&set_key, &start, &end);
+        let mut out: Vec<OrderProps> = Vec::new(&env);
+        for i in 0..keys.len() {
+            let k = keys.get_unchecked(i);
+            if let Some(o) = OrderHandlerClient::new(&env, &order_handler).get_order(&k) {
+                out.push_back(o);
+            }
+        }
+        out
+    }
+
+    /// Get position info by canonical position key (BytesN<32>), returning enriched `PositionInfo`.
+    pub fn get_position_info_by_key(
+        env: Env,
+        data_store: Address,
+        oracle: Address,
+        order_handler: Address,
+        position_key: BytesN<32>,
+    ) -> Option<PositionInfo> {
+        let position: PositionProps =
+            match OrderHandlerClient::new(&env, &order_handler).get_position(&position_key) {
+                Some(p) => p,
+                None => return None,
+            };
+
+        let market_props =
+            Self::get_market(env.clone(), data_store.clone(), position.market.clone());
+        let oracle_client = OracleClient::new(&env, &oracle);
+
+        let index_price = oracle_client.get_primary_price(&market_props.index_token);
+        let collateral_price = oracle_client
+            .get_primary_price(&position.collateral_token)
+            .mid_price();
+
+        let (pnl_usd, uncapped_pnl_usd) =
+            get_position_pnl_usd(&env, &position, &index_price, position.size_in_usd);
+
+        let fees: PositionFees = get_position_fees(
+            &env,
+            &data_store,
+            &market_props,
+            &position,
+            collateral_price,
+            position.size_in_usd,
+            false,
+        );
+
+        let borrowing_fee_usd = mul_div_wide(
+            &env,
+            fees.borrowing_fee_amount,
+            collateral_price,
+            TOKEN_PRECISION,
+        );
+        let funding_fee_usd = mul_div_wide(
+            &env,
+            fees.funding_fee_amount,
+            collateral_price,
+            TOKEN_PRECISION,
+        );
+        let position_fee_usd = mul_div_wide(
+            &env,
+            fees.position_fee_amount,
+            collateral_price,
+            TOKEN_PRECISION,
+        );
+
+        let collateral_usd = mul_div_wide(
+            &env,
+            position.collateral_amount,
+            collateral_price,
+            TOKEN_PRECISION,
+        );
+        let total_fees_usd = borrowing_fee_usd + funding_fee_usd + position_fee_usd;
+
+        let liquidation_price = if position.size_in_tokens > 0 {
+            let numerator = if position.is_long {
+                position.size_in_usd - collateral_usd + total_fees_usd
+            } else {
+                position.size_in_usd + collateral_usd - total_fees_usd
+            };
+            if numerator > 0 {
+                mul_div_wide(&env, numerator, TOKEN_PRECISION, position.size_in_tokens)
+            } else {
+                0
+            }
+        } else {
+            0
         };
 
-        let market_props = Self::get_market(env.clone(), data_store.clone(), position.market.clone());
-        let oracle_client = OracleClient::new(&env, &oracle);
-        let index_price      = oracle_client.get_primary_price(&market_props.index_token);
-        let collateral_price = oracle_client.get_primary_price(&position.collateral_token).mid_price();
-        is_liquidatable(&env, &data_store, &position, &market_props, collateral_price, &index_price)
+        Some(PositionInfo {
+            position,
+            pnl_usd,
+            uncapped_pnl_usd,
+            borrowing_fee_usd,
+            funding_fee_usd,
+            position_fee_usd,
+            liquidation_price,
+        })
+    }
+
+    /// Get a deposit by key (delegates to deposit_handler).
+    pub fn get_deposit(
+        env: Env,
+        deposit_handler: Address,
+        key: BytesN<32>,
+    ) -> Option<DepositProps> {
+        DepositHandlerClient::new(&env, &deposit_handler).get_deposit(&key)
+    }
+
+    /// Get a withdrawal by key (delegates to withdrawal_handler).
+    pub fn get_withdrawal(
+        env: Env,
+        withdrawal_handler: Address,
+        key: BytesN<32>,
+    ) -> Option<WithdrawalProps> {
+        WithdrawalHandlerClient::new(&env, &withdrawal_handler).get_withdrawal(&key)
+    }
+
+    // ── Deposit key enumeration (issue #27) ──────────────────────────────────
+
+    /// Count of all pending deposit keys in DataStore.
+    pub fn get_deposit_count(env: Env, data_store: Address) -> u32 {
+        DataStoreClient::new(&env, &data_store).get_bytes32_set_count(&deposit_list_key(&env))
+    }
+
+    /// Paginated list of all deposit keys (raw BytesN<32>).
+    pub fn get_deposit_keys(
+        env: Env,
+        data_store: Address,
+        start: u32,
+        end: u32,
+    ) -> Vec<BytesN<32>> {
+        DataStoreClient::new(&env, &data_store).get_bytes32_set_at(
+            &deposit_list_key(&env),
+            &start,
+            &end,
+        )
+    }
+
+    /// Count of pending deposit keys for a specific account.
+    pub fn get_account_deposit_count(env: Env, data_store: Address, account: Address) -> u32 {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_count(&account_deposit_list_key(&env, &account))
+    }
+
+    /// Paginated list of deposit keys for a specific account.
+    pub fn get_account_deposit_keys(
+        env: Env,
+        data_store: Address,
+        account: Address,
+        start: u32,
+        end: u32,
+    ) -> Vec<BytesN<32>> {
+        DataStoreClient::new(&env, &data_store).get_bytes32_set_at(
+            &account_deposit_list_key(&env, &account),
+            &start,
+            &end,
+        )
+    }
+
+    // ── Withdrawal key enumeration (issue #24) ────────────────────────────────
+
+    /// Count of all pending withdrawal keys in DataStore.
+    pub fn get_withdrawal_count(env: Env, data_store: Address) -> u32 {
+        DataStoreClient::new(&env, &data_store).get_bytes32_set_count(&withdrawal_list_key(&env))
+    }
+
+    /// Paginated list of all withdrawal keys (raw BytesN<32>).
+    pub fn get_withdrawal_keys(
+        env: Env,
+        data_store: Address,
+        start: u32,
+        end: u32,
+    ) -> Vec<BytesN<32>> {
+        DataStoreClient::new(&env, &data_store).get_bytes32_set_at(
+            &withdrawal_list_key(&env),
+            &start,
+            &end,
+        )
+    }
+
+    /// Count of pending withdrawal keys for a specific account.
+    pub fn get_account_withdrawal_count(env: Env, data_store: Address, account: Address) -> u32 {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_count(&account_withdrawal_list_key(&env, &account))
+    }
+
+    /// Paginated list of withdrawal keys for a specific account.
+    pub fn get_account_withdrawal_keys(
+        env: Env,
+        data_store: Address,
+        account: Address,
+        start: u32,
+        end: u32,
+    ) -> Vec<BytesN<32>> {
+        DataStoreClient::new(&env, &data_store).get_bytes32_set_at(
+            &account_withdrawal_list_key(&env, &account),
+            &start,
+            &end,
+        )
+    }
+
+    // ── Order key enumeration (issue #25) ─────────────────────────────────────
+
+    /// Count of all pending order keys in DataStore.
+    pub fn get_order_count(env: Env, data_store: Address) -> u32 {
+        DataStoreClient::new(&env, &data_store).get_bytes32_set_count(&order_list_key(&env))
+    }
+
+    /// Paginated list of all order keys (raw BytesN<32>).
+    pub fn get_order_keys(env: Env, data_store: Address, start: u32, end: u32) -> Vec<BytesN<32>> {
+        DataStoreClient::new(&env, &data_store).get_bytes32_set_at(
+            &order_list_key(&env),
+            &start,
+            &end,
+        )
+    }
+
+    /// Count of pending order keys for a specific account.
+    pub fn get_account_order_count(env: Env, data_store: Address, account: Address) -> u32 {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_count(&account_order_list_key(&env, &account))
+    }
+
+    /// Paginated list of order keys for a specific account.
+    pub fn get_account_order_keys(
+        env: Env,
+        data_store: Address,
+        account: Address,
+        start: u32,
+        end: u32,
+    ) -> Vec<BytesN<32>> {
+        DataStoreClient::new(&env, &data_store).get_bytes32_set_at(
+            &account_order_list_key(&env, &account),
+            &start,
+            &end,
+        )
+    }
+
+    /// Return paginated account positions as enriched `PositionInfo` entries.
+    pub fn get_account_positions(
+        env: Env,
+        data_store: Address,
+        oracle: Address,
+        order_handler: Address,
+        account: Address,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<PositionInfo> {
+        let ds = DataStoreClient::new(&env, &data_store);
+        let set_key = account_position_list_key(&env, &account);
+        if page == 0 || page_size == 0 {
+            return Vec::new(&env);
+        }
+        let start = (page - 1).saturating_mul(page_size);
+        let end = start.saturating_add(page_size);
+
+        let keys: Vec<BytesN<32>> = ds.get_bytes32_set_at(&set_key, &start, &end);
+        let mut out: Vec<PositionInfo> = Vec::new(&env);
+        for i in 0..keys.len() {
+            let k = keys.get_unchecked(i);
+            if let Some(pi) = Self::get_position_info_by_key(
+                env.clone(),
+                data_store.clone(),
+                oracle.clone(),
+                order_handler.clone(),
+                k,
+            ) {
+                out.push_back(pi);
+            }
+        }
+        out
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use data_store::{DataStore, DataStoreClient as DsClient};
+    use gmx_keys::{
+        claimable_fee_amount_key, market_index_token_key, market_long_token_key,
+        market_short_token_key, open_interest_key, pool_amount_key, roles,
+    };
+    use gmx_math::FLOAT_PRECISION;
+    use gmx_types::TokenPrice;
+    use oracle::{Oracle, OracleClient as OClient};
+    use role_store::{RoleStore, RoleStoreClient as RsClient};
+    use soroban_sdk::{testutils::Address as _, Vec as SdkVec};
+
+    struct World {
+        env: Env,
+        admin: Address,
+        ds: Address,
+        oracle: Address,
+        reader: Address,
+    }
+
+    fn setup() -> World {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+
+        let admin = Address::generate(&env);
+
+        let rs = env.register(RoleStore, ());
+        let rs_c = RsClient::new(&env, &rs);
+        rs_c.initialize(&admin);
+        // admin acts as CONTROLLER (writes config) and ORDER_KEEPER (submits prices)
+        rs_c.grant_role(&admin, &admin, &roles::controller(&env));
+        rs_c.grant_role(&admin, &admin, &roles::order_keeper(&env));
+
+        let ds = env.register(DataStore, ());
+        DsClient::new(&env, &ds).initialize(&admin, &rs);
+
+        let oracle = env.register(Oracle, ());
+        let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
+        OClient::new(&env, &oracle).initialize(&admin, &rs, &ds, &passphrase);
+
+        let reader = env.register(Reader, ());
+        ReaderClient::new(&env, &reader).initialize(&admin);
+
+        World {
+            env,
+            admin,
+            ds,
+            oracle,
+            reader,
+        }
+    }
+
+    /// Register a market in data_store with the given tokens and seed pool amounts,
+    /// open interest, and unclaimed fees. Sets oracle prices for all three tokens.
+    /// Returns the market_token address.
+    #[allow(clippy::too_many_arguments)]
+    fn seed_market(
+        w: &World,
+        long_pool: u128,
+        short_pool: u128,
+        long_oi_usd: u128,
+        short_oi_usd: u128,
+        long_fee: u128,
+        short_fee: u128,
+        price: i128,
+    ) -> Address {
+        let env = &w.env;
+        let market_tk = Address::generate(env);
+        let long_tk = Address::generate(env);
+        let short_tk = Address::generate(env);
+        let index_tk = Address::generate(env);
+        let ds_c = DsClient::new(env, &w.ds);
+
+        // Wire the market's token addresses.
+        ds_c.set_address(&w.admin, &market_index_token_key(env, &market_tk), &index_tk);
+        ds_c.set_address(&w.admin, &market_long_token_key(env, &market_tk), &long_tk);
+        ds_c.set_address(&w.admin, &market_short_token_key(env, &market_tk), &short_tk);
+
+        // Pool amounts (raw token units).
+        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market_tk, &long_tk), &long_pool);
+        ds_c.set_u128(
+            &w.admin,
+            &pool_amount_key(env, &market_tk, &short_tk),
+            &short_pool,
+        );
+
+        // Open interest in USD (FLOAT_PRECISION), keyed on the long-side collateral.
+        ds_c.set_u128(
+            &w.admin,
+            &open_interest_key(env, &market_tk, &long_tk, true),
+            &long_oi_usd,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &open_interest_key(env, &market_tk, &short_tk, false),
+            &short_oi_usd,
+        );
+
+        // Unclaimed fees (raw token units).
+        ds_c.set_u128(
+            &w.admin,
+            &claimable_fee_amount_key(env, &market_tk, &long_tk),
+            &long_fee,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &claimable_fee_amount_key(env, &market_tk, &short_tk),
+            &short_fee,
+        );
+
+        // Oracle prices for the three tokens.
+        OClient::new(env, &w.oracle).set_prices_simple(
+            &w.admin,
+            &SdkVec::from_array(
+                env,
+                [
+                    TokenPrice {
+                        token: long_tk,
+                        min: price,
+                        max: price,
+                    },
+                    TokenPrice {
+                        token: short_tk,
+                        min: price,
+                        max: price,
+                    },
+                    TokenPrice {
+                        token: index_tk,
+                        min: price,
+                        max: price,
+                    },
+                ],
+            ),
+        );
+
+        market_tk
+    }
+
+    /// Empty markets vec returns all-zero stats with market_count 0, no panic.
+    #[test]
+    fn protocol_stats_empty_markets_returns_zeros() {
+        let w = setup();
+        let stats = ReaderClient::new(&w.env, &w.reader).get_protocol_stats(
+            &w.ds,
+            &w.oracle,
+            &SdkVec::new(&w.env),
+        );
+        assert_eq!(stats.market_count, 0);
+        assert_eq!(stats.total_pool_value_usd, 0);
+        assert_eq!(stats.total_long_open_interest_usd, 0);
+        assert_eq!(stats.total_short_open_interest_usd, 0);
+        assert_eq!(stats.total_accumulated_fees_usd, 0);
+    }
+
+    /// A single seeded market reports its OI and accumulated fees in USD.
+    #[test]
+    fn protocol_stats_single_market_aggregates() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let long_oi = 1_000 * fp as u128;
+        let short_oi = 400 * fp as u128;
+        // 5 long-token + 5 short-token fee units at price $2 → $20 total (FLOAT_PRECISION).
+        let fee_units = 5 * gmx_math::TOKEN_PRECISION as u128;
+        let price = 2 * fp;
+
+        let m = seed_market(&w, 100, 100, long_oi, short_oi, fee_units, fee_units, price);
+        let stats = ReaderClient::new(&w.env, &w.reader).get_protocol_stats(
+            &w.ds,
+            &w.oracle,
+            &SdkVec::from_array(&w.env, [m]),
+        );
+
+        assert_eq!(stats.market_count, 1);
+        assert_eq!(stats.total_long_open_interest_usd, long_oi as i128);
+        assert_eq!(stats.total_short_open_interest_usd, short_oi as i128);
+        // 10 token-units total at $2 = $20, expressed in FLOAT_PRECISION.
+        assert_eq!(stats.total_accumulated_fees_usd, 20 * fp);
+        assert!(stats.total_pool_value_usd > 0);
+    }
+
+    /// Two markets: totals are the sum of the per-market contributions.
+    #[test]
+    fn protocol_stats_two_markets_sum() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let oi = 500 * fp as u128;
+        let price = 1 * fp;
+
+        let m1 = seed_market(&w, 50, 50, oi, oi, 0, 0, price);
+        let m2 = seed_market(&w, 70, 70, oi, oi, 0, 0, price);
+        let stats = ReaderClient::new(&w.env, &w.reader).get_protocol_stats(
+            &w.ds,
+            &w.oracle,
+            &SdkVec::from_array(&w.env, [m1, m2]),
+        );
+
+        assert_eq!(stats.market_count, 2);
+        assert_eq!(stats.total_long_open_interest_usd, 2 * oi as i128);
+        assert_eq!(stats.total_short_open_interest_usd, 2 * oi as i128);
+    }
+
+    /// A market with zero pool value contributes zero and does not panic.
+    #[test]
+    fn protocol_stats_zero_pool_market_contributes_nothing() {
+        let w = setup();
+        let price = FLOAT_PRECISION;
+        let m = seed_market(&w, 0, 0, 0, 0, 0, 0, price);
+        let stats = ReaderClient::new(&w.env, &w.reader).get_protocol_stats(
+            &w.ds,
+            &w.oracle,
+            &SdkVec::from_array(&w.env, [m]),
+        );
+        assert_eq!(stats.market_count, 1);
+        assert_eq!(stats.total_pool_value_usd, 0);
+        assert_eq!(stats.total_accumulated_fees_usd, 0);
+    }
+
+    /// More than MAX_STATS_MARKETS markets must revert with TooManyMarkets.
+    #[test]
+    #[should_panic]
+    fn protocol_stats_too_many_markets_panics() {
+        let w = setup();
+        let mut markets = SdkVec::new(&w.env);
+        for _ in 0..(MAX_STATS_MARKETS + 1) {
+            markets.push_back(Address::generate(&w.env));
+        }
+        ReaderClient::new(&w.env, &w.reader).get_protocol_stats(&w.ds, &w.oracle, &markets);
     }
 
     // ── ADL (Auto-Deleveraging) views ────────────────────────────────────────

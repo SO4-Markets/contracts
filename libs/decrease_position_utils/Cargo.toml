@@ -20,5 +20,5 @@ gmx-swap-utils        = { path = "../swap_utils" }
 soroban-sdk  = { workspace = true, features = ["testutils"] }
 role-store   = { path = "../../contracts/role_store" }
 data-store   = { path = "../../contracts/data_store" }
-oracle       = { path = "../../contracts/oracle" }
+oracle       = { path = "../../contracts/oracle", features = ["testutils"] }
 market-token = { path = "../../contracts/market_token" }

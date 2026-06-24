@@ -319,6 +319,8 @@ sep
 echo -e "${BOLD}[8/8] Grant CONTROLLER role${NC}"
 
 for CONTRACT in \
+  "$ADMIN" \
+  "$MARKET_FACTORY" \
   "$DEPOSIT_HANDLER" \
   "$WITHDRAWAL_HANDLER" \
   "$ORDER_HANDLER" \
@@ -464,3 +466,15 @@ printf "  ${GREEN}%-22s${NC}  %s\n" "exchange_router"     "$EXCHANGE_ROUTER"
 echo -e "${BOLD}$DIV${NC}"
 echo -e "  Addresses saved → ${CYAN}$OUT_FILE${NC}"
 echo -e "${BOLD}$DIV${NC}"
+
+# ── Next steps ────────────────────────────────────────────────────────────────
+echo
+echo -e "${BOLD}Next steps:${NC}"
+echo -e "  1. Create test tokens (if not already done):"
+echo -e "       make market-tokens NETWORK=$NETWORK SOURCE=$SOURCE"
+echo -e "  2. Bootstrap a market (roles + market creation + config):"
+echo -e "       make bootstrap NETWORK=$NETWORK SOURCE=$SOURCE LONG_CODE=TWBTC SHORT_CODE=TUSDC"
+echo -e "  3. Submit initial oracle prices:"
+echo -e "       bash scripts/submit_prices.sh $NETWORK $SOURCE"
+echo -e "  4. Seed pool liquidity (see 'make bootstrap' output for deposit_handler params)"
+echo

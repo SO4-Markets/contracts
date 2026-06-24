@@ -21,6 +21,8 @@ CONTRACTS := \
 	role_store \
 	data_store \
 	oracle \
+	test_token \
+	test_faucet \
 	market_token \
 	market_factory \
 	deposit_vault \

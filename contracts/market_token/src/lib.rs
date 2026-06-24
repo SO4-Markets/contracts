@@ -5,11 +5,11 @@
 //! deposit_handler / withdrawal_handler). All other SEP-41 methods are public.
 #![no_std]
 
-use soroban_sdk::{
-    contract, contractimpl, contracttype, contracterror, panic_with_error,
-    symbol_short, token, Address, BytesN, Env, String,
-};
 use gmx_keys::roles;
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
+    Address, BytesN, Env, String,
+};
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -18,23 +18,23 @@ use gmx_keys::roles;
 #[repr(u32)]
 pub enum Error {
     AlreadyInitialized = 1,
-    NotInitialized     = 2,
-    Unauthorized       = 3,
+    NotInitialized = 2,
+    Unauthorized = 3,
     InsufficientBalance = 4,
     InsufficientAllowance = 5,
-    NegativeAmount     = 6,
-    AllowanceExpired   = 7,
+    NegativeAmount = 6,
+    AllowanceExpired = 7,
 }
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
 #[contracttype]
 enum InstanceKey {
-    Admin,       // Address: market_factory (initial admin)
-    RoleStore,   // Address: role_store for controller checks
-    Decimals,    // u32
-    Name,        // String
-    Symbol,      // String
+    Admin,     // Address: market_factory (initial admin)
+    RoleStore, // Address: role_store for controller checks
+    Decimals,  // u32
+    Name,      // String
+    Symbol,    // String
 }
 
 #[contracttype]
@@ -82,27 +82,39 @@ impl MarketToken {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
         env.storage().instance().set(&InstanceKey::Admin, &admin);
-        env.storage().instance().set(&InstanceKey::RoleStore, &role_store);
-        env.storage().instance().set(&InstanceKey::Decimals, &decimal);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::RoleStore, &role_store);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Decimals, &decimal);
         env.storage().instance().set(&InstanceKey::Name, &name);
         env.storage().instance().set(&InstanceKey::Symbol, &symbol);
-        env.storage().persistent().set(&DataKey::TotalSupply, &0i128);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TotalSupply, &0i128);
     }
 
     // ── SEP-41 metadata ───────────────────────────────────────────────────────
 
     pub fn decimals(env: Env) -> u32 {
-        env.storage().instance().get(&InstanceKey::Decimals)
+        env.storage()
+            .instance()
+            .get(&InstanceKey::Decimals)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized))
     }
 
     pub fn name(env: Env) -> String {
-        env.storage().instance().get(&InstanceKey::Name)
+        env.storage()
+            .instance()
+            .get(&InstanceKey::Name)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized))
     }
 
     pub fn symbol(env: Env) -> String {
-        env.storage().instance().get(&InstanceKey::Symbol)
+        env.storage()
+            .instance()
+            .get(&InstanceKey::Symbol)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized))
     }
 
@@ -156,10 +168,17 @@ impl MarketToken {
         if amount == 0 {
             env.storage().temporary().remove(&key);
         } else {
-            let ledger_gap = expiration_ledger
-                .saturating_sub(env.ledger().sequence());
-            env.storage().temporary().set(&key, &AllowanceData { amount, expiration_ledger });
-            env.storage().temporary().extend_ttl(&key, ledger_gap, ledger_gap);
+            let ledger_gap = expiration_ledger.saturating_sub(env.ledger().sequence());
+            env.storage().temporary().set(
+                &key,
+                &AllowanceData {
+                    amount,
+                    expiration_ledger,
+                },
+            );
+            env.storage()
+                .temporary()
+                .extend_ttl(&key, ledger_gap, ledger_gap);
         }
         env.events().publish(
             (symbol_short!("approve"),),
@@ -174,7 +193,8 @@ impl MarketToken {
         }
         spend_balance(&env, &from, amount);
         receive_balance(&env, &to, amount);
-        env.events().publish((symbol_short!("transfer"),), (from, to, amount));
+        env.events()
+            .publish((symbol_short!("transfer"),), (from, to, amount));
     }
 
     pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
@@ -185,7 +205,8 @@ impl MarketToken {
         spend_allowance(&env, &from, &spender, amount);
         spend_balance(&env, &from, amount);
         receive_balance(&env, &to, amount);
-        env.events().publish((symbol_short!("xfer_from"),), (spender, from, to, amount));
+        env.events()
+            .publish((symbol_short!("xfer_from"),), (spender, from, to, amount));
     }
 
     pub fn burn(env: Env, from: Address, amount: i128) {
@@ -195,7 +216,8 @@ impl MarketToken {
         }
         spend_balance(&env, &from, amount);
         change_total_supply(&env, -amount);
-        env.events().publish((symbol_short!("burn"),), (from, amount));
+        env.events()
+            .publish((symbol_short!("burn"),), (from, amount));
     }
 
     pub fn burn_from(env: Env, spender: Address, from: Address, amount: i128) {
@@ -206,7 +228,8 @@ impl MarketToken {
         spend_allowance(&env, &from, &spender, amount);
         spend_balance(&env, &from, amount);
         change_total_supply(&env, -amount);
-        env.events().publish((symbol_short!("burn_from"),), (spender, from, amount));
+        env.events()
+            .publish((symbol_short!("burn_from"),), (spender, from, amount));
     }
 
     // ── Controlled mint/pool-withdraw (handlers only) ────────────────────────
@@ -220,7 +243,8 @@ impl MarketToken {
         require_controller(&env, &caller);
         receive_balance(&env, &to, amount);
         change_total_supply(&env, amount);
-        env.events().publish((symbol_short!("mint"),), (caller, to, amount));
+        env.events()
+            .publish((symbol_short!("mint"),), (caller, to, amount));
     }
 
     /// Transfer underlying pool tokens (long/short token) held by this contract
@@ -238,8 +262,11 @@ impl MarketToken {
             panic_with_error!(&env, Error::NegativeAmount);
         }
         require_controller(&env, &caller);
-        token::Client::new(&env, &pool_token)
-            .transfer(&env.current_contract_address(), &receiver, &amount);
+        token::Client::new(&env, &pool_token).transfer(
+            &env.current_contract_address(),
+            &receiver,
+            &amount,
+        );
         env.events()
             .publish((symbol_short!("pool_out"),), (pool_token, receiver, amount));
     }
@@ -302,7 +329,10 @@ fn spend_allowance(env: &Env, from: &Address, spender: &Address, amount: i128) {
         .storage()
         .temporary()
         .get(&key)
-        .unwrap_or(AllowanceData { amount: 0, expiration_ledger: 0 });
+        .unwrap_or(AllowanceData {
+            amount: 0,
+            expiration_ledger: 0,
+        });
     if env.ledger().sequence() > data.expiration_ledger {
         panic_with_error!(env, Error::AllowanceExpired);
     }
@@ -313,9 +343,19 @@ fn spend_allowance(env: &Env, from: &Address, spender: &Address, amount: i128) {
     if new_amount == 0 {
         env.storage().temporary().remove(&key);
     } else {
-        let ledger_gap = data.expiration_ledger.saturating_sub(env.ledger().sequence());
-        env.storage().temporary().set(&key, &AllowanceData { amount: new_amount, expiration_ledger: data.expiration_ledger });
-        env.storage().temporary().extend_ttl(&key, ledger_gap, ledger_gap);
+        let ledger_gap = data
+            .expiration_ledger
+            .saturating_sub(env.ledger().sequence());
+        env.storage().temporary().set(
+            &key,
+            &AllowanceData {
+                amount: new_amount,
+                expiration_ledger: data.expiration_ledger,
+            },
+        );
+        env.storage()
+            .temporary()
+            .extend_ttl(&key, ledger_gap, ledger_gap);
     }
 }
 
@@ -324,8 +364,8 @@ fn spend_allowance(env: &Env, from: &Address, spender: &Address, amount: i128) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
     use role_store::{RoleStore, RoleStoreClient as RsClient};
+    use soroban_sdk::{testutils::Address as _, Env};
 
     fn deploy_role_store(env: &Env, admin: &Address) -> Address {
         let id = env.register(RoleStore, ());
@@ -414,7 +454,12 @@ mod tests {
         let spender = Address::generate(&env);
 
         client.mint(&admin, &alice, &1000_0000i128);
-        client.approve(&alice, &spender, &500_0000i128, &(env.ledger().sequence() + 100));
+        client.approve(
+            &alice,
+            &spender,
+            &500_0000i128,
+            &(env.ledger().sequence() + 100),
+        );
         assert_eq!(client.allowance(&alice, &spender), 500_0000);
 
         client.transfer_from(&spender, &alice, &bob, &300_0000i128);
@@ -443,7 +488,7 @@ mod tests {
     fn unauthorized_mint_reverts() {
         let (env, _admin, rs_id, mt_id) = setup();
         let attacker = Address::generate(&env);
-        let victim   = Address::generate(&env);
+        let victim = Address::generate(&env);
 
         // attacker has no role at all
         let rs = RsClient::new(&env, &rs_id);
@@ -461,11 +506,13 @@ mod tests {
     fn unauthorized_withdraw_from_pool_reverts() {
         let (env, admin, rs_id, mt_id) = setup();
         let attacker = Address::generate(&env);
-        let victim   = Address::generate(&env);
+        let victim = Address::generate(&env);
 
         // Mint some tokens so the contract holds a balance to attempt withdrawing.
         // We use a real SEP-41 token registered in the env.
-        let pool_token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let pool_token = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let client = MarketTokenClient::new(&env, &mt_id);
 
         // attacker has no CONTROLLER role
@@ -480,27 +527,43 @@ mod tests {
     #[test]
     fn authorized_mint_succeeds() {
         let (env, admin, _, mt_id) = setup();
-        let user   = Address::generate(&env);
+        let user = Address::generate(&env);
         let client = MarketTokenClient::new(&env, &mt_id);
 
         client.mint(&admin, &user, &5_000_0000i128);
-        assert_eq!(client.balance(&user), 5_000_0000, "balance must reflect minted amount");
-        assert_eq!(client.total_supply(), 5_000_0000, "total supply must grow by minted amount");
+        assert_eq!(
+            client.balance(&user),
+            5_000_0000,
+            "balance must reflect minted amount"
+        );
+        assert_eq!(
+            client.total_supply(),
+            5_000_0000,
+            "total supply must grow by minted amount"
+        );
     }
 
     /// After mint + burn, total supply and balance return to zero.
     #[test]
     fn authorized_burn_reduces_supply() {
         let (env, admin, _, mt_id) = setup();
-        let user   = Address::generate(&env);
+        let user = Address::generate(&env);
         let client = MarketTokenClient::new(&env, &mt_id);
 
         client.mint(&admin, &user, &1_000_0000i128);
         assert_eq!(client.total_supply(), 1_000_0000);
 
         client.burn(&user, &1_000_0000i128);
-        assert_eq!(client.balance(&user), 0, "balance must be zero after full burn");
-        assert_eq!(client.total_supply(), 0, "total supply must be zero after full burn");
+        assert_eq!(
+            client.balance(&user),
+            0,
+            "balance must be zero after full burn"
+        );
+        assert_eq!(
+            client.total_supply(),
+            0,
+            "total supply must be zero after full burn"
+        );
     }
 
     /// Role assignment at market creation: verifying that a role granted post-init
@@ -509,7 +572,7 @@ mod tests {
     fn newly_granted_controller_can_mint() {
         let (env, admin, rs_id, mt_id) = setup();
         let handler = Address::generate(&env);
-        let user    = Address::generate(&env);
+        let user = Address::generate(&env);
 
         // Grant CONTROLLER to the handler after initialization
         RsClient::new(&env, &rs_id).grant_role(&admin, &handler, &roles::controller(&env));
@@ -525,7 +588,7 @@ mod tests {
     fn revoked_controller_cannot_mint() {
         let (env, admin, rs_id, mt_id) = setup();
         let handler = Address::generate(&env);
-        let user    = Address::generate(&env);
+        let user = Address::generate(&env);
 
         let rs = RsClient::new(&env, &rs_id);
         rs.grant_role(&admin, &handler, &roles::controller(&env));
