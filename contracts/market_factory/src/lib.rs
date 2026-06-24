@@ -11,15 +11,15 @@
 //!   LP token address = env.deployer().with_address(factory, salt).deployed_address()
 #![no_std]
 
-use soroban_sdk::{
-    contract, contractimpl, contracttype, contracterror, panic_with_error,
-    symbol_short, Address, Bytes, BytesN, Env, String, Vec,
-};
 use gmx_keys::{
-    market_list_key, market_key, roles, token_decimals_key,
-    market_index_token_key, market_long_token_key, market_short_token_key,
+    market_index_token_key, market_key, market_list_key, market_long_token_key,
+    market_short_token_key, roles, token_decimals_key,
 };
 use gmx_types::MarketProps;
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    Bytes, BytesN, Env, String, Vec,
+};
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -27,11 +27,12 @@ use gmx_types::MarketProps;
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    NotInitialized    = 1,
+    NotInitialized = 1,
     AlreadyInitialized = 2,
-    Unauthorized      = 3,
+    Unauthorized = 3,
     MarketAlreadyExists = 4,
-    WasmHashNotSet    = 5,
+    WasmHashNotSet = 5,
+    SingleTokenPoolNotSupported = 6,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -90,20 +91,21 @@ pub struct MarketFactory;
 impl MarketFactory {
     // ── Initializer ──────────────────────────────────────────────────────────
 
-    pub fn initialize(
-        env: Env,
-        admin: Address,
-        role_store: Address,
-        data_store: Address,
-    ) {
+    pub fn initialize(env: Env, admin: Address, role_store: Address, data_store: Address) {
         admin.require_auth();
         if env.storage().instance().has(&InstanceKey::Initialized) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
-        env.storage().instance().set(&InstanceKey::Initialized, &true);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Initialized, &true);
         env.storage().instance().set(&InstanceKey::Admin, &admin);
-        env.storage().instance().set(&InstanceKey::RoleStore, &role_store);
-        env.storage().instance().set(&InstanceKey::DataStore, &data_store);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::RoleStore, &role_store);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::DataStore, &data_store);
     }
 
     // ── Admin: set the wasm hash for market_token ─────────────────────────────
@@ -115,11 +117,14 @@ impl MarketFactory {
         env.storage()
             .instance()
             .set(&InstanceKey::MarketTokenWasmHash, &wasm_hash);
-        env.events().publish((symbol_short!("wasm_set"),), (wasm_hash,));
+        env.events()
+            .publish((symbol_short!("wasm_set"),), (wasm_hash,));
     }
 
     pub fn get_market_token_wasm_hash(env: Env) -> Option<BytesN<32>> {
-        env.storage().instance().get(&InstanceKey::MarketTokenWasmHash)
+        env.storage()
+            .instance()
+            .get(&InstanceKey::MarketTokenWasmHash)
     }
 
     // ── Create market ─────────────────────────────────────────────────────────
@@ -140,6 +145,12 @@ impl MarketFactory {
     ) -> MarketProps {
         caller.require_auth();
         require_market_keeper(&env, &caller);
+
+        // Single-token pools (long == short) require dedicated swap/impact logic
+        // that is not yet implemented. Reject until that work is complete.
+        if long_token == short_token {
+            panic_with_error!(&env, Error::SingleTokenPoolNotSupported);
+        }
 
         let wasm_hash: BytesN<32> = env
             .storage()
@@ -176,21 +187,24 @@ impl MarketFactory {
             panic_with_error!(&env, Error::MarketAlreadyExists);
         }
 
-        // Build LP token name/symbol
-        let name = String::from_str(&env, "GMX Market Token");
+        // Build LP token name/symbol.
+        // Display labels (e.g. "TWBTC/TUSDC") are derived at query time from
+        // the index/long/short addresses stored in data_store, not from this metadata.
+        let name = String::from_str(&env, "SO4 Market Token");
         let symbol = String::from_str(&env, "GM");
 
-        // Deploy market_token contract deterministically
+        // Deploy market_token contract deterministically, then initialize it.
+        // market_token uses the initialize() pattern, not __constructor, so we
+        // use deploy() (no constructor call) followed by an explicit initialize.
         let deployer = env.deployer().with_address(factory, salt);
-        let market_token_address = deployer.deploy_v2(
-            wasm_hash,
-            (
-                env.current_contract_address(), // admin = factory
-                role_store.clone(),
-                7u32,           // Stellar 7-decimal precision
-                name,
-                symbol,
-            ),
+        let market_token_address = deployer.deploy(wasm_hash);
+
+        MarketTokenClient::new(&env, &market_token_address).initialize(
+            &env.current_contract_address(),
+            &role_store,
+            &7u32,
+            &name,
+            &symbol,
         );
 
         let market = MarketProps {
@@ -200,19 +214,35 @@ impl MarketFactory {
             short_token: short_token.clone(),
         };
 
-        // Register in data_store:
+        // Register in data_store using factory's own address as caller.
+        // The factory holds CONTROLLER role; passing the outer caller would
+        // require granting CONTROLLER to every MARKET_KEEPER, which is wrong.
+        let factory = env.current_contract_address();
+
         // 1. Store market existence flag
-        ds_client.set_bool(&caller, &market_key(&env, &market_token_address), &true);
+        ds_client.set_bool(&factory, &market_key(&env, &market_token_address), &true);
         // 2. Store constituent token addresses (so handlers can reconstruct MarketProps)
-        ds_client.set_address(&caller, &market_index_token_key(&env, &market_token_address), &index_token);
-        ds_client.set_address(&caller, &market_long_token_key(&env, &market_token_address), &long_token);
-        ds_client.set_address(&caller, &market_short_token_key(&env, &market_token_address), &short_token);
+        ds_client.set_address(
+            &factory,
+            &market_index_token_key(&env, &market_token_address),
+            &index_token,
+        );
+        ds_client.set_address(
+            &factory,
+            &market_long_token_key(&env, &market_token_address),
+            &long_token,
+        );
+        ds_client.set_address(
+            &factory,
+            &market_short_token_key(&env, &market_token_address),
+            &short_token,
+        );
         // 3. Store token decimals (7 for Stellar standard)
-        ds_client.set_u128(&caller, &token_decimals_key(&env, &long_token), &7u128);
-        ds_client.set_u128(&caller, &token_decimals_key(&env, &short_token), &7u128);
-        ds_client.set_u128(&caller, &token_decimals_key(&env, &index_token), &7u128);
+        ds_client.set_u128(&factory, &token_decimals_key(&env, &long_token), &7u128);
+        ds_client.set_u128(&factory, &token_decimals_key(&env, &short_token), &7u128);
+        ds_client.set_u128(&factory, &token_decimals_key(&env, &index_token), &7u128);
         // 4. Add to market list
-        ds_client.add_address_to_set(&caller, &market_list_key(&env), &market_token_address);
+        ds_client.add_address_to_set(&factory, &market_list_key(&env), &market_token_address);
 
         env.events().publish(
             (symbol_short!("mkt_new"),),
@@ -227,16 +257,36 @@ impl MarketFactory {
         market
     }
 
+    // ── Upgrade ───────────────────────────────────────────────────────────────
+
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        admin.require_auth();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
     // ── Views ─────────────────────────────────────────────────────────────────
 
     pub fn get_market_count(env: Env) -> u32 {
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let ds = DataStoreClient::new(&env, &data_store);
         ds.get_address_set_count(&market_list_key(&env))
     }
 
     pub fn get_markets(env: Env, start: u32, end: u32) -> Vec<Address> {
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let ds = DataStoreClient::new(&env, &data_store);
         ds.get_address_set_at(&market_list_key(&env), &start, &end)
     }
@@ -245,7 +295,11 @@ impl MarketFactory {
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 fn require_admin(env: &Env, caller: &Address) {
-    let admin: Address = env.storage().instance().get(&InstanceKey::Admin).unwrap();
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&InstanceKey::Admin)
+        .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
     if *caller != admin {
         panic_with_error!(env, Error::Unauthorized);
     }
@@ -300,11 +354,11 @@ fn compute_market_salt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
-    use role_store::{RoleStore, RoleStoreClient as RsClient};
     use data_store::{DataStore, DataStoreClient as DsClient};
     #[allow(unused_imports)]
     use market_token::MarketToken;
+    use role_store::{RoleStore, RoleStoreClient as RsClient};
+    use soroban_sdk::{testutils::Address as _, Env};
 
     fn deploy_role_store(env: &Env, admin: &Address) -> Address {
         let id = env.register(RoleStore, ());
@@ -350,5 +404,33 @@ mod tests {
         assert_eq!(client.get_market_count(), 0);
         let markets = client.get_markets(&0, &10);
         assert_eq!(markets.len(), 0);
+    }
+
+    // ── Issue #109: MARKET_KEEPER authorization matrix ────────────────────────
+
+    /// create_market must reject a caller that does not hold MARKET_KEEPER.
+    #[test]
+    #[should_panic]
+    fn create_market_by_non_market_keeper_panics() {
+        let (env, _admin, _rs, _ds, factory_id) = setup();
+        let impostor = Address::generate(&env);
+        // impostor was never granted MARKET_KEEPER — must panic with Unauthorized.
+        let client = MarketFactoryClient::new(&env, &factory_id);
+        let index_tk = Address::generate(&env);
+        let long_tk = Address::generate(&env);
+        let short_tk = Address::generate(&env);
+        let mt = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+        client.create_market(&impostor, &index_tk, &long_tk, &short_tk, &mt);
+    }
+
+    #[test]
+    #[should_panic]
+    fn create_market_rejects_single_token_pool() {
+        let (env, admin, _rs, _ds, factory_id) = setup();
+        let client = MarketFactoryClient::new(&env, &factory_id);
+        let token = Address::generate(&env);
+        let mt = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+
+        client.create_market(&admin, &token, &token, &token, &mt);
     }
 }

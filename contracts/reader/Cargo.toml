@@ -18,3 +18,6 @@ gmx-pricing-utils  = { path = "../../libs/pricing_utils" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+role-store  = { path = "../role_store" }
+data-store  = { path = "../data_store" }
+oracle      = { path = "../oracle", features = ["testutils"] }

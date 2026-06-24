@@ -2006,60 +2006,6 @@
               "key": {
                 "vec": [
                   {
-                    "symbol": "I128"
-                  },
-                  {
-                    "bytes": "99d39f32b1604d2302a4202780e3775b9217fb0833acb0de4e9847df6ac2843e"
-                  }
-                ]
-              },
-              "durability": "persistent",
-              "val": {
-                "i128": "0"
-              }
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 4095
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
-              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
-              "key": {
-                "vec": [
-                  {
-                    "symbol": "I128"
-                  },
-                  {
-                    "bytes": "9c39603409913d6894000e96b8f03af6534291bf51e8cf74b733a087ee26d34c"
-                  }
-                ]
-              },
-              "durability": "persistent",
-              "val": {
-                "i128": "0"
-              }
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 4095
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
-              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
-              "key": {
-                "vec": [
-                  {
                     "symbol": "U128"
                   },
                   {
@@ -2221,7 +2167,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 15
+        "live_until": 120
       },
       {
         "entry": {
@@ -2265,7 +2211,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 15
+        "live_until": 120
       },
       {
         "entry": {
@@ -2309,7 +2255,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 15
+        "live_until": 120
       },
       {
         "entry": {

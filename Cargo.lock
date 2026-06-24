@@ -6,6 +6,9 @@ version = 4
 name = "adl-handler"
 version = "0.1.0"
 dependencies = [
+ "data-store",
+ "deposit-handler",
+ "deposit-vault",
  "gmx-decrease-position-utils",
  "gmx-keys",
  "gmx-market-utils",
@@ -13,7 +16,12 @@ dependencies = [
  "gmx-position-utils",
  "gmx-pricing-utils",
  "gmx-types",
- "soroban-sdk 22.0.11",
+ "market-token",
+ "oracle",
+ "order-handler",
+ "order-vault",
+ "role-store",
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -29,6 +37,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aho-corasick"
+version = "1.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -36,6 +53,18 @@ checksum = "819e7219dbd41043ac279b19830f2efc897156490d7fd6ea916720117ee66311"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "anes"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
+
+[[package]]
+name = "anstyle"
+version = "1.0.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
 name = "arbitrary"
@@ -189,12 +218,6 @@ checksum = "4c7f02d4ea65f2c1853089ffd8d2787bdbc63de2f0d29dedbcf8ccdfa0ccd4cf"
 
 [[package]]
 name = "base64"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
-
-[[package]]
-name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
@@ -248,6 +271,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cast"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
+
+[[package]]
 name = "cc"
 version = "1.2.62"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -287,6 +316,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "ciborium"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42e69ffd6f0917f5c029256a24d0161db17cea3997d185db0d35926308770f0e"
+dependencies = [
+ "ciborium-io",
+ "ciborium-ll",
+ "serde",
+]
+
+[[package]]
+name = "ciborium-io"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05afea1e0a06c9be33d539b876f1ce3692f4afea2cb41f740e7743225ed1c757"
+
+[[package]]
+name = "ciborium-ll"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57663b653d948a338bfb3eeba9bb2fd5fcfaecb9e199e87e1eda4d9e8b240fd9"
+dependencies = [
+ "ciborium-io",
+ "half",
+]
+
+[[package]]
+name = "clap"
+version = "4.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ddb117e43bbf7dacf0a4190fef4d345b9bad68dfc649cb349e7d17d28428e51"
+dependencies = [
+ "clap_builder",
+]
+
+[[package]]
+name = "clap_builder"
+version = "4.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "714a53001bf66416adb0e2ef5ac857140e7dc3a0c48fb28b2f10762fc4b5069f"
+dependencies = [
+ "anstyle",
+ "clap_lex",
+]
+
+[[package]]
+name = "clap_lex"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -319,6 +400,73 @@ dependencies = [
 ]
 
 [[package]]
+name = "criterion"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2b12d017a929603d80db1831cd3a24082f8137ce19c69e6447f54f5fc8d692f"
+dependencies = [
+ "anes",
+ "cast",
+ "ciborium",
+ "clap",
+ "criterion-plot",
+ "is-terminal",
+ "itertools",
+ "num-traits",
+ "once_cell",
+ "oorandom",
+ "plotters",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "tinytemplate",
+ "walkdir",
+]
+
+[[package]]
+name = "criterion-plot"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b50826342786a51a89e2da3a28f1c32b06e387201bc2d19791f622c673706b1"
+dependencies = [
+ "cast",
+ "itertools",
+]
+
+[[package]]
+name = "crossbeam-deque"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-utils"
+version = "0.8.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
+
+[[package]]
+name = "crunchy"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
+
+[[package]]
 name = "crypto-bigint"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -342,13 +490,19 @@ dependencies = [
 
 [[package]]
 name = "ctor"
-version = "0.2.9"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32a2785755761f3ddc1492979ce1e48d2c00d09311c39e4466429188f3dd6501"
+checksum = "67773048316103656a637612c4a62477603b777d91d9c62ff2290f9cde178fdb"
 dependencies = [
- "quote",
- "syn 2.0.117",
+ "ctor-proc-macro",
+ "dtor",
 ]
+
+[[package]]
+name = "ctor-proc-macro"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2931af7e13dc045d8e9d26afccc6fa115d64e115c9c84b1166288b46f6782c2"
 
 [[package]]
 name = "curve25519-dalek"
@@ -460,7 +614,7 @@ dependencies = [
  "gmx-math",
  "gmx-types",
  "role-store",
- "soroban-sdk 22.0.11",
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -477,7 +631,7 @@ dependencies = [
  "market-token",
  "oracle",
  "role-store",
- "soroban-sdk 22.0.11",
+ "soroban-sdk",
  "withdrawal-vault",
 ]
 
@@ -487,7 +641,7 @@ version = "0.1.0"
 dependencies = [
  "gmx-keys",
  "role-store",
- "soroban-sdk 22.0.11",
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -549,6 +703,21 @@ name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
+
+[[package]]
+name = "dtor"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "404d02eeb088a82cfd873006cb713fe411306c7d182c344905e101fb1167d301"
+dependencies = [
+ "dtor-proc-macro",
+]
+
+[[package]]
+name = "dtor-proc-macro"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f678cf4a922c215c63e0de95eb1ff08a958a81d47e485cf9da1e27bf6305cfa5"
 
 [[package]]
 name = "dyn-clone"
@@ -640,17 +809,42 @@ checksum = "40404c3f5f511ec4da6fe866ddf6a717c309fdbb69fbbad7b0f3edab8f2e835f"
 name = "exchange-router"
 version = "0.1.0"
 dependencies = [
+ "data-store",
+ "deposit-handler",
+ "deposit-vault",
+ "gmx-keys",
+ "gmx-math",
  "gmx-types",
- "soroban-sdk 22.0.11",
+ "liquidation-handler",
+ "market-token",
+ "oracle",
+ "order-handler",
+ "order-vault",
+ "role-store",
+ "soroban-sdk",
+ "withdrawal-handler",
+ "withdrawal-vault",
+]
+
+[[package]]
+name = "fee-batch-sweeper"
+version = "0.1.0"
+dependencies = [
+ "fee-handler",
+ "soroban-sdk",
 ]
 
 [[package]]
 name = "fee-handler"
 version = "0.1.0"
 dependencies = [
+ "data-store",
  "gmx-keys",
+ "gmx-math",
  "gmx-types",
- "soroban-sdk 22.0.11",
+ "market-token",
+ "role-store",
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -733,33 +927,43 @@ dependencies = [
 name = "gmx-decrease-position-utils"
 version = "0.1.0"
 dependencies = [
+ "data-store",
  "gmx-keys",
  "gmx-market-utils",
  "gmx-math",
  "gmx-position-utils",
  "gmx-pricing-utils",
+ "gmx-swap-utils",
  "gmx-types",
- "soroban-sdk 22.0.11",
+ "market-token",
+ "oracle",
+ "role-store",
+ "soroban-sdk",
 ]
 
 [[package]]
 name = "gmx-increase-position-utils"
 version = "0.1.0"
 dependencies = [
+ "data-store",
  "gmx-keys",
  "gmx-market-utils",
  "gmx-math",
  "gmx-position-utils",
  "gmx-pricing-utils",
  "gmx-types",
- "soroban-sdk 22.0.11",
+ "market-token",
+ "oracle",
+ "order-vault",
+ "role-store",
+ "soroban-sdk",
 ]
 
 [[package]]
 name = "gmx-keys"
 version = "0.1.0"
 dependencies = [
- "soroban-sdk 22.0.11",
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -771,36 +975,40 @@ dependencies = [
  "gmx-math",
  "gmx-types",
  "role-store",
- "soroban-sdk 22.0.11",
+ "soroban-sdk",
 ]
 
 [[package]]
 name = "gmx-math"
 version = "0.1.0"
 dependencies = [
- "soroban-sdk 22.0.11",
+ "soroban-sdk",
 ]
 
 [[package]]
 name = "gmx-position-utils"
 version = "0.1.0"
 dependencies = [
+ "data-store",
  "gmx-keys",
  "gmx-market-utils",
  "gmx-math",
  "gmx-types",
- "soroban-sdk 22.0.11",
+ "role-store",
+ "soroban-sdk",
 ]
 
 [[package]]
 name = "gmx-pricing-utils"
 version = "0.1.0"
 dependencies = [
+ "data-store",
  "gmx-keys",
  "gmx-market-utils",
  "gmx-math",
  "gmx-types",
- "soroban-sdk 22.0.11",
+ "role-store",
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -812,14 +1020,14 @@ dependencies = [
  "gmx-math",
  "gmx-pricing-utils",
  "gmx-types",
- "soroban-sdk 22.0.11",
+ "soroban-sdk",
 ]
 
 [[package]]
 name = "gmx-types"
 version = "0.1.0"
 dependencies = [
- "soroban-sdk 22.0.11",
+ "soroban-sdk",
  "soroban-token-sdk",
 ]
 
@@ -832,6 +1040,17 @@ dependencies = [
  "ff",
  "rand_core",
  "subtle",
+]
+
+[[package]]
+name = "half"
+version = "2.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
+dependencies = [
+ "cfg-if",
+ "crunchy",
+ "zerocopy",
 ]
 
 [[package]]
@@ -879,6 +1098,12 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hermit-abi"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
 name = "hex"
@@ -964,6 +1189,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e04e2fd2b8188ea827b32ef11de88377086d690286ab35747ef7f9bf3ccb590"
 
 [[package]]
+name = "insurance-fund-router"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
+name = "is-terminal"
+version = "0.4.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
+dependencies = [
+ "hermit-abi",
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
 name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1027,6 +1270,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 name = "liquidation-handler"
 version = "0.1.0"
 dependencies = [
+ "data-store",
  "gmx-decrease-position-utils",
  "gmx-keys",
  "gmx-market-utils",
@@ -1034,7 +1278,12 @@ dependencies = [
  "gmx-position-utils",
  "gmx-pricing-utils",
  "gmx-types",
- "soroban-sdk 22.0.11",
+ "market-token",
+ "oracle",
+ "order-handler",
+ "order-vault",
+ "role-store",
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -1064,7 +1313,7 @@ dependencies = [
  "gmx-types",
  "market-token",
  "role-store",
- "soroban-sdk 22.0.11",
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -1074,7 +1323,17 @@ dependencies = [
  "data-store",
  "gmx-keys",
  "role-store",
- "soroban-sdk 22.0.11",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "market-util-reader"
+version = "0.1.0"
+dependencies = [
+ "gmx-keys",
+ "gmx-market-utils",
+ "gmx-types",
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -1135,6 +1394,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "oorandom"
+version = "11.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
+
+[[package]]
 name = "oracle"
 version = "0.1.0"
 dependencies = [
@@ -1142,14 +1407,25 @@ dependencies = [
  "gmx-keys",
  "gmx-types",
  "role-store",
- "soroban-sdk 22.0.11",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "order-cleanup"
+version = "0.1.0"
+dependencies = [
+ "gmx-types",
+ "soroban-sdk",
 ]
 
 [[package]]
 name = "order-handler"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "data-store",
+ "deposit-handler",
+ "deposit-vault",
  "gmx-decrease-position-utils",
  "gmx-increase-position-utils",
  "gmx-keys",
@@ -1164,7 +1440,7 @@ dependencies = [
  "oracle",
  "order-vault",
  "role-store",
- "soroban-sdk 22.0.11",
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -1173,7 +1449,7 @@ version = "0.1.0"
 dependencies = [
  "gmx-keys",
  "role-store",
- "soroban-sdk 22.0.11",
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -1208,6 +1484,34 @@ checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
 dependencies = [
  "der",
  "spki",
+]
+
+[[package]]
+name = "plotters"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5aeb6f403d7a4911efb1e33402027fc44f29b5bf6def3effcc22d7bb75f2b747"
+dependencies = [
+ "num-traits",
+ "plotters-backend",
+ "plotters-svg",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "plotters-backend"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df42e13c12958a16b3f7f4386b9ab1f3e7933914ecea48da7139435263a4172a"
+
+[[package]]
+name = "plotters-svg"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51bae2ac328883f7acdfea3d66a7c35751187f870bc81f94563733a154d7a670"
+dependencies = [
+ "plotters-backend",
 ]
 
 [[package]]
@@ -1293,16 +1597,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "rayon"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
+dependencies = [
+ "either",
+ "rayon-core",
+]
+
+[[package]]
+name = "rayon-core"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+dependencies = [
+ "crossbeam-deque",
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "reader"
 version = "0.1.0"
 dependencies = [
+ "data-store",
  "gmx-keys",
  "gmx-market-utils",
  "gmx-math",
  "gmx-position-utils",
  "gmx-pricing-utils",
  "gmx-types",
- "soroban-sdk 22.0.11",
+ "oracle",
+ "role-store",
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -1330,8 +1657,37 @@ name = "referral-storage"
 version = "0.1.0"
 dependencies = [
  "gmx-keys",
- "soroban-sdk 22.0.11",
+ "soroban-sdk",
 ]
+
+[[package]]
+name = "regex"
+version = "1.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1292b7759ae1cb9ec195452d1390a074f0cd8541ab7a5a8c31cd6db45d4a6ba"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-automata"
+version = "0.4.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e1dd4122fc1595e8162618945476892eefca7b88c52820e74af6262213cae8f"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-syntax"
+version = "0.8.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rfc6979"
@@ -1350,7 +1706,7 @@ dependencies = [
  "gmx-keys",
  "gmx-math",
  "gmx-types",
- "soroban-sdk 22.0.11",
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -1367,6 +1723,15 @@ name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+
+[[package]]
+name = "same-file"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
+dependencies = [
+ "winapi-util",
+]
 
 [[package]]
 name = "schemars"
@@ -1471,7 +1836,7 @@ version = "3.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e72c1c2cb7b223fafb600a619537a871c2818583d619401b785e7c0b746ccde2"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "bs58",
  "chrono",
  "hex",
@@ -1549,18 +1914,6 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "soroban-builtin-sdk-macros"
-version = "22.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf2e42bf80fcdefb3aae6ff3c7101a62cf942e95320ed5b518a1705bc11c6b2f"
-dependencies = [
- "itertools",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "soroban-builtin-sdk-macros"
 version = "25.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7192e3a5551a7aeee90d2110b11b615798e81951fd8c8293c87ea7f88b0168f5"
@@ -1573,9 +1926,9 @@ dependencies = [
 
 [[package]]
 name = "soroban-env-common"
-version = "22.1.3"
+version = "25.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "027cd856171bfd6ad2c0ffb3b7dfe55ad7080fb3050c36ad20970f80da634472"
+checksum = "bfc49a80a68fc1005847308e63b9fce39874de731940b1807b721d472de3ff01"
 dependencies = [
  "arbitrary",
  "crate-git-revision",
@@ -1583,38 +1936,11 @@ dependencies = [
  "num-derive",
  "num-traits",
  "serde",
- "soroban-env-macros 22.1.3",
+ "soroban-env-macros",
  "soroban-wasmi",
  "static_assertions",
- "stellar-xdr 22.1.0",
+ "stellar-xdr",
  "wasmparser",
-]
-
-[[package]]
-name = "soroban-env-common"
-version = "25.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfc49a80a68fc1005847308e63b9fce39874de731940b1807b721d472de3ff01"
-dependencies = [
- "crate-git-revision",
- "ethnum",
- "num-derive",
- "num-traits",
- "soroban-env-macros 25.0.1",
- "soroban-wasmi",
- "static_assertions",
- "stellar-xdr 25.0.0",
- "wasmparser",
-]
-
-[[package]]
-name = "soroban-env-guest"
-version = "22.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a07dda1ae5220d975979b19ad4fd56bc86ec7ec1b4b25bc1c5d403f934e592e"
-dependencies = [
- "soroban-env-common 22.1.3",
- "static_assertions",
 ]
 
 [[package]]
@@ -1623,44 +1949,8 @@ version = "25.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea2334ba1cfe0a170ab744d96db0b4ca86934de9ff68187ceebc09dc342def55"
 dependencies = [
- "soroban-env-common 25.0.1",
+ "soroban-env-common",
  "static_assertions",
-]
-
-[[package]]
-name = "soroban-env-host"
-version = "22.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66e8b03a4191d485eab03f066336112b2a50541a7553179553dc838b986b94dd"
-dependencies = [
- "ark-bls12-381",
- "ark-ec",
- "ark-ff",
- "ark-serialize",
- "curve25519-dalek",
- "ecdsa",
- "ed25519-dalek",
- "elliptic-curve",
- "generic-array",
- "getrandom",
- "hex-literal",
- "hmac",
- "k256",
- "num-derive",
- "num-integer",
- "num-traits",
- "p256",
- "rand",
- "rand_chacha",
- "sec1",
- "sha2",
- "sha3",
- "soroban-builtin-sdk-macros 22.1.3",
- "soroban-env-common 22.1.3",
- "soroban-wasmi",
- "static_assertions",
- "stellar-strkey 0.0.9",
- "wasmparser",
 ]
 
 [[package]]
@@ -1692,27 +1982,12 @@ dependencies = [
  "sec1",
  "sha2",
  "sha3",
- "soroban-builtin-sdk-macros 25.0.1",
- "soroban-env-common 25.0.1",
+ "soroban-builtin-sdk-macros",
+ "soroban-env-common",
  "soroban-wasmi",
  "static_assertions",
  "stellar-strkey 0.0.13",
  "wasmparser",
-]
-
-[[package]]
-name = "soroban-env-macros"
-version = "22.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00eff744764ade3bc480e4909e3a581a240091f3d262acdce80b41f7069b2bd9"
-dependencies = [
- "itertools",
- "proc-macro2",
- "quote",
- "serde",
- "serde_json",
- "stellar-xdr 22.1.0",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -1726,44 +2001,22 @@ dependencies = [
  "quote",
  "serde",
  "serde_json",
- "stellar-xdr 25.0.0",
+ "stellar-xdr",
  "syn 2.0.117",
 ]
 
 [[package]]
 name = "soroban-ledger-snapshot"
-version = "22.0.11"
+version = "25.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c30035cf1e8f02f65de3e594b6da113ecdaf1cd134d8480961d62568bb15adaf"
+checksum = "2ca06e6c5029d1285e66219cb387a234224e26969ce8ad2bc2d5017e9395d63b"
 dependencies = [
  "serde",
  "serde_json",
  "serde_with",
- "soroban-env-common 22.1.3",
- "soroban-env-host 22.1.3",
+ "soroban-env-common",
+ "soroban-env-host",
  "thiserror",
-]
-
-[[package]]
-name = "soroban-sdk"
-version = "22.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff18e8d7ca6d5340a211605ca2c86383bd4dfacc4f8253d72a1573974ffffe69"
-dependencies = [
- "arbitrary",
- "bytes-lit",
- "ctor",
- "derive_arbitrary",
- "ed25519-dalek",
- "rand",
- "rustc_version",
- "serde",
- "serde_json",
- "soroban-env-guest 22.1.3",
- "soroban-env-host 22.1.3",
- "soroban-ledger-snapshot",
- "soroban-sdk-macros 22.0.11",
- "stellar-strkey 0.0.9",
 ]
 
 [[package]]
@@ -1772,37 +2025,22 @@ version = "25.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4502f2e018f238a4c5d3212d7d20ea6abcdc6e58babd63b642b693739db30fd1"
 dependencies = [
+ "arbitrary",
  "bytes-lit",
  "crate-git-revision",
+ "ctor",
+ "derive_arbitrary",
+ "ed25519-dalek",
  "rand",
  "rustc_version",
  "serde",
  "serde_json",
- "soroban-env-guest 25.0.1",
- "soroban-env-host 25.0.1",
- "soroban-sdk-macros 25.3.1",
+ "soroban-env-guest",
+ "soroban-env-host",
+ "soroban-ledger-snapshot",
+ "soroban-sdk-macros",
  "stellar-strkey 0.0.16",
  "visibility",
-]
-
-[[package]]
-name = "soroban-sdk-macros"
-version = "22.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42b205cd86b34d530db87667bd287fbb194166d79b368227fd842110a914fde8"
-dependencies = [
- "crate-git-revision",
- "darling 0.20.11",
- "itertools",
- "proc-macro2",
- "quote",
- "rustc_version",
- "sha2",
- "soroban-env-common 22.1.3",
- "soroban-spec 22.0.11",
- "soroban-spec-rust 22.0.11",
- "stellar-xdr 22.1.0",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -1818,23 +2056,11 @@ dependencies = [
  "proc-macro2",
  "quote",
  "sha2",
- "soroban-env-common 25.0.1",
- "soroban-spec 25.3.1",
- "soroban-spec-rust 25.3.1",
- "stellar-xdr 25.0.0",
+ "soroban-env-common",
+ "soroban-spec",
+ "soroban-spec-rust",
+ "stellar-xdr",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "soroban-spec"
-version = "22.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb6a16f2de28852c759f4da5f28cda54ec0d8dfa4c0e6e8cb3495234a72b0cea"
-dependencies = [
- "base64 0.13.1",
- "stellar-xdr 22.1.0",
- "thiserror",
- "wasmparser",
 ]
 
 [[package]]
@@ -1843,27 +2069,11 @@ version = "25.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa02e07f507cc27406ae0834db4dcf309b78c4cc8776eb3b2d662d66e8859d25"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "sha2",
- "stellar-xdr 25.0.0",
+ "stellar-xdr",
  "thiserror",
  "wasmparser",
-]
-
-[[package]]
-name = "soroban-spec-rust"
-version = "22.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdc6db5902ab21290dddf63fec4ee95703fe59891a947646e7b8607536f043fc"
-dependencies = [
- "prettyplease",
- "proc-macro2",
- "quote",
- "sha2",
- "soroban-spec 22.0.11",
- "stellar-xdr 22.1.0",
- "syn 2.0.117",
- "thiserror",
 ]
 
 [[package]]
@@ -1876,8 +2086,8 @@ dependencies = [
  "proc-macro2",
  "quote",
  "sha2",
- "soroban-spec 25.3.1",
- "stellar-xdr 25.0.0",
+ "soroban-spec",
+ "stellar-xdr",
  "syn 2.0.117",
  "thiserror",
 ]
@@ -1888,7 +2098,7 @@ version = "25.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8230fe7cf1bf138068cbe5cfa54a76657bed8a9bb6a89a4a229383116d3f067"
 dependencies = [
- "soroban-sdk 25.3.1",
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -1934,17 +2144,6 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stellar-strkey"
-version = "0.0.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e3aa3ed00e70082cb43febc1c2afa5056b9bb3e348bbb43d0cd0aa88a611144"
-dependencies = [
- "crate-git-revision",
- "data-encoding",
- "thiserror",
-]
-
-[[package]]
-name = "stellar-strkey"
 version = "0.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee1832fb50c651ad10f734aaf5d31ca5acdfb197a6ecda64d93fcdb8885af913"
@@ -1966,27 +2165,12 @@ dependencies = [
 
 [[package]]
 name = "stellar-xdr"
-version = "22.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ce69db907e64d1e70a3dce8d4824655d154749426a6132b25395c49136013e4"
-dependencies = [
- "arbitrary",
- "base64 0.13.1",
- "crate-git-revision",
- "escape-bytes",
- "hex",
- "serde",
- "serde_with",
- "stellar-strkey 0.0.9",
-]
-
-[[package]]
-name = "stellar-xdr"
 version = "25.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10d20dafed80076b227d4b17c0c508a4bbc4d5e4c3d4c1de7cd42242df4b1eaf"
 dependencies = [
- "base64 0.22.1",
+ "arbitrary",
+ "base64",
  "cfg_eval",
  "crate-git-revision",
  "escape-bytes",
@@ -2030,6 +2214,21 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "test-faucet"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+ "test-token",
+]
+
+[[package]]
+name = "test-token"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -2084,6 +2283,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinytemplate"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be4d6b5f19ff7664e8c98d03e2139cb510db9b0a60b55f8e8709b689d939b6bc"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tinyvec"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2125,6 +2334,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "walkdir"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
+dependencies = [
+ "same-file",
+ "winapi-util",
 ]
 
 [[package]]
@@ -2216,6 +2435,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "web-sys"
+version = "0.3.98"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b572dff8bcf38bad0fa19729c89bb5748b2b9b1d8be70cf90df697e3a8f32aa"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "winapi-util"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
+dependencies = [
+ "windows-sys",
+]
+
+[[package]]
 name = "windows-core"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2275,6 +2513,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-sys"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+dependencies = [
+ "windows-link",
+]
+
+[[package]]
 name = "withdrawal-handler"
 version = "0.1.0"
 dependencies = [
@@ -2288,7 +2535,7 @@ dependencies = [
  "market-token",
  "oracle",
  "role-store",
- "soroban-sdk 22.0.11",
+ "soroban-sdk",
  "withdrawal-vault",
 ]
 
@@ -2298,7 +2545,7 @@ version = "0.1.0"
 dependencies = [
  "gmx-keys",
  "role-store",
- "soroban-sdk 22.0.11",
+ "soroban-sdk",
 ]
 
 [[package]]

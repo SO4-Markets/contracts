@@ -7,6 +7,9 @@ publish = false
 [lib]
 crate-type = ["cdylib", "lib"]
 
+[features]
+testutils = []
+
 [dependencies]
 soroban-sdk = { workspace = true }
 gmx-types = { path = "../../libs/types" }

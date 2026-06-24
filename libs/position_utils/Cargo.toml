@@ -14,4 +14,6 @@ gmx-keys         = { path = "../keys" }
 gmx-market-utils = { path = "../market_utils" }
 
 [dev-dependencies]
-soroban-sdk = { workspace = true, features = ["testutils"] }
+soroban-sdk  = { workspace = true, features = ["testutils"] }
+role-store   = { path = "../../contracts/role_store" }
+data-store   = { path = "../../contracts/data_store" }

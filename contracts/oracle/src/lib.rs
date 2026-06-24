@@ -17,12 +17,12 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use soroban_sdk::{
-    contract, contractimpl, contracttype, contracterror, panic_with_error,
-    symbol_short, Address, Bytes, BytesN, Env, Vec,
-};
+use gmx_keys::{keeper_public_key_prefix, stable_price_key};
 use gmx_types::{PriceProps, TokenPrice};
-use gmx_keys::{stable_price_key, keeper_public_key_prefix};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    Bytes, BytesN, Env, Vec,
+};
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -30,14 +30,14 @@ use gmx_keys::{stable_price_key, keeper_public_key_prefix};
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    NotInitialized      = 1,
-    AlreadyInitialized  = 2,
-    Unauthorized        = 3,
-    InvalidPrice        = 4,       // min > max or zero
-    StalePrice          = 5,       // timestamp too old
-    PriceNotFound       = 6,
-    InvalidSignature    = 7,
-    NoKeepers           = 8,
+    NotInitialized = 1,
+    AlreadyInitialized = 2,
+    Unauthorized = 3,
+    InvalidPrice = 4, // min > max or zero
+    StalePrice = 5,   // timestamp too old
+    PriceNotFound = 6,
+    InvalidSignature = 7,
+    NoKeepers = 8,
 }
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
@@ -56,12 +56,22 @@ enum TempKey {
     Price(Address),
 }
 
+/// Ledgers to keep a submitted price readable in temporary storage.
+///
+/// `set_prices` and `execute_*` run in **separate** transactions, and a keeper
+/// may drain a batch of pending orders one-by-one after a single price set.
+/// Bumping the temp TTL keeps prices readable across that window so later
+/// executions in the batch don't revert with `PriceNotFound`. Kept short so
+/// prices remain ephemeral (≈10 min at ~5s/ledger), in line with the 300s /
+/// 60-ledger freshness window enforced at submission time.
+const PRICE_TTL_LEDGERS: u32 = 120;
+
 // ─── Signed price submitted by keeper ────────────────────────────────────────
 
 /// One signed price attestation from a keeper.
 #[contracttype]
 pub struct SignedPrice {
-    pub token:     Address,
+    pub token: Address,
     pub min_price: i128,
     pub max_price: i128,
     pub timestamp: u64,
@@ -69,6 +79,9 @@ pub struct SignedPrice {
     pub signature: BytesN<64>,
     /// Index of the keeper's public key in data_store (0-based)
     pub keeper_index: u32,
+    /// Ledger sequence at which the keeper signed this price.
+    /// Must be within LEDGER_SEQ_WINDOW of the current ledger.
+    pub ledger_seq: u32,
 }
 
 // ─── Cross-contract clients ───────────────────────────────────────────────────
@@ -106,11 +119,31 @@ impl Oracle {
         if env.storage().instance().has(&InstanceKey::Initialized) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
-        env.storage().instance().set(&InstanceKey::Initialized, &true);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Initialized, &true);
         env.storage().instance().set(&InstanceKey::Admin, &admin);
-        env.storage().instance().set(&InstanceKey::RoleStore, &role_store);
-        env.storage().instance().set(&InstanceKey::DataStore, &data_store);
-        env.storage().instance().set(&InstanceKey::NetworkPassphrase, &network_passphrase);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::RoleStore, &role_store);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::DataStore, &data_store);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::NetworkPassphrase, &network_passphrase);
+    }
+
+    // ── Upgrade ──────────────────────────────────────────────────────────────
+
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        admin.require_auth();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
     // ── Keeper price submission ───────────────────────────────────────────────
@@ -123,9 +156,19 @@ impl Oracle {
         caller.require_auth();
         require_order_keeper(&env, &caller);
 
-        let passphrase: Bytes = env.storage().instance().get(&InstanceKey::NetworkPassphrase).unwrap();
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
-        let ledger_seq = env.ledger().sequence();
+        let passphrase: Bytes = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::NetworkPassphrase)
+            .unwrap();
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap();
+        // Allow prices signed up to ~5 minutes ago (5s/ledger × 60 = 60 ledgers).
+        const LEDGER_SEQ_WINDOW: u32 = 60;
+        let current_seq = env.ledger().sequence();
 
         for i in 0..prices.len() {
             let sp = prices.get(i).unwrap();
@@ -142,42 +185,42 @@ impl Oracle {
                 panic_with_error!(&env, Error::StalePrice);
             }
 
-            // Verify ed25519 signature
+            // keeper_ledger_seq must be within LEDGER_SEQ_WINDOW of current
+            if sp.ledger_seq > current_seq
+                || current_seq.saturating_sub(sp.ledger_seq) > LEDGER_SEQ_WINDOW
+            {
+                panic_with_error!(&env, Error::StalePrice);
+            }
+
+            // Verify ed25519 signature using the keeper-provided ledger_seq
             let msg = build_price_message(
-                &env, &passphrase, ledger_seq,
-                &sp.token, sp.min_price, sp.max_price, sp.timestamp,
+                &env,
+                &passphrase,
+                sp.ledger_seq,
+                &sp.token,
+                sp.min_price,
+                sp.max_price,
+                sp.timestamp,
             );
             let pubkey = get_keeper_pubkey(&env, &data_store, sp.keeper_index);
             // ed25519_verify takes (&BytesN<32> pubkey, &Bytes message, &BytesN<64> sig)
             env.crypto().ed25519_verify(&pubkey, &msg, &sp.signature);
 
-            // Store in temporary storage (expires at end of current ledger TTL)
-            let price = PriceProps { min: sp.min_price, max: sp.max_price };
-            env.storage().temporary().set(&TempKey::Price(sp.token.clone()), &price);
+            // Store in temporary storage and bump its TTL so the price survives
+            // the keeper's set_prices → execute_* batch window (see PRICE_TTL_LEDGERS).
+            let price = PriceProps {
+                min: sp.min_price,
+                max: sp.max_price,
+            };
+            let price_key = TempKey::Price(sp.token.clone());
+            env.storage().temporary().set(&price_key, &price);
+            env.storage()
+                .temporary()
+                .extend_ttl(&price_key, PRICE_TTL_LEDGERS, PRICE_TTL_LEDGERS);
         }
 
-        env.events().publish(
-            (symbol_short!("prices"),),
-            (caller, prices.len()),
-        );
-    }
-
-    /// Submit prices without signature verification.
-    ///
-    /// Simpler path: caller must have ORDER_KEEPER role, no ed25519 required.
-    /// Suitable for local/test environments where keepers are fully trusted.
-    pub fn set_prices_simple(env: Env, caller: Address, prices: Vec<TokenPrice>) {
-        caller.require_auth();
-        require_order_keeper(&env, &caller);
-
-        for i in 0..prices.len() {
-            let tp = prices.get(i).unwrap();
-            if tp.min <= 0 || tp.max <= 0 || tp.min > tp.max {
-                panic_with_error!(&env, Error::InvalidPrice);
-            }
-            let price = PriceProps { min: tp.min, max: tp.max };
-            env.storage().temporary().set(&TempKey::Price(tp.token.clone()), &price);
-        }
+        env.events()
+            .publish((symbol_short!("prices"),), (caller, prices.len()));
     }
 
     // ── Price reads ───────────────────────────────────────────────────────────
@@ -206,7 +249,11 @@ impl Oracle {
             .unwrap();
         let key = stable_price_key(&env, &token);
         let price = DataStoreClient::new(&env, &data_store).get_u128(&key) as i128;
-        if price == 0 { None } else { Some(price) }
+        if price == 0 {
+            None
+        } else {
+            Some(price)
+        }
     }
 
     /// Convenience: returns stable price if available, otherwise primary price.
@@ -219,7 +266,10 @@ impl Oracle {
         let key = stable_price_key(&env, &token);
         let stable = DataStoreClient::new(&env, &data_store).get_u128(&key) as i128;
         if stable > 0 {
-            return PriceProps { min: stable, max: stable };
+            return PriceProps {
+                min: stable,
+                max: stable,
+            };
         }
         env.storage()
             .temporary()
@@ -243,6 +293,42 @@ impl Oracle {
         for i in 0..tokens.len() {
             let token = tokens.get(i).unwrap();
             env.storage().temporary().remove(&TempKey::Price(token));
+        }
+    }
+}
+
+// ─── Test-only price submission ────────────────────────────────────────────────
+//
+// Kept in a separate, feature-gated `#[contractimpl]` block so the generated
+// invoke wrapper is also gated. Inlining a `#[cfg(...)]` method in the main impl
+// makes the macro emit a wrapper that references the stripped fn in non-test
+// builds, which fails to compile under the current SDK.
+
+#[cfg(any(test, feature = "testutils"))]
+#[contractimpl]
+impl Oracle {
+    /// Submit prices without signature verification.
+    ///
+    /// Simpler path: caller must have ORDER_KEEPER role, no ed25519 required.
+    /// Suitable for local/test environments where keepers are fully trusted.
+    pub fn set_prices_simple(env: Env, caller: Address, prices: Vec<TokenPrice>) {
+        caller.require_auth();
+        require_order_keeper(&env, &caller);
+
+        for i in 0..prices.len() {
+            let tp = prices.get(i).unwrap();
+            if tp.min <= 0 || tp.max <= 0 || tp.min > tp.max {
+                panic_with_error!(&env, Error::InvalidPrice);
+            }
+            let price = PriceProps {
+                min: tp.min,
+                max: tp.max,
+            };
+            let price_key = TempKey::Price(tp.token.clone());
+            env.storage().temporary().set(&price_key, &price);
+            env.storage()
+                .temporary()
+                .extend_ttl(&price_key, PRICE_TTL_LEDGERS, PRICE_TTL_LEDGERS);
         }
     }
 }
@@ -311,10 +397,10 @@ fn build_price_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
-    use role_store::{RoleStore, RoleStoreClient as RsClient};
     use data_store::{DataStore, DataStoreClient as DsClient};
     use gmx_keys::roles;
+    use role_store::{RoleStore, RoleStoreClient as RsClient};
+    use soroban_sdk::{testutils::Address as _, Env};
 
     fn setup(env: &Env) -> (Address, Address, Address, Address) {
         let admin = Address::generate(env);
@@ -344,11 +430,14 @@ mod tests {
         let client = OracleClient::new(&env, &oracle_id);
 
         let token = Address::generate(&env);
-        let prices = Vec::from_array(&env, [TokenPrice {
-            token: token.clone(),
-            min: 2_000_000_000_000_000_000_000_000_000_000_000i128, // $2000 (FLOAT_PRECISION)
-            max: 2_001_000_000_000_000_000_000_000_000_000_000i128,
-        }]);
+        let prices = Vec::from_array(
+            &env,
+            [TokenPrice {
+                token: token.clone(),
+                min: 2_000_000_000_000_000_000_000_000_000_000_000i128, // $2000 (FLOAT_PRECISION)
+                max: 2_001_000_000_000_000_000_000_000_000_000_000i128,
+            }],
+        );
 
         client.set_prices_simple(&admin, &prices);
 
@@ -390,11 +479,14 @@ mod tests {
 
         let token = Address::generate(&env);
         // min > max → invalid
-        let prices = Vec::from_array(&env, [TokenPrice {
-            token,
-            min: 1_000,
-            max: 500,
-        }]);
+        let prices = Vec::from_array(
+            &env,
+            [TokenPrice {
+                token,
+                min: 1_000,
+                max: 500,
+            }],
+        );
         client.set_prices_simple(&admin, &prices);
     }
 
@@ -406,11 +498,14 @@ mod tests {
         let client = OracleClient::new(&env, &oracle_id);
 
         let token = Address::generate(&env);
-        let prices = Vec::from_array(&env, [TokenPrice {
-            token: token.clone(),
-            min: 1_000_000_000_000_000_000_000_000_000_000i128,
-            max: 1_001_000_000_000_000_000_000_000_000_000i128,
-        }]);
+        let prices = Vec::from_array(
+            &env,
+            [TokenPrice {
+                token: token.clone(),
+                min: 1_000_000_000_000_000_000_000_000_000_000i128,
+                max: 1_001_000_000_000_000_000_000_000_000_000i128,
+            }],
+        );
 
         client.set_prices_simple(&admin, &prices);
         assert!(client.try_get_price(&token).is_some());
@@ -430,16 +525,31 @@ mod tests {
         let btc = Address::generate(&env);
         let usdc = Address::generate(&env);
 
-        let prices = Vec::from_array(&env, [
-            TokenPrice { token: eth.clone(),  min: 2_000 * 10i128.pow(30), max: 2_001 * 10i128.pow(30) },
-            TokenPrice { token: btc.clone(),  min: 60_000 * 10i128.pow(30), max: 60_010 * 10i128.pow(30) },
-            TokenPrice { token: usdc.clone(), min: 10i128.pow(30), max: 10i128.pow(30) },
-        ]);
+        let prices = Vec::from_array(
+            &env,
+            [
+                TokenPrice {
+                    token: eth.clone(),
+                    min: 2_000 * 10i128.pow(30),
+                    max: 2_001 * 10i128.pow(30),
+                },
+                TokenPrice {
+                    token: btc.clone(),
+                    min: 60_000 * 10i128.pow(30),
+                    max: 60_010 * 10i128.pow(30),
+                },
+                TokenPrice {
+                    token: usdc.clone(),
+                    min: 10i128.pow(30),
+                    max: 10i128.pow(30),
+                },
+            ],
+        );
 
         client.set_prices_simple(&admin, &prices);
 
-        assert_eq!(client.get_primary_price(&eth).min,  2_000 * 10i128.pow(30));
-        assert_eq!(client.get_primary_price(&btc).min,  60_000 * 10i128.pow(30));
+        assert_eq!(client.get_primary_price(&eth).min, 2_000 * 10i128.pow(30));
+        assert_eq!(client.get_primary_price(&btc).min, 60_000 * 10i128.pow(30));
         assert_eq!(client.get_primary_price(&usdc).min, 10i128.pow(30));
     }
 }

@@ -14,21 +14,17 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use soroban_sdk::{
-    contract, contractimpl, contracttype, contracterror, panic_with_error,
-    symbol_short, token, Address, BytesN, Env,
-};
-use gmx_types::{WithdrawalProps, MarketProps};
-pub use gmx_types::CreateWithdrawalParams;
-use gmx_math::mul_div_wide;
 use gmx_keys::{
-    roles,
-    withdrawal_key, withdrawal_list_key, account_withdrawal_list_key,
-    market_index_token_key, market_long_token_key, market_short_token_key,
+    account_withdrawal_list_key, market_index_token_key, market_long_token_key,
+    market_short_token_key, roles, withdrawal_key, withdrawal_list_key,
 };
-use gmx_market_utils::{
-    get_pool_amount, apply_delta_to_pool_amount,
-    update_funding_state, update_cumulative_borrowing_factor,
+use gmx_market_utils::{apply_delta_to_pool_amount, get_pool_amount};
+use gmx_math::mul_div_wide;
+pub use gmx_types::CreateWithdrawalParams;
+use gmx_types::{MarketProps, WithdrawalProps};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
+    Address, BytesN, Env,
 };
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -37,13 +33,15 @@ use gmx_market_utils::{
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    AlreadyInitialized   = 1,
-    NotInitialized       = 2,
-    Unauthorized         = 3,
-    WithdrawalNotFound   = 4,
-    InsufficientLongOut  = 5,
+    AlreadyInitialized = 1,
+    NotInitialized = 2,
+    Unauthorized = 3,
+    WithdrawalNotFound = 4,
+    InsufficientLongOut = 5,
     InsufficientShortOut = 6,
-    ZeroWithdrawal       = 7,
+    ZeroWithdrawal = 7,
+    InvalidMarket = 8,
+    InvalidReceiver = 9,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -62,6 +60,10 @@ enum InstanceKey {
 enum LocalKey {
     Withdrawal(BytesN<32>),
 }
+// WithdrawalProps are stored in this contract's own persistent storage (not DataStore)
+// because DataStore supports only primitive/set types, not arbitrary structs.
+// DataStore holds only the index sets (withdrawal_list_key, account_withdrawal_list_key)
+// for enumeration. This matches the deposit and order handler patterns (issue #24).
 
 // ─── Cross-contract clients ───────────────────────────────────────────────────
 
@@ -83,6 +85,7 @@ trait IDataStore {
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
     fn add_bytes32_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
     fn remove_bytes32_from_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
+    fn contains_bytes32(env: Env, set_key: BytesN<32>, value: BytesN<32>) -> bool;
     fn increment_nonce(env: Env, caller: Address) -> u64;
 }
 
@@ -103,7 +106,13 @@ trait IWithdrawalVault {
 trait IMarketToken {
     fn burn(env: Env, from: Address, amount: i128);
     fn total_supply(env: Env) -> i128;
-    fn withdraw_from_pool(env: Env, caller: Address, pool_token: Address, receiver: Address, amount: i128);
+    fn withdraw_from_pool(
+        env: Env,
+        caller: Address,
+        pool_token: Address,
+        receiver: Address,
+        amount: i128,
+    );
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -127,54 +136,119 @@ impl WithdrawalHandler {
         if env.storage().instance().has(&InstanceKey::Initialized) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
-        env.storage().instance().set(&InstanceKey::Initialized, &true);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Initialized, &true);
         env.storage().instance().set(&InstanceKey::Admin, &admin);
-        env.storage().instance().set(&InstanceKey::RoleStore, &role_store);
-        env.storage().instance().set(&InstanceKey::DataStore, &data_store);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::RoleStore, &role_store);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::DataStore, &data_store);
         env.storage().instance().set(&InstanceKey::Oracle, &oracle);
-        env.storage().instance().set(&InstanceKey::WithdrawalVault, &withdrawal_vault);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::WithdrawalVault, &withdrawal_vault);
+    }
+
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        admin.require_auth();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    pub fn update_oracle(env: Env, caller: Address, new_oracle: Address) {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if caller != admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        env.storage().instance().set(&InstanceKey::Oracle, &new_oracle);
     }
 
     // ── Create withdrawal ─────────────────────────────────────────────────────
 
     /// Pull LP tokens from caller into the withdrawal_vault and record the withdrawal.
-    pub fn create_withdrawal(env: Env, caller: Address, params: CreateWithdrawalParams) -> BytesN<32> {
+    pub fn create_withdrawal(
+        env: Env,
+        caller: Address,
+        params: CreateWithdrawalParams,
+    ) -> BytesN<32> {
         caller.require_auth();
 
-        if params.market_token_amount == 0 {
+        // ── Input validation (issue #39) ──────────────────────────────────────
+        if params.market_token_amount <= 0 {
             panic_with_error!(&env, Error::ZeroWithdrawal);
         }
+        // Receiver must not be the zero/contract address — use the contract itself
+        // as a sentinel: a real receiver must differ from the handler.
+        if params.receiver == env.current_contract_address() {
+            panic_with_error!(&env, Error::InvalidReceiver);
+        }
 
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
-        let withdrawal_vault: Address = env.storage().instance().get(&InstanceKey::WithdrawalVault).unwrap();
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let withdrawal_vault: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::WithdrawalVault)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
         let ds = DataStoreClient::new(&env, &data_store);
 
+        // Validate that the market token is a known market (index token must exist)
+        if ds
+            .get_address(&gmx_keys::market_index_token_key(&env, &params.market))
+            .is_none()
+        {
+            panic_with_error!(&env, Error::InvalidMarket);
+        }
+
         // Pull LP tokens from caller → withdrawal_vault
         let market_addr = params.market.clone();
-        token::Client::new(&env, &params.market)
-            .transfer(&caller, &withdrawal_vault, &params.market_token_amount);
+        token::Client::new(&env, &params.market).transfer(
+            &caller,
+            &withdrawal_vault,
+            &params.market_token_amount,
+        );
 
         // Allocate withdrawal key from nonce
         let nonce = ds.increment_nonce(&handler);
         let key = withdrawal_key(&env, nonce);
 
         let withdrawal = WithdrawalProps {
-            account:               caller.clone(),
-            receiver:              params.receiver,
-            market:                params.market,
-            market_token_amount:   params.market_token_amount,
+            account: caller.clone(),
+            receiver: params.receiver,
+            market: params.market,
+            market_token_amount: params.market_token_amount,
             min_long_token_amount: params.min_long_token_amount,
             min_short_token_amount: params.min_short_token_amount,
-            execution_fee:         params.execution_fee,
-            updated_at_time:       env.ledger().timestamp(),
+            execution_fee: params.execution_fee,
+            updated_at_time: env.ledger().timestamp(),
         };
-        env.storage().persistent().set(&LocalKey::Withdrawal(key.clone()), &withdrawal);
+        env.storage()
+            .persistent()
+            .set(&LocalKey::Withdrawal(key.clone()), &withdrawal);
 
         ds.add_bytes32_to_set(&handler, &withdrawal_list_key(&env), &key);
         ds.add_bytes32_to_set(&handler, &account_withdrawal_list_key(&env, &caller), &key);
 
-        env.events().publish((symbol_short!("wth_crt"),), (key.clone(), caller, market_addr));
+        env.events().publish(
+            (symbol_short!("wth_crt"),),
+            (key.clone(), caller, market_addr),
+        );
         key
     }
 
@@ -185,35 +259,35 @@ impl WithdrawalHandler {
         keeper.require_auth();
         require_order_keeper(&env, &keeper);
 
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore)
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        let withdrawal_vault: Address = env.storage().instance().get(&InstanceKey::WithdrawalVault)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        let oracle: Address = env.storage().instance().get(&InstanceKey::Oracle)
+        let withdrawal_vault: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::WithdrawalVault)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
 
-        let withdrawal: WithdrawalProps = env.storage().persistent()
+        let withdrawal: WithdrawalProps = env
+            .storage()
+            .persistent()
             .get(&LocalKey::Withdrawal(key.clone()))
             .unwrap_or_else(|| panic_with_error!(&env, Error::WithdrawalNotFound));
 
         let market = load_market_props(&env, &data_store, &withdrawal.market);
 
-        // Read oracle prices
-        let oracle_client = OracleClient::new(&env, &oracle);
-        let long_price   = oracle_client.get_primary_price(&market.long_token).mid_price();
-        let short_price  = oracle_client.get_primary_price(&market.short_token).mid_price();
-        let _index_price = oracle_client.get_primary_price(&market.index_token).mid_price();
-
         let mt_client = MarketTokenClient::new(&env, &market.market_token);
         let total_supply = mt_client.total_supply();
 
         // Pro-rata pool amounts:  out = pool_amount × lp_amount / total_supply
-        let long_pool  = get_pool_amount(&env, &data_store, &market, &market.long_token) as i128;
+        let long_pool = get_pool_amount(&env, &data_store, &market, &market.long_token) as i128;
         let short_pool = get_pool_amount(&env, &data_store, &market, &market.short_token) as i128;
-        let lp_amount  = withdrawal.market_token_amount;
+        let lp_amount = withdrawal.market_token_amount;
 
-        let long_out  = mul_div_wide(&env, long_pool,  lp_amount, total_supply);
+        let long_out = mul_div_wide(&env, long_pool, lp_amount, total_supply);
         let short_out = mul_div_wide(&env, short_pool, lp_amount, total_supply);
 
         if long_out < withdrawal.min_long_token_amount {
@@ -224,25 +298,47 @@ impl WithdrawalHandler {
         }
 
         // Burn LP tokens from vault
-        WithdrawalVaultClient::new(&env, &withdrawal_vault)
-            .transfer_out(&handler, &market.market_token, &handler, &lp_amount);
+        WithdrawalVaultClient::new(&env, &withdrawal_vault).transfer_out(
+            &handler,
+            &market.market_token,
+            &handler,
+            &lp_amount,
+        );
         mt_client.burn(&handler, &lp_amount);
 
         // Transfer pool tokens from market_token contract → receiver
         if long_out > 0 {
-            mt_client.withdraw_from_pool(&handler, &market.long_token, &withdrawal.receiver, &long_out);
-            apply_delta_to_pool_amount(&env, &data_store, &handler, &market, &market.long_token, -long_out);
+            mt_client.withdraw_from_pool(
+                &handler,
+                &market.long_token,
+                &withdrawal.receiver,
+                &long_out,
+            );
+            apply_delta_to_pool_amount(
+                &env,
+                &data_store,
+                &handler,
+                &market,
+                &market.long_token,
+                -long_out,
+            );
         }
         if short_out > 0 {
-            mt_client.withdraw_from_pool(&handler, &market.short_token, &withdrawal.receiver, &short_out);
-            apply_delta_to_pool_amount(&env, &data_store, &handler, &market, &market.short_token, -short_out);
+            mt_client.withdraw_from_pool(
+                &handler,
+                &market.short_token,
+                &withdrawal.receiver,
+                &short_out,
+            );
+            apply_delta_to_pool_amount(
+                &env,
+                &data_store,
+                &handler,
+                &market,
+                &market.short_token,
+                -short_out,
+            );
         }
-
-        // Update market state
-        let now = env.ledger().timestamp();
-        update_funding_state(&env, &data_store, &handler, &market, long_price, short_price, now);
-        update_cumulative_borrowing_factor(&env, &data_store, &handler, &market, true, now);
-        update_cumulative_borrowing_factor(&env, &data_store, &handler, &market, false, now);
 
         remove_withdrawal(&env, &data_store, &handler, &key, &withdrawal.account);
 
@@ -257,31 +353,47 @@ impl WithdrawalHandler {
     pub fn cancel_withdrawal(env: Env, caller: Address, key: BytesN<32>) {
         caller.require_auth();
 
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore)
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        let withdrawal_vault: Address = env.storage().instance().get(&InstanceKey::WithdrawalVault)
+        let withdrawal_vault: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::WithdrawalVault)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        let role_store: Address = env.storage().instance().get(&InstanceKey::RoleStore)
+        let role_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::RoleStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
 
-        let withdrawal: WithdrawalProps = env.storage().persistent()
+        let withdrawal: WithdrawalProps = env
+            .storage()
+            .persistent()
             .get(&LocalKey::Withdrawal(key.clone()))
             .unwrap_or_else(|| panic_with_error!(&env, Error::WithdrawalNotFound));
 
-        let is_keeper = RoleStoreClient::new(&env, &role_store)
-            .has_role(&caller, &roles::order_keeper(&env));
+        let is_keeper =
+            RoleStoreClient::new(&env, &role_store).has_role(&caller, &roles::order_keeper(&env));
         if caller != withdrawal.account && !is_keeper {
             panic_with_error!(&env, Error::Unauthorized);
         }
 
         // Refund LP tokens
-        WithdrawalVaultClient::new(&env, &withdrawal_vault)
-            .transfer_out(&handler, &withdrawal.market, &withdrawal.account, &withdrawal.market_token_amount);
+        WithdrawalVaultClient::new(&env, &withdrawal_vault).transfer_out(
+            &handler,
+            &withdrawal.market,
+            &withdrawal.account,
+            &withdrawal.market_token_amount,
+        );
 
         remove_withdrawal(&env, &data_store, &handler, &key, &withdrawal.account);
 
-        env.events().publish((symbol_short!("wth_can"),), (key, withdrawal.account));
+        env.events()
+            .publish((symbol_short!("wth_can"),), (key, withdrawal.account));
     }
 
     // ── Views ─────────────────────────────────────────────────────────────────
@@ -294,7 +406,10 @@ impl WithdrawalHandler {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn require_order_keeper(env: &Env, caller: &Address) {
-    let role_store: Address = env.storage().instance().get(&InstanceKey::RoleStore)
+    let role_store: Address = env
+        .storage()
+        .instance()
+        .get(&InstanceKey::RoleStore)
         .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
     if !RoleStoreClient::new(env, &role_store).has_role(caller, &roles::order_keeper(env)) {
         panic_with_error!(env, Error::Unauthorized);
@@ -305,12 +420,15 @@ fn load_market_props(env: &Env, data_store: &Address, market_token: &Address) ->
     let ds = DataStoreClient::new(env, data_store);
     MarketProps {
         market_token: market_token.clone(),
-        index_token:  ds.get_address(&market_index_token_key(env, market_token))
-            .expect("market index token not found"),
-        long_token:   ds.get_address(&market_long_token_key(env, market_token))
-            .expect("market long token not found"),
-        short_token:  ds.get_address(&market_short_token_key(env, market_token))
-            .expect("market short token not found"),
+        index_token: ds
+            .get_address(&market_index_token_key(env, market_token))
+            .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket)),
+        long_token: ds
+            .get_address(&market_long_token_key(env, market_token))
+            .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket)),
+        short_token: ds
+            .get_address(&market_short_token_key(env, market_token))
+            .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket)),
     }
 }
 
@@ -321,7 +439,9 @@ fn remove_withdrawal(
     key: &BytesN<32>,
     account: &Address,
 ) {
-    env.storage().persistent().remove(&LocalKey::Withdrawal(key.clone()));
+    env.storage()
+        .persistent()
+        .remove(&LocalKey::Withdrawal(key.clone()));
     let ds = DataStoreClient::new(env, data_store);
     ds.remove_bytes32_from_set(handler, &withdrawal_list_key(env), key);
     ds.remove_bytes32_from_set(handler, &account_withdrawal_list_key(env, account), key);
@@ -332,45 +452,45 @@ fn remove_withdrawal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Env, Vec};
-    use role_store::{RoleStore, RoleStoreClient as RsClient};
     use data_store::{DataStore, DataStoreClient as DsClient};
-    use oracle::{Oracle, OracleClient as OClient};
-    use withdrawal_vault::{WithdrawalVault, WithdrawalVaultClient as WVClient};
+    use deposit_handler::{CreateDepositParams, DepositHandler, DepositHandlerClient};
     use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
-    use market_token::{MarketToken, MarketTokenClient as MtClient};
-    use deposit_handler::{DepositHandler, DepositHandlerClient, CreateDepositParams};
     use gmx_keys::roles;
     use gmx_types::TokenPrice;
+    use market_token::{MarketToken, MarketTokenClient as MtClient};
+    use oracle::{Oracle, OracleClient as OClient};
+    use role_store::{RoleStore, RoleStoreClient as RsClient};
+    use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Env, Vec};
+    use withdrawal_vault::{WithdrawalVault, WithdrawalVaultClient as WVClient};
 
     struct World {
-        env:       Env,
-        admin:     Address,
-        keeper:    Address,
-        rs:        Address,
-        ds:        Address,
-        oracle:    Address,
+        env: Env,
+        admin: Address,
+        keeper: Address,
+        rs: Address,
+        ds: Address,
+        oracle: Address,
         dep_vault: Address,
         wth_vault: Address,
         dep_handler: Address,
         wth_handler: Address,
         market_tk: Address,
-        long_tk:   Address,
-        short_tk:  Address,
-        index_tk:  Address,
+        long_tk: Address,
+        short_tk: Address,
+        index_tk: Address,
     }
 
     fn setup() -> World {
         let env = Env::default();
         env.mock_all_auths();
 
-        let admin  = Address::generate(&env);
+        let admin = Address::generate(&env);
         let keeper = Address::generate(&env);
 
         let rs = env.register(RoleStore, ());
         RsClient::new(&env, &rs).initialize(&admin);
         let rs_c = RsClient::new(&env, &rs);
-        rs_c.grant_role(&admin, &admin,  &roles::controller(&env));
+        rs_c.grant_role(&admin, &admin, &roles::controller(&env));
         rs_c.grant_role(&admin, &keeper, &roles::order_keeper(&env));
 
         let ds = env.register(DataStore, ());
@@ -388,44 +508,407 @@ mod tests {
 
         let market_tk = env.register(MarketToken, ());
         MtClient::new(&env, &market_tk).initialize(
-            &admin, &rs, &7u32,
+            &admin,
+            &rs,
+            &7u32,
             &soroban_sdk::String::from_str(&env, "GMX Market Token"),
             &soroban_sdk::String::from_str(&env, "GM"),
         );
 
         let dep_handler = env.register(DepositHandler, ());
-        DepositHandlerClient::new(&env, &dep_handler)
-            .initialize(&admin, &rs, &ds, &oracle_addr, &dep_vault);
+        DepositHandlerClient::new(&env, &dep_handler).initialize(
+            &admin,
+            &rs,
+            &ds,
+            &oracle_addr,
+            &dep_vault,
+        );
 
         let wth_handler = env.register(WithdrawalHandler, ());
-        WithdrawalHandlerClient::new(&env, &wth_handler)
-            .initialize(&admin, &rs, &ds, &oracle_addr, &wth_vault);
+        WithdrawalHandlerClient::new(&env, &wth_handler).initialize(
+            &admin,
+            &rs,
+            &ds,
+            &oracle_addr,
+            &wth_vault,
+        );
 
-        // Grant both handlers CONTROLLER
         rs_c.grant_role(&admin, &dep_handler, &roles::controller(&env));
         rs_c.grant_role(&admin, &wth_handler, &roles::controller(&env));
 
-        let long_tk  = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let long_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let short_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let index_tk = Address::generate(&env);
 
-        // Register market props in data_store
         let ds_c = DsClient::new(&env, &ds);
-        ds_c.set_address(&dep_handler, &gmx_keys::market_index_token_key(&env, &market_tk), &index_tk);
-        ds_c.set_address(&dep_handler, &gmx_keys::market_long_token_key(&env, &market_tk), &long_tk);
-        ds_c.set_address(&dep_handler, &gmx_keys::market_short_token_key(&env, &market_tk), &short_tk);
+        ds_c.set_address(
+            &dep_handler,
+            &gmx_keys::market_index_token_key(&env, &market_tk),
+            &index_tk,
+        );
+        ds_c.set_address(
+            &dep_handler,
+            &gmx_keys::market_long_token_key(&env, &market_tk),
+            &long_tk,
+        );
+        ds_c.set_address(
+            &dep_handler,
+            &gmx_keys::market_short_token_key(&env, &market_tk),
+            &short_tk,
+        );
 
-        World { env, admin, keeper, rs, ds, oracle: oracle_addr, dep_vault, wth_vault, dep_handler, wth_handler, market_tk, long_tk, short_tk, index_tk }
+        World {
+            env,
+            admin,
+            keeper,
+            rs,
+            ds,
+            oracle: oracle_addr,
+            dep_vault,
+            wth_vault,
+            dep_handler,
+            wth_handler,
+            market_tk,
+            long_tk,
+            short_tk,
+            index_tk,
+        }
     }
 
     fn set_prices(w: &World) {
         let fp = gmx_math::FLOAT_PRECISION;
-        OClient::new(&w.env, &w.oracle).set_prices_simple(&w.keeper, &Vec::from_array(&w.env, [
-            TokenPrice { token: w.long_tk.clone(),  min: 2000 * fp, max: 2000 * fp },
-            TokenPrice { token: w.short_tk.clone(), min: fp,        max: fp },
-            TokenPrice { token: w.index_tk.clone(), min: 2000 * fp, max: 2000 * fp },
-        ]));
+        OClient::new(&w.env, &w.oracle).set_prices_simple(
+            &w.keeper,
+            &Vec::from_array(
+                &w.env,
+                [
+                    TokenPrice {
+                        token: w.long_tk.clone(),
+                        min: 2000 * fp,
+                        max: 2000 * fp,
+                    },
+                    TokenPrice {
+                        token: w.short_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: w.index_tk.clone(),
+                        min: 2000 * fp,
+                        max: 2000 * fp,
+                    },
+                ],
+            ),
+        );
     }
+
+    /// Helper: deposit long+short tokens and return the minted LP balance.
+    fn do_deposit(w: &World, user: &Address, long_amount: i128, short_amount: i128) -> i128 {
+        let dep_key = DepositHandlerClient::new(&w.env, &w.dep_handler).create_deposit(
+            user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: long_amount,
+                short_token_amount: short_amount,
+                min_market_tokens: 1,
+                execution_fee: 0,
+            },
+        );
+        DepositHandlerClient::new(&w.env, &w.dep_handler).execute_deposit(&w.keeper, &dep_key);
+        MtClient::new(&w.env, &w.market_tk).balance(user)
+    }
+
+    // ── Issue #39: withdrawal input validation ────────────────────────────────
+
+    /// Zero LP amount must revert before any token movement.
+    #[test]
+    #[should_panic]
+    fn create_withdrawal_zero_lp_amount_reverts() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+        WithdrawalHandlerClient::new(&w.env, &w.wth_handler).create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: 0,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
+    }
+
+    /// Unknown market (not registered in data_store) must revert.
+    #[test]
+    #[should_panic]
+    fn create_withdrawal_unknown_market_reverts() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+        let fake_market = Address::generate(&w.env);
+        WithdrawalHandlerClient::new(&w.env, &w.wth_handler).create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: fake_market,
+                market_token_amount: 1_000,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
+    }
+
+    /// Receiver set to the handler contract itself must revert.
+    #[test]
+    #[should_panic]
+    fn create_withdrawal_invalid_receiver_reverts() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+        // Use the handler address as receiver — should be rejected
+        let bad_receiver = w.wth_handler.clone();
+        WithdrawalHandlerClient::new(&w.env, &w.wth_handler).create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: bad_receiver,
+                market: w.market_tk.clone(),
+                market_token_amount: 1_000,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
+    }
+
+    // ── Issue #41: min output enforcement ────────────────────────────────────
+
+    /// Withdrawal where long output falls below min_long_token_amount must revert
+    /// and leave state unchanged (no tokens moved, no LP burned).
+    #[test]
+    #[should_panic]
+    fn execute_withdrawal_below_min_long_reverts() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+        let lp = do_deposit(&w, &user, 1_000_0000, 0);
+
+        set_prices(&w);
+        let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp,
+                // demand more long tokens than the pool can provide
+                min_long_token_amount: i128::MAX,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
+        WithdrawalHandlerClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &wth_key);
+    }
+
+    /// Withdrawal where short output falls below min_short_token_amount must revert.
+    #[test]
+    #[should_panic]
+    fn execute_withdrawal_below_min_short_reverts() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.short_tk).mint(&user, &500_0000i128);
+        set_prices(&w);
+        let lp = do_deposit(&w, &user, 0, 500_0000);
+
+        set_prices(&w);
+        let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp,
+                min_long_token_amount: 0,
+                // demand more short tokens than the pool can provide
+                min_short_token_amount: i128::MAX,
+                execution_fee: 0,
+            },
+        );
+        WithdrawalHandlerClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &wth_key);
+    }
+
+    /// Partial pool state: only long tokens in pool, short pool is empty.
+    /// min_short_token_amount = 0 should succeed; min_short > 0 should revert.
+    #[test]
+    #[should_panic]
+    fn execute_withdrawal_partial_pool_short_empty_reverts_when_min_short_nonzero() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        // Deposit only long tokens → short pool stays empty
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+        let lp = do_deposit(&w, &user, 1_000_0000, 0);
+
+        set_prices(&w);
+        let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp,
+                min_long_token_amount: 0,
+                min_short_token_amount: 1, // short pool is empty → must revert
+                execution_fee: 0,
+            },
+        );
+        WithdrawalHandlerClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &wth_key);
+    }
+
+    /// Partial pool state: only long tokens, min_short = 0 → succeeds.
+    #[test]
+    fn execute_withdrawal_partial_pool_long_only_succeeds() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+        let lp = do_deposit(&w, &user, 1_000_0000, 0);
+
+        set_prices(&w);
+        let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
+        WithdrawalHandlerClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &wth_key);
+
+        let long_back = StellarAssetClient::new(env, &w.long_tk).balance(&user);
+        assert!(long_back > 0, "should receive long tokens back");
+        assert_eq!(MtClient::new(env, &w.market_tk).balance(&user), 0);
+    }
+
+    // ── Issue #32: storage cleanup ────────────────────────────────────────────
+
+    /// After cancel_withdrawal, the record must be gone from local storage AND
+    /// from both the global and per-account withdrawal lists in data_store.
+    #[test]
+    fn cancel_withdrawal_cleans_up_storage_and_lists() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+        let lp = do_deposit(&w, &user, 1_000_0000, 0);
+        assert!(lp > 0);
+
+        let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
+
+        let ds_c = DsClient::new(env, &w.ds);
+        assert!(WithdrawalHandlerClient::new(env, &w.wth_handler)
+            .get_withdrawal(&wth_key)
+            .is_some());
+        assert!(ds_c.contains_bytes32(&gmx_keys::withdrawal_list_key(env), &wth_key));
+        assert!(ds_c.contains_bytes32(&gmx_keys::account_withdrawal_list_key(env, &user), &wth_key));
+
+        WithdrawalHandlerClient::new(env, &w.wth_handler).cancel_withdrawal(&user, &wth_key);
+
+        assert!(
+            WithdrawalHandlerClient::new(env, &w.wth_handler)
+                .get_withdrawal(&wth_key)
+                .is_none(),
+            "record must be removed after cancel"
+        );
+        assert!(
+            !ds_c.contains_bytes32(&gmx_keys::withdrawal_list_key(env), &wth_key),
+            "global withdrawal list must not contain key after cancel"
+        );
+        assert!(
+            !ds_c.contains_bytes32(&gmx_keys::account_withdrawal_list_key(env, &user), &wth_key),
+            "account withdrawal list must not contain key after cancel"
+        );
+    }
+
+    /// After execute_withdrawal, the record must be gone from local storage AND
+    /// from both the global and per-account withdrawal lists in data_store.
+    #[test]
+    fn execute_withdrawal_cleans_up_storage_and_lists() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+        let lp = do_deposit(&w, &user, 1_000_0000, 0);
+        assert!(lp > 0);
+
+        set_prices(&w);
+        let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
+
+        let ds_c = DsClient::new(env, &w.ds);
+        assert!(WithdrawalHandlerClient::new(env, &w.wth_handler)
+            .get_withdrawal(&wth_key)
+            .is_some());
+        assert!(ds_c.contains_bytes32(&gmx_keys::withdrawal_list_key(env), &wth_key));
+        assert!(ds_c.contains_bytes32(&gmx_keys::account_withdrawal_list_key(env, &user), &wth_key));
+
+        WithdrawalHandlerClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &wth_key);
+
+        assert!(
+            WithdrawalHandlerClient::new(env, &w.wth_handler)
+                .get_withdrawal(&wth_key)
+                .is_none(),
+            "record must be removed after execute"
+        );
+        assert!(
+            !ds_c.contains_bytes32(&gmx_keys::withdrawal_list_key(env), &wth_key),
+            "global withdrawal list must not contain key after execute"
+        );
+        assert!(
+            !ds_c.contains_bytes32(&gmx_keys::account_withdrawal_list_key(env, &user), &wth_key),
+            "account withdrawal list must not contain key after execute"
+        );
+    }
+
+    // ── Existing integration tests ────────────────────────────────────────────
 
     #[test]
     fn full_deposit_then_withdrawal() {
@@ -433,50 +916,152 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        // Give user pool tokens
-        StellarAssetClient::new(env, &w.long_tk).mint(&user,  &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
         StellarAssetClient::new(env, &w.short_tk).mint(&user, &500_0000i128);
-
         set_prices(&w);
 
-        // Deposit
-        let dep_key = DepositHandlerClient::new(env, &w.dep_handler).create_deposit(&user, &CreateDepositParams {
-            receiver:            user.clone(),
-            market:              w.market_tk.clone(),
-            initial_long_token:  w.long_tk.clone(),
-            initial_short_token: w.short_tk.clone(),
-            long_token_amount:   1_000_0000i128,
-            short_token_amount:  500_0000i128,
-            min_market_tokens:   1,
-            execution_fee:       0,
-        });
-        DepositHandlerClient::new(env, &w.dep_handler).execute_deposit(&w.keeper, &dep_key);
-
-        let lp_balance = MtClient::new(env, &w.market_tk).balance(&user);
+        let lp_balance = do_deposit(&w, &user, 1_000_0000, 500_0000);
         assert!(lp_balance > 0);
 
-        set_prices(&w); // re-set prices for withdrawal
-
-        // Withdraw half
+        set_prices(&w);
         let half_lp = lp_balance / 2;
-        let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(&user, &CreateWithdrawalParams {
-            receiver:              user.clone(),
-            market:                w.market_tk.clone(),
-            market_token_amount:   half_lp,
-            min_long_token_amount:  0,
-            min_short_token_amount: 0,
-            execution_fee:         0,
-        });
+        let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: half_lp,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
         WithdrawalHandlerClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &wth_key);
 
-        // User should have received ~half of pool back
-        let long_back  = StellarAssetClient::new(env, &w.long_tk).balance(&user);
-        let short_back = StellarAssetClient::new(env, &w.short_tk).balance(&user);
-        assert!(long_back > 0,  "should receive long tokens back");
-        assert!(short_back > 0, "should receive short tokens back");
-        // LP balance should be halved
-        let lp_after = MtClient::new(env, &w.market_tk).balance(&user);
-        assert_eq!(lp_after, lp_balance - half_lp);
+        assert!(StellarAssetClient::new(env, &w.long_tk).balance(&user) > 0);
+        assert!(StellarAssetClient::new(env, &w.short_tk).balance(&user) > 0);
+        assert_eq!(
+            MtClient::new(env, &w.market_tk).balance(&user),
+            lp_balance - half_lp
+        );
+    }
+
+    // ── Issue #28: global withdrawal list lifecycle ────────────────────────────
+
+    /// Create three withdrawals, cancel one, execute another, leave the third
+    /// pending.  The global list and per-account list must reflect exactly the
+    /// pending withdrawal at each stage.
+    #[test]
+    fn withdrawal_list_reflects_full_lifecycle() {
+        let w = setup();
+        let env = &w.env;
+
+        // Three separate users each get LP tokens from a deposit.
+        let user_a = Address::generate(env);
+        let user_b = Address::generate(env);
+        let user_c = Address::generate(env);
+
+        for u in [&user_a, &user_b, &user_c] {
+            StellarAssetClient::new(env, &w.long_tk).mint(u, &1_000_0000i128);
+        }
+        set_prices(&w);
+
+        let lp_a = do_deposit(&w, &user_a, 1_000_0000, 0);
+        set_prices(&w);
+        let lp_b = do_deposit(&w, &user_b, 1_000_0000, 0);
+        set_prices(&w);
+        let lp_c = do_deposit(&w, &user_c, 1_000_0000, 0);
+
+        assert!(lp_a > 0);
+        assert!(lp_b > 0);
+        assert!(lp_c > 0);
+
+        let wh = WithdrawalHandlerClient::new(env, &w.wth_handler);
+        let ds = DsClient::new(env, &w.ds);
+
+        // ── Create three withdrawals ──────────────────────────────────────────
+        set_prices(&w);
+        let params_for = |user: &Address, lp: i128| CreateWithdrawalParams {
+            receiver: user.clone(),
+            market: w.market_tk.clone(),
+            market_token_amount: lp,
+            min_long_token_amount: 0,
+            min_short_token_amount: 0,
+            execution_fee: 0,
+        };
+
+        let key_a = wh.create_withdrawal(&user_a, &params_for(&user_a, lp_a));
+        let key_b = wh.create_withdrawal(&user_b, &params_for(&user_b, lp_b));
+        let key_c = wh.create_withdrawal(&user_c, &params_for(&user_c, lp_c));
+
+        // All three must appear in the global list.
+        assert_eq!(
+            ds.get_bytes32_set_count(&gmx_keys::withdrawal_list_key(env)),
+            3,
+            "global list must have 3 entries after three creates"
+        );
+        for key in [&key_a, &key_b, &key_c] {
+            assert!(
+                ds.contains_bytes32(&gmx_keys::withdrawal_list_key(env), key),
+                "global list must contain each key after create"
+            );
+        }
+
+        // Each user's account list must have exactly their key.
+        for (user, key) in [(&user_a, &key_a), (&user_b, &key_b), (&user_c, &key_c)] {
+            assert_eq!(
+                ds.get_bytes32_set_count(&gmx_keys::account_withdrawal_list_key(env, user)),
+                1
+            );
+            assert!(ds.contains_bytes32(&gmx_keys::account_withdrawal_list_key(env, user), key));
+        }
+
+        // ── Cancel user_a's withdrawal ────────────────────────────────────────
+        wh.cancel_withdrawal(&user_a, &key_a);
+
+        assert_eq!(
+            ds.get_bytes32_set_count(&gmx_keys::withdrawal_list_key(env)),
+            2,
+            "global list must have 2 entries after one cancel"
+        );
+        assert!(
+            !ds.contains_bytes32(&gmx_keys::withdrawal_list_key(env), &key_a),
+            "cancelled key must be absent from global list"
+        );
+        assert_eq!(
+            ds.get_bytes32_set_count(&gmx_keys::account_withdrawal_list_key(env, &user_a)),
+            0,
+            "cancelled user account list must be empty"
+        );
+
+        // ── Execute user_b's withdrawal ───────────────────────────────────────
+        set_prices(&w);
+        wh.execute_withdrawal(&w.keeper, &key_b);
+
+        assert_eq!(
+            ds.get_bytes32_set_count(&gmx_keys::withdrawal_list_key(env)),
+            1,
+            "global list must have 1 entry after cancel + execute"
+        );
+        assert!(
+            !ds.contains_bytes32(&gmx_keys::withdrawal_list_key(env), &key_b),
+            "executed key must be absent from global list"
+        );
+        assert_eq!(
+            ds.get_bytes32_set_count(&gmx_keys::account_withdrawal_list_key(env, &user_b)),
+            0,
+            "executed user account list must be empty"
+        );
+
+        // ── user_c's withdrawal is still pending ─────────────────────────────
+        assert!(
+            ds.contains_bytes32(&gmx_keys::withdrawal_list_key(env), &key_c),
+            "pending key must remain in global list"
+        );
+        assert!(
+            wh.get_withdrawal(&key_c).is_some(),
+            "pending withdrawal record must still exist"
+        );
     }
 
     #[test]
@@ -487,39 +1072,57 @@ mod tests {
 
         StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
         set_prices(&w);
+        let lp_balance = do_deposit(&w, &user, 1_000_0000, 0);
 
-        // Deposit first to get LP tokens
-        let dep_key = DepositHandlerClient::new(env, &w.dep_handler).create_deposit(&user, &CreateDepositParams {
-            receiver:            user.clone(),
-            market:              w.market_tk.clone(),
-            initial_long_token:  w.long_tk.clone(),
-            initial_short_token: w.short_tk.clone(),
-            long_token_amount:   1_000_0000i128,
-            short_token_amount:  0,
-            min_market_tokens:   1,
-            execution_fee:       0,
-        });
-        DepositHandlerClient::new(env, &w.dep_handler).execute_deposit(&w.keeper, &dep_key);
+        let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp_balance,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
 
-        let lp_balance = MtClient::new(env, &w.market_tk).balance(&user);
-
-        // Create and cancel withdrawal
-        let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(&user, &CreateWithdrawalParams {
-            receiver:              user.clone(),
-            market:                w.market_tk.clone(),
-            market_token_amount:   lp_balance,
-            min_long_token_amount:  0,
-            min_short_token_amount: 0,
-            execution_fee:         0,
-        });
-
-        // LP should be in vault now
         assert_eq!(MtClient::new(env, &w.market_tk).balance(&user), 0);
-
         WithdrawalHandlerClient::new(env, &w.wth_handler).cancel_withdrawal(&user, &wth_key);
-
-        // LP should be returned
         assert_eq!(MtClient::new(env, &w.market_tk).balance(&user), lp_balance);
-        assert!(WithdrawalHandlerClient::new(env, &w.wth_handler).get_withdrawal(&wth_key).is_none());
+        assert!(WithdrawalHandlerClient::new(env, &w.wth_handler)
+            .get_withdrawal(&wth_key)
+            .is_none());
+    }
+
+    // ── Issue #109: ORDER_KEEPER authorization matrix ─────────────────────────
+
+    /// execute_withdrawal must reject a caller that does not hold ORDER_KEEPER.
+    #[test]
+    #[should_panic]
+    fn execute_withdrawal_by_non_keeper_panics() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &5_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &2_000_0000i128);
+        set_prices(&w);
+        let lp_balance = do_deposit(&w, &user, 5_000_0000, 2_000_0000);
+
+        // Create a withdrawal to get a key.
+        let wth_key = WithdrawalHandlerClient::new(&w.env, &w.wth_handler).create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp_balance,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
+
+        let impostor = Address::generate(&w.env);
+        // impostor has no ORDER_KEEPER role — must panic with Unauthorized.
+        WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
+            .execute_withdrawal(&impostor, &wth_key);
     }
 }

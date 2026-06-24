@@ -26,6 +26,9 @@ WASM_DIR="${WASM_DIR:-target/$WASM_TARGET/$WASM_PROFILE}"
 OUT_DIR=".deployed"
 OUT_FILE="$OUT_DIR/$NETWORK.env"
 FORCE="${FORCE:-0}"
+DRY_RUN="${DRY_RUN:-0}"
+MANIFEST_CONTRACT_IDS_DIR=".stellar/contract-ids"
+MANIFEST_WASM_HASHES_DIR=".stellar/wasm-hashes"
 
 # ── Colours ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -92,6 +95,7 @@ echo -e "${NC}"
 echo -e "  Network : ${CYAN}$NETWORK${NC}"
 echo -e "  Source  : ${CYAN}$SOURCE${NC}  ($ADMIN)"
 echo -e "  Output  : ${CYAN}$OUT_FILE${NC}"
+[[ "$DRY_RUN" == "1" ]] && echo -e "  ${YELLOW}DRY RUN — no transactions will be submitted${NC}"
 sep
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -114,6 +118,10 @@ upload() {
   local label="$1" file="$WASM_DIR/$2"
   [[ -f "$file" ]] || die "wasm not found: $file  (run 'stellar contract build' first)"
   log "upload  $label"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf 'dry-run-hash-%s' "$label"
+    return
+  fi
   stellar contract upload \
     --wasm "$file" \
     --source "$SOURCE" \
@@ -124,6 +132,10 @@ upload() {
 deploy_contract() {
   local label="$1" hash="$2"
   log "deploy  $label"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf 'DRY_RUN_CONTRACT_%s' "$label"
+    return
+  fi
   stellar contract deploy \
     --wasm-hash "$hash" \
     --source "$SOURCE" \
@@ -133,6 +145,7 @@ deploy_contract() {
 # Invoke a contract function (fire-and-forget, output suppressed).
 invoke() {
   local contract_id="$1"; shift
+  [[ "$DRY_RUN" == "1" ]] && return
   stellar contract invoke \
     --id "$contract_id" \
     --source "$SOURCE" \
@@ -142,8 +155,12 @@ invoke() {
 
 # ── Step 1: Build ─────────────────────────────────────────────────────────────
 echo -e "${BOLD}[1/8] Build${NC}"
-stellar contract build
-ok "all contracts compiled"
+if [[ "$DRY_RUN" == "1" ]]; then
+  ok "skipped (dry-run)"
+else
+  stellar contract build
+  ok "all contracts compiled"
+fi
 sep
 
 # ── Step 2: Upload all wasm blobs ─────────────────────────────────────────────
@@ -302,6 +319,8 @@ sep
 echo -e "${BOLD}[8/8] Grant CONTROLLER role${NC}"
 
 for CONTRACT in \
+  "$ADMIN" \
+  "$MARKET_FACTORY" \
   "$DEPOSIT_HANDLER" \
   "$WITHDRAWAL_HANDLER" \
   "$ORDER_HANDLER" \
@@ -351,6 +370,74 @@ READER=$READER
 EXCHANGE_ROUTER=$EXCHANGE_ROUTER
 ENV
 
+# ── Write network manifests ────────────────────────────────────────────────────
+if [[ "$DRY_RUN" != "1" ]]; then
+  STELLAR_CLI_VERSION=$(stellar --version 2>/dev/null | head -1 || echo "unknown")
+  NETWORK_PASSPHRASE="$(network_passphrase)"
+
+  mkdir -p "$MANIFEST_CONTRACT_IDS_DIR" "$MANIFEST_WASM_HASHES_DIR"
+
+  cat > "$MANIFEST_CONTRACT_IDS_DIR/$NETWORK.json" <<JSON
+{
+  "network": "$NETWORK",
+  "network_passphrase": "$NETWORK_PASSPHRASE",
+  "source_account": "$ADMIN",
+  "stellar_cli_version": "$STELLAR_CLI_VERSION",
+  "timestamp": "$TIMESTAMP",
+  "contracts": {
+    "role_store": "$ROLE_STORE",
+    "data_store": "$DATA_STORE",
+    "oracle": "$ORACLE",
+    "market_factory": "$MARKET_FACTORY",
+    "deposit_vault": "$DEPOSIT_VAULT",
+    "deposit_handler": "$DEPOSIT_HANDLER",
+    "withdrawal_vault": "$WITHDRAWAL_VAULT",
+    "withdrawal_handler": "$WITHDRAWAL_HANDLER",
+    "order_vault": "$ORDER_VAULT",
+    "order_handler": "$ORDER_HANDLER",
+    "liquidation_handler": "$LIQUIDATION_HANDLER",
+    "adl_handler": "$ADL_HANDLER",
+    "fee_handler": "$FEE_HANDLER",
+    "referral_storage": "$REFERRAL_STORAGE",
+    "reader": "$READER",
+    "exchange_router": "$EXCHANGE_ROUTER"
+  }
+}
+JSON
+
+  cat > "$MANIFEST_WASM_HASHES_DIR/$NETWORK.json" <<JSON
+{
+  "network": "$NETWORK",
+  "network_passphrase": "$NETWORK_PASSPHRASE",
+  "source_account": "$ADMIN",
+  "stellar_cli_version": "$STELLAR_CLI_VERSION",
+  "timestamp": "$TIMESTAMP",
+  "wasm_hashes": {
+    "role_store": "$ROLE_STORE_HASH",
+    "data_store": "$DATA_STORE_HASH",
+    "oracle": "$ORACLE_HASH",
+    "market_token": "$MARKET_TOKEN_HASH",
+    "market_factory": "$MARKET_FACTORY_HASH",
+    "deposit_vault": "$DEPOSIT_VAULT_HASH",
+    "deposit_handler": "$DEPOSIT_HANDLER_HASH",
+    "withdrawal_vault": "$WITHDRAWAL_VAULT_HASH",
+    "withdrawal_handler": "$WITHDRAWAL_HANDLER_HASH",
+    "order_vault": "$ORDER_VAULT_HASH",
+    "order_handler": "$ORDER_HANDLER_HASH",
+    "liquidation_handler": "$LIQ_HANDLER_HASH",
+    "adl_handler": "$ADL_HANDLER_HASH",
+    "fee_handler": "$FEE_HANDLER_HASH",
+    "referral_storage": "$REFERRAL_HASH",
+    "reader": "$READER_HASH",
+    "exchange_router": "$ROUTER_HASH"
+  }
+}
+JSON
+
+  ok "manifests → $MANIFEST_CONTRACT_IDS_DIR/$NETWORK.json"
+  ok "          → $MANIFEST_WASM_HASHES_DIR/$NETWORK.json"
+fi
+
 # ── Summary table ─────────────────────────────────────────────────────────────
 W=56  # address column width
 DIV=$(printf '═%.0s' $(seq 1 $((W + 30))))
@@ -379,3 +466,15 @@ printf "  ${GREEN}%-22s${NC}  %s\n" "exchange_router"     "$EXCHANGE_ROUTER"
 echo -e "${BOLD}$DIV${NC}"
 echo -e "  Addresses saved → ${CYAN}$OUT_FILE${NC}"
 echo -e "${BOLD}$DIV${NC}"
+
+# ── Next steps ────────────────────────────────────────────────────────────────
+echo
+echo -e "${BOLD}Next steps:${NC}"
+echo -e "  1. Create test tokens (if not already done):"
+echo -e "       make market-tokens NETWORK=$NETWORK SOURCE=$SOURCE"
+echo -e "  2. Bootstrap a market (roles + market creation + config):"
+echo -e "       make bootstrap NETWORK=$NETWORK SOURCE=$SOURCE LONG_CODE=TWBTC SHORT_CODE=TUSDC"
+echo -e "  3. Submit initial oracle prices:"
+echo -e "       bash scripts/submit_prices.sh $NETWORK $SOURCE"
+echo -e "  4. Seed pool liquidity (see 'make bootstrap' output for deposit_handler params)"
+echo

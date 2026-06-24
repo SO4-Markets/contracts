@@ -6,11 +6,11 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error,
-    Address, BytesN, Env, token,
-};
 use gmx_keys::roles;
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, BytesN,
+    Env,
+};
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -19,9 +19,9 @@ use gmx_keys::roles;
 #[repr(u32)]
 pub enum Error {
     AlreadyInitialized = 1,
-    NotInitialized     = 2,
-    Unauthorized       = 3,
-    NegativeAmount     = 4,
+    NotInitialized = 2,
+    Unauthorized = 3,
+    NegativeAmount = 4,
 }
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
@@ -46,7 +46,10 @@ trait IRoleStore {
 }
 
 fn require_controller(env: &Env, caller: &Address) {
-    let rs: Address = env.storage().instance().get(&InstanceKey::RoleStore)
+    let rs: Address = env
+        .storage()
+        .instance()
+        .get(&InstanceKey::RoleStore)
         .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
     if !RoleStoreClient::new(env, &rs).has_role(caller, &roles::controller(env)) {
         panic_with_error!(env, Error::Unauthorized);
@@ -66,20 +69,38 @@ impl OrderVault {
         if env.storage().instance().has(&InstanceKey::Initialized) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
-        env.storage().instance().set(&InstanceKey::Initialized, &true);
-        env.storage().instance().set(&InstanceKey::RoleStore, &role_store);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Initialized, &true);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::RoleStore, &role_store);
     }
 
-    /// Snapshot the balance of `token` in this vault.
-    /// Returns the amount received since the last snapshot (delta).
+    /// Snapshot the balance of `token` in this vault and return the received delta.
+    ///
+    /// # Balance invariant (issue #47)
+    ///
+    /// The returned delta is `current_on_chain_balance − last_recorded_balance`.
+    /// A positive delta means tokens arrived since the last snapshot; the caller
+    /// (order_handler.create_order) treats this as the collateral amount and
+    /// reverts the transaction if the delta is ≤ 0.
+    ///
+    /// After every transfer-out the vault re-snapshots in the same call, so the
+    /// recorded balance always equals the actual on-chain balance.  This prevents
+    /// double-counting: a second `record_transfer_in` before any new deposit
+    /// returns 0, which order_handler will reject.
     pub fn record_transfer_in(env: Env, token: Address) -> i128 {
-        let current = token::Client::new(&env, &token)
-            .balance(&env.current_contract_address());
-        let recorded: i128 = env.storage().persistent()
+        let current = token::Client::new(&env, &token).balance(&env.current_contract_address());
+        let recorded: i128 = env
+            .storage()
+            .persistent()
             .get(&DataKey::TokenBalance(token.clone()))
             .unwrap_or(0);
         let delta = current - recorded;
-        env.storage().persistent().set(&DataKey::TokenBalance(token), &current);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenBalance(token), &current);
         delta
     }
 
@@ -96,17 +117,22 @@ impl OrderVault {
             panic_with_error!(&env, Error::NegativeAmount);
         }
         require_controller(&env, &caller);
-        token::Client::new(&env, &token)
-            .transfer(&env.current_contract_address(), &receiver, &amount);
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &receiver,
+            &amount,
+        );
         // Sync recorded balance
-        let new_bal = token::Client::new(&env, &token)
-            .balance(&env.current_contract_address());
-        env.storage().persistent().set(&DataKey::TokenBalance(token), &new_bal);
+        let new_bal = token::Client::new(&env, &token).balance(&env.current_contract_address());
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenBalance(token), &new_bal);
     }
 
     /// Return the last recorded balance for a token.
     pub fn get_recorded_balance(env: Env, token: Address) -> i128 {
-        env.storage().persistent()
+        env.storage()
+            .persistent()
             .get(&DataKey::TokenBalance(token))
             .unwrap_or(0)
     }

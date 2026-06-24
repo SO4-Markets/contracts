@@ -22,6 +22,7 @@ help:
 	@printf '%s\n' '  make lint'
 	@printf '%s\n' '  make test'
 	@printf '%s\n' '  make build'
+	@printf '%s\n' '  make smoke-prices'
 	@printf '%s\n' ''
 	@printf '%s\n' 'Deploy and upgrade:'
 	@printf '%s\n' '  make deploy-all NETWORK=testnet SOURCE=alice'
@@ -34,6 +35,8 @@ help:
 	@printf '%s\n' '  make token-deploy CODE=TWBTC NETWORK=testnet SOURCE=alice'
 	@printf '%s\n' '  make token-mint CODE=TWBTC TO=alice AMOUNT=1000000000 NETWORK=testnet SOURCE=alice'
 	@printf '%s\n' '  make token-bootstrap CODE=TWBTC TO=alice NETWORK=testnet SOURCE=alice'
+	@printf '%s\n' '  make test-tokens-with-faucet NETWORK=testnet SOURCE=alice LONG_CODE=TWBTC SHORT_CODE=TUSDC'
+	@printf '%s\n' '  make faucet-claim-market NETWORK=testnet SOURCE=alice TO=alice'
 	@printf '%s\n' ''
 	@printf '%s\n' 'Run make help-mx for the longer operator guide.'
 
