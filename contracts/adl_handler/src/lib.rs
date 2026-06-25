@@ -275,7 +275,7 @@ mod tests {
     use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
     use gmx_keys::roles;
     use gmx_math::FLOAT_PRECISION;
-    use gmx_types::{CreateDepositParams, CreateOrderParams, OrderType, TokenPrice};
+    use gmx_types::{CreateDepositParams, CreateOrderParams, OrderType, SwapPath, TokenPrice};
     use market_token::{MarketToken, MarketTokenClient as MtClient};
     use oracle::{Oracle, OracleClient as OClient};
     use order_handler::{OrderHandler, OrderHandlerClient as OHClient};
@@ -504,7 +504,7 @@ mod tests {
                 receiver: trader.clone(),
                 market: w.market_tk.clone(),
                 initial_collateral_token: w.long_tk.clone(),
-                swap_path: soroban_sdk::Vec::new(&w.env),
+                swap_path: SwapPath::new(),
                 size_delta_usd: size_usd,
                 collateral_delta_amount: collateral,
                 trigger_price: 0,

@@ -1,7 +1,82 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use soroban_sdk::{contracttype, Address, Vec};
+use soroban_sdk::{contracttype, Address};
+
+pub const MAX_SWAP_PATH_LENGTH: usize = 5;
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SwapPath {
+    pub hop0: Option<Address>,
+    pub hop1: Option<Address>,
+    pub hop2: Option<Address>,
+    pub hop3: Option<Address>,
+    pub hop4: Option<Address>,
+}
+
+impl SwapPath {
+    pub fn new() -> Self {
+        Self {
+            hop0: None,
+            hop1: None,
+            hop2: None,
+            hop3: None,
+            hop4: None,
+        }
+    }
+
+    pub fn from_array<const N: usize>(hops: [Address; N]) -> Self {
+        if N > MAX_SWAP_PATH_LENGTH {
+            panic!("swap path too long");
+        }
+
+        let mut path = Self::new();
+        let mut i = 0usize;
+        while i < N {
+            path.set(i, hops[i].clone());
+            i += 1;
+        }
+        path
+    }
+
+    pub fn len(&self) -> u32 {
+        let mut count = 0u32;
+        while count < MAX_SWAP_PATH_LENGTH as u32 {
+            if self.get(count).is_none() {
+                break;
+            }
+            count += 1;
+        }
+        count
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.hop0.is_none()
+    }
+
+    pub fn get(&self, index: u32) -> Option<Address> {
+        match index {
+            0 => self.hop0.clone(),
+            1 => self.hop1.clone(),
+            2 => self.hop2.clone(),
+            3 => self.hop3.clone(),
+            4 => self.hop4.clone(),
+            _ => None,
+        }
+    }
+
+    fn set(&mut self, index: usize, address: Address) {
+        match index {
+            0 => self.hop0 = Some(address),
+            1 => self.hop1 = Some(address),
+            2 => self.hop2 = Some(address),
+            3 => self.hop3 = Some(address),
+            4 => self.hop4 = Some(address),
+            _ => panic!("swap path index out of bounds"),
+        }
+    }
+}
 
 // ─── Price ───────────────────────────────────────────────────────────────────
 
@@ -126,7 +201,7 @@ pub struct OrderProps {
     pub receiver: Address,
     pub market: Address,
     pub initial_collateral_token: Address,
-    pub swap_path: Vec<Address>,
+    pub swap_path: SwapPath,
     pub size_delta_usd: i128,
     pub collateral_delta_amount: i128,
     pub trigger_price: i128,
@@ -170,7 +245,7 @@ pub struct CreateOrderParams {
     pub receiver: Address,
     pub market: Address,
     pub initial_collateral_token: Address,
-    pub swap_path: Vec<Address>,
+    pub swap_path: SwapPath,
     pub size_delta_usd: i128,
     pub collateral_delta_amount: i128,
     pub trigger_price: i128,

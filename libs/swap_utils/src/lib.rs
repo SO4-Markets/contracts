@@ -15,8 +15,8 @@ use gmx_keys::{
 };
 use gmx_market_utils::apply_delta_to_pool_amount;
 use gmx_pricing_utils::{apply_swap_impact_value, get_swap_output_amount, get_swap_price_impact};
-use gmx_types::{MarketProps, PriceProps};
-use soroban_sdk::{Address, BytesN, Env, Vec};
+use gmx_types::{MarketProps, PriceProps, SwapPath};
+use soroban_sdk::{Address, BytesN, Env};
 
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
@@ -165,7 +165,7 @@ pub fn swap_with_path(
     oracle: &Address,
     token_in: &Address,
     amount_in: i128,
-    path: &Vec<Address>,
+    path: &SwapPath,
     receiver: &Address,
 ) -> (Address, i128) {
     let path_len = path.len();

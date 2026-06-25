@@ -12,11 +12,15 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use gmx_keys::{account_position_list_key, position_key, position_list_key};
+use gmx_keys::{
+    account_position_list_key, claimable_fee_amount_key, collateral_sum_key,
+    cumulative_borrowing_factor_key, funding_amount_per_size_key, position_key, position_list_key,
+};
 use gmx_market_utils::{
-    apply_delta_to_open_interest, apply_delta_to_open_interest_in_tokens,
+    apply_delta_to_open_interest, apply_delta_to_open_interest_in_tokens, apply_delta_to_pool_amount,
 };
 use gmx_math::{mul_div_wide, TOKEN_PRECISION};
+use gmx_position_utils::{get_position_fees, validate_position};
 use gmx_pricing_utils::get_execution_price;
 use gmx_types::{MarketProps, PositionProps, PriceProps};
 use soroban_sdk::{contracttype, Address, BytesN, Env};
@@ -129,18 +133,40 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
         0
     };
 
-    // NOTE: position fees, borrowing/funding tracker syncs, collateral sum, fee pool writes,
-    // and validate_position are omitted to stay within Soroban's 40 ledger-entry budget.
-    // For the first positions on an empty market these are all zero/no-op. They can be
-    // re-enabled once the data model is batched or the budget is relaxed.
+    let fees = get_position_fees(
+        env,
+        p.data_store,
+        p.market,
+        &position,
+        p.collateral_price,
+        p.size_delta_usd,
+        true,
+    );
+    let net_collateral = p.collateral_amount - fees.total_cost_amount;
+    if net_collateral < 0 {
+        soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(3u32));
+    }
 
-    // Update collateral (no fee deduction for now)
-    position.collateral_amount += p.collateral_amount;
+    position.collateral_amount += net_collateral;
 
     // Update position size
     position.size_in_usd += p.size_delta_usd;
     position.size_in_tokens += new_size_in_tokens;
     position.increased_at_time = p.current_time;
+    position.borrowing_factor = DataStoreClient::new(env, p.data_store)
+        .get_u128(&cumulative_borrowing_factor_key(
+            env,
+            &p.market.market_token,
+            p.is_long,
+        )) as i128;
+    position.funding_fee_amount_per_size = DataStoreClient::new(env, p.data_store).get_i128(
+        &funding_amount_per_size_key(
+            env,
+            &p.market.market_token,
+            p.collateral_token,
+            p.is_long,
+        ),
+    );
 
     // Open interest deltas
     apply_delta_to_open_interest(
@@ -160,6 +186,35 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
         p.collateral_token,
         p.is_long,
         new_size_in_tokens,
+    );
+    apply_delta_to_pool_amount(
+        env,
+        p.data_store,
+        p.caller,
+        p.market,
+        p.collateral_token,
+        p.collateral_amount,
+    );
+    DataStoreClient::new(env, p.data_store).apply_delta_to_u128(
+        p.caller,
+        &collateral_sum_key(env, &p.market.market_token, p.collateral_token, p.is_long),
+        &p.collateral_amount,
+    );
+    if fees.total_cost_amount > 0 {
+        DataStoreClient::new(env, p.data_store).apply_delta_to_u128(
+            p.caller,
+            &claimable_fee_amount_key(env, &p.market.market_token, p.collateral_token),
+            &fees.total_cost_amount,
+        );
+    }
+
+    validate_position(
+        env,
+        p.data_store,
+        &position,
+        p.market,
+        p.collateral_price,
+        p.index_token_price,
     );
 
     // 14. Persist
