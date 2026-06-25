@@ -12,7 +12,7 @@ use gmx_keys::{
     account_withdrawal_list_key, claimable_fee_amount_key, deposit_list_key,
     funding_amount_per_size_key, funding_updated_at_key, keeper_heartbeat_timeout_key,
     last_keeper_activity_key, market_index_token_key, market_long_token_key,
-    market_short_token_key, open_interest_key, order_list_key, position_key,
+    market_short_token_key, open_interest_key, order_list_key, position_key, position_list_key,
     saved_funding_factor_per_second_key, withdrawal_list_key, DEFAULT_KEEPER_HEARTBEAT_TIMEOUT,
 };
 use gmx_market_utils::{get_open_interest_for_side, get_pool_value};
@@ -20,9 +20,10 @@ use gmx_math::{mul_div_wide, TOKEN_PRECISION};
 use gmx_position_utils::{get_position_fees, get_position_pnl_usd, is_liquidatable};
 use gmx_pricing_utils::{get_execution_price, get_position_price_impact};
 use gmx_types::{
-    AdlCandidate, DepositProps, FundingInfo, FundingRateInfo, KeeperHeartbeatStatus, MarketProps,
-    OrderProps, PoolValueInfo, PositionFees, PositionInfo, PositionLeverage, PositionProps,
-    PriceProps, ProtocolStats, SwapEstimate, WithdrawalProps, PendingOrder,
+    AdlCandidate, DepositProps, FundingInfo, FundingRateInfo, KeeperHeartbeatStatus,
+    LiquidatablePosition, MarketProps, OrderProps, PoolValueInfo, PositionFees, PositionInfo,
+    PositionLeverage, PositionProps, PriceProps, ProtocolStats, SwapEstimate, WithdrawalProps,
+    PendingOrder,
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
@@ -973,6 +974,128 @@ impl Reader {
             position_size_usd,
             is_liquidatable: is_liq,
         })
+    }
+
+    // ── Issue #283: liquidatable positions batch view ─────────────────────────
+
+    /// Return positions currently eligible for liquidation on a market side, sorted by
+    /// health_factor_bps ascending (most under-collateralised first).
+    ///
+    /// `health_factor_bps = collateral_usd * 10000 / size_usd` — any value below
+    /// 10000 means the position is below the minimum-collateral threshold.
+    /// Positions where `is_position_liquidatable` returns false are excluded.
+    ///
+    /// Pagination: the `offset` first matching entries are skipped; at most `limit`
+    /// entries are returned. No state is written.
+    pub fn get_liquidatable_positions(
+        env: Env,
+        data_store: Address,
+        oracle: Address,
+        order_handler: Address,
+        market: Address,
+        is_long: bool,
+        limit: u32,
+        offset: u32,
+    ) -> Vec<LiquidatablePosition> {
+        let ds = DataStoreClient::new(&env, &data_store);
+        let oracle_client = OracleClient::new(&env, &oracle);
+        let order_client = OrderHandlerClient::new(&env, &order_handler);
+
+        let market_props = Self::get_market(env.clone(), data_store.clone(), market.clone());
+        let index_price = oracle_client.get_primary_price(&market_props.index_token);
+
+        let pos_list = position_list_key(&env);
+        let total = ds.get_bytes32_set_count(&pos_list);
+
+        // Collect all liquidatable positions for this market/side.
+        let mut candidates: Vec<LiquidatablePosition> = Vec::new(&env);
+        let mut i = 0u32;
+        while i < total {
+            let batch_end = if i + 50 > total { total } else { i + 50 };
+            let keys = ds.get_bytes32_set_at(&pos_list, &i, &batch_end);
+            let keys_len = keys.len();
+            let mut j = 0u32;
+            while j < keys_len {
+                let pk = keys.get_unchecked(j);
+                if let Some(position) = order_client.get_position(&pk) {
+                    if position.market == market && position.is_long == is_long {
+                        let collateral_price = oracle_client
+                            .get_primary_price(&position.collateral_token)
+                            .mid_price();
+
+                        if is_liquidatable(
+                            &env,
+                            &data_store,
+                            &position,
+                            &market_props,
+                            collateral_price,
+                            &index_price,
+                        ) {
+                            let collateral_usd = mul_div_wide(
+                                &env,
+                                position.collateral_amount,
+                                collateral_price,
+                                TOKEN_PRECISION,
+                            ) as u128;
+                            let size_usd = if position.size_in_usd > 0 {
+                                position.size_in_usd as u128
+                            } else {
+                                1
+                            };
+                            let health_factor_bps = (collateral_usd
+                                .saturating_mul(10000)
+                                / size_usd)
+                                as u32;
+
+                            candidates.push_back(LiquidatablePosition {
+                                key: pk,
+                                owner: position.account,
+                                size_usd,
+                                collateral_usd,
+                                health_factor_bps,
+                            });
+                        }
+                    }
+                }
+                j += 1;
+            }
+            i = batch_end;
+        }
+
+        // Bubble-sort ascending by health_factor_bps (most undercollateralised first).
+        let n = candidates.len();
+        if n > 1 {
+            let mut a = 0u32;
+            while a < n {
+                let mut b = 0u32;
+                while b + 1 < n - a {
+                    let ca = candidates.get_unchecked(b);
+                    let cb = candidates.get_unchecked(b + 1);
+                    if ca.health_factor_bps > cb.health_factor_bps {
+                        candidates.set(b, cb);
+                        candidates.set(b + 1, ca);
+                    }
+                    b += 1;
+                }
+                a += 1;
+            }
+        }
+
+        // Apply pagination and return.
+        let mut out: Vec<LiquidatablePosition> = Vec::new(&env);
+        let mut skipped = 0u32;
+        let mut taken = 0u32;
+        let mut idx = 0u32;
+        while idx < candidates.len() && taken < limit {
+            if skipped < offset {
+                skipped += 1;
+            } else {
+                out.push_back(candidates.get_unchecked(idx));
+                taken += 1;
+            }
+            idx += 1;
+        }
+        out
     }
 }
 

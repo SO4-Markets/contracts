@@ -1025,6 +1025,7 @@ version = "0.1.0"
 dependencies = [
  "adl-handler",
  "data-store",
+ "deposit-handler",
  "deposit-vault",
  "fee-handler",
  "gmx-keys",
@@ -1037,6 +1038,8 @@ dependencies = [
  "order-vault",
  "role-store",
  "soroban-sdk",
+ "withdrawal-handler",
+ "withdrawal-vault",
 ]
 
 [[package]]

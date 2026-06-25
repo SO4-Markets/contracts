@@ -13,7 +13,7 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use gmx_keys::{global_pause_key, is_market_paused_key};
+use gmx_keys::{global_pause_key, is_market_paused_key, scheduled_unpause_ledger_key};
 use gmx_types::{CreateDepositParams, CreateOrderParams, CreateWithdrawalParams};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, BytesN,
@@ -86,6 +86,10 @@ pub enum Error {
     Unauthorized = 3,
     Paused = 4,
     BatchSizeLimitExceeded = 5,
+    /// `execute_unpause` was called before the timelock window expired (issue #282).
+    TimelockNotExpired = 6,
+    /// `execute_unpause` was called without a prior `schedule_unpause` (issue #282).
+    UnpauseNotScheduled = 7,
 }
 
 // ─── External handler clients ─────────────────────────────────────────────────
@@ -96,6 +100,8 @@ pub enum Error {
 trait IDataStore {
     fn get_bool(env: Env, key: BytesN<32>) -> bool;
     fn set_bool(env: Env, caller: Address, key: BytesN<32>, value: bool) -> bool;
+    fn get_u128(env: Env, key: BytesN<32>) -> u128;
+    fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
     fn set_position_manager(env: Env, caller: Address, market: Address, manager: Address) -> Address;
     fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address>;
 }
@@ -212,6 +218,13 @@ impl ExchangeRouter {
             .set(&InstanceKey::WithdrawalHandler, &new_handler);
     }
 
+    /// Default timelock for unpausing: ~4 hours at 5 s/ledger (issue #282).
+    const UNPAUSE_TIMELOCK_LEDGERS: u32 = 2880;
+
+    /// Pause the protocol immediately.
+    ///
+    /// Re-pausing clears any pending `schedule_unpause` so defenders can reset
+    /// the timelock clock if the threat resurfaces (issue #282).
     pub fn set_paused(env: Env, paused: bool) {
         let admin: Address = env
             .storage()
@@ -224,11 +237,84 @@ impl ExchangeRouter {
             .instance()
             .get(&InstanceKey::DataStore)
             .unwrap();
-        DataStoreClient::new(&env, &data_store).set_bool(
+        let ds = DataStoreClient::new(&env, &data_store);
+        ds.set_bool(
             &env.current_contract_address(),
             &global_pause_key(&env),
             &paused,
         );
+        // Clear any pending unpause schedule when re-pausing.
+        if paused {
+            ds.set_u128(
+                &env.current_contract_address(),
+                &scheduled_unpause_ledger_key(&env),
+                &0,
+            );
+        }
+    }
+
+    /// Schedule an unpause after `UNPAUSE_TIMELOCK_LEDGERS` ledgers (issue #282).
+    ///
+    /// Records `current_ledger + UNPAUSE_TIMELOCK_LEDGERS` as the earliest ledger
+    /// at which `execute_unpause` may succeed. Emits the scheduled ledger as an event
+    /// so off-chain monitoring can observe the intent. Admin only.
+    pub fn schedule_unpause(env: Env) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        admin.require_auth();
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap();
+        let scheduled_at =
+            (env.ledger().sequence() + Self::UNPAUSE_TIMELOCK_LEDGERS) as u128;
+        DataStoreClient::new(&env, &data_store).set_u128(
+            &env.current_contract_address(),
+            &scheduled_unpause_ledger_key(&env),
+            &scheduled_at,
+        );
+        env.events().publish(
+            (soroban_sdk::symbol_short!("unpause_s"),),
+            scheduled_at,
+        );
+    }
+
+    /// Execute a previously scheduled unpause if the timelock has expired (issue #282).
+    ///
+    /// Reverts with `TimelockNotExpired` if called before the scheduled ledger,
+    /// and with `UnpauseNotScheduled` if `schedule_unpause` was never called (or was
+    /// cleared by a re-pause). On success, clears both the pause flag and the schedule.
+    pub fn execute_unpause(env: Env) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        admin.require_auth();
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap();
+        let ds = DataStoreClient::new(&env, &data_store);
+        let router = env.current_contract_address();
+
+        let scheduled =
+            ds.get_u128(&scheduled_unpause_ledger_key(&env));
+        if scheduled == 0 {
+            panic_with_error!(&env, Error::UnpauseNotScheduled);
+        }
+        if (env.ledger().sequence() as u128) < scheduled {
+            panic_with_error!(&env, Error::TimelockNotExpired);
+        }
+
+        // Clear pause and schedule.
+        ds.set_bool(&router, &global_pause_key(&env), &false);
+        ds.set_u128(&router, &scheduled_unpause_ledger_key(&env), &0);
     }
 
     pub fn reset_circuit_breaker(env: Env, market: Address) {

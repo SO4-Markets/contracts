@@ -4,8 +4,8 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    claimable_fee_amount_key, claimable_funding_amount_key, claimable_ui_fee_amount_key, roles,
-    ui_fee_factor_key,
+    auto_compound_fees_key, claimable_fee_amount_key, claimable_funding_amount_key,
+    claimable_ui_fee_amount_key, roles, ui_fee_factor_key,
 };
 use gmx_math::FLOAT_PRECISION;
 use soroban_sdk::{
@@ -47,6 +47,8 @@ trait IRoleStore {
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
+    fn get_bool(env: Env, key: BytesN<32>) -> bool;
+    fn set_bool(env: Env, caller: Address, key: BytesN<32>, value: bool) -> bool;
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
     fn apply_delta_to_u128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> u128;
@@ -201,6 +203,13 @@ impl FeeHandler {
         let ds = DataStoreClient::new(&env, &data_store);
         let handler = env.current_contract_address();
 
+        // Issue #285: if auto-compound is enabled, fees stay in the pool permanently.
+        // The claimable tracker may still hold a non-zero value from before the flag
+        // was set; return 0 so no tokens leave the pool.
+        if ds.get_bool(&auto_compound_fees_key(&env, &market)) {
+            return 0;
+        }
+
         let key = claimable_fee_amount_key(&env, &market, &token);
         let amount = ds.get_u128(&key);
         if amount == 0 {
@@ -232,6 +241,43 @@ impl FeeHandler {
             receiver,
         });
         transfer_amount
+    }
+
+    // ── Issue #285: auto-compound LP fees ────────────────────────────────────
+
+    /// Enable or disable auto-compound mode for a market (admin only, issue #285).
+    ///
+    /// When enabled, position fees are retained in `pool_amount` (they are already
+    /// added to the pool on every order execution) and `claim_fees` returns 0 for
+    /// this market. Toggling the flag does not disturb existing positions.
+    pub fn set_auto_compound(env: Env, market: Address, enabled: bool) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        admin.require_auth();
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap();
+        DataStoreClient::new(&env, &data_store).set_bool(
+            &env.current_contract_address(),
+            &auto_compound_fees_key(&env, &market),
+            &enabled,
+        );
+    }
+
+    /// Return whether auto-compound mode is enabled for a market (issue #285).
+    pub fn is_auto_compound(env: Env, market: Address) -> bool {
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap();
+        DataStoreClient::new(&env, &data_store)
+            .get_bool(&auto_compound_fees_key(&env, &market))
     }
 
     /// Upgrade the contract wasm. Only the stored admin may call this.

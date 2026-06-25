@@ -781,6 +781,27 @@ pub fn trader_volume_window_start_key(env: &Env, trader: &Address, market: &Addr
     sha256(env, &b)
 }
 
+// ─── Unpause timelock key (issue #282) ───────────────────────────────────────
+
+/// Ledger sequence at which `execute_unpause` is allowed (issue #282).
+/// Written by `schedule_unpause`; cleared when the market is re-paused or unpause executes.
+pub fn scheduled_unpause_ledger_key(env: &Env) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "SCHEDULED_UNPAUSE_LEDGER");
+    sha256(env, &b)
+}
+
+// ─── Auto-compound fee key (issue #285) ──────────────────────────────────────
+
+/// Bool stored in data_store: when `true`, position fees for `market` are retained
+/// in `pool_amount` rather than accrued to the claimable balance. (issue #285)
+pub fn auto_compound_fees_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "AUTO_COMPOUND_FEES");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

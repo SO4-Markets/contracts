@@ -369,4 +369,18 @@ pub struct PendingOrder {
     pub is_long: bool,
 }
 
+/// Liquidatable position entry returned by `reader::get_liquidatable_positions` (issue #283).
+///
+/// `health_factor_bps < 10000` means the position is below the min-collateral threshold
+/// (i.e., currently eligible for liquidation). Sorted ascending so the most
+/// under-collateralised positions appear first.
+#[contracttype]
+pub struct LiquidatablePosition {
+    pub key: BytesN<32>,           // canonical position key for order_handler::get_position
+    pub owner: Address,
+    pub size_usd: u128,
+    pub collateral_usd: u128,
+    pub health_factor_bps: u32,    // collateral_usd * 10000 / size_usd; < 10000 = liquidatable
+}
+
 use soroban_sdk::BytesN;
