@@ -715,6 +715,35 @@ mod tests {
         assert_eq!(n2, 2);
     }
 
+    // ── Issue #179: get_address Option semantics ─────────────────────────────
+
+    /// Reading an address for a key that was never written must return None, not panic.
+    #[test]
+    fn get_address_returns_none_for_missing_key() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xFFu8; 32]);
+        assert!(
+            client.get_address(&key).is_none(),
+            "missing key must return None, not panic"
+        );
+    }
+
+    /// Reading an address for a key that was written must return Some(addr).
+    #[test]
+    fn get_address_returns_some_for_present_key() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xFEu8; 32]);
+        let value = Address::generate(&env);
+        client.set_address(&admin, &key, &value);
+        assert_eq!(
+            client.get_address(&key),
+            Some(value),
+            "present key must return Some(addr)"
+        );
+    }
+
     // ── Issue #109: CONTROLLER authorization matrix ───────────────────────────
 
     /// set_u128 must reject a caller that does not hold CONTROLLER.

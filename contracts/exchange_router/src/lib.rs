@@ -727,11 +727,12 @@ mod tests {
             &fee_handler_dummy,
         );
 
-        // Grant CONTROLLER to all handlers
+        // Grant CONTROLLER to all handlers and the router (router writes global_pause_key)
         rs_c.grant_role(&admin, &dep_handler, &roles::controller(&env));
         rs_c.grant_role(&admin, &wth_handler, &roles::controller(&env));
         rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
         rs_c.grant_role(&admin, &liq_handler, &roles::controller(&env));
+        rs_c.grant_role(&admin, &router, &roles::controller(&env));
 
         // Register market in DataStore
         let ds_c = DsClient::new(&env, &ds);
@@ -1221,6 +1222,91 @@ mod tests {
             &w.long_tk,
             &true,
         );
+    }
+
+    // ── Issue #177: pause flag coverage for create_deposit ───────────────────
+
+    /// When the protocol is paused, create_deposit must revert with a Paused error
+    /// before any token transfer occurs.
+    #[test]
+    fn create_deposit_reverts_when_paused() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let user = Address::generate(&w.env);
+
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &(ONE_TOKEN * 2));
+        set_prices(&w, 2_000 * fp);
+
+        let router = ExchangeRouterClient::new(&w.env, &w.router);
+
+        // Pause the protocol
+        router.set_paused(&true);
+
+        let result = router.try_create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: ONE_TOKEN,
+                short_token_amount: 0,
+                min_market_tokens: 1,
+                execution_fee: 0,
+            },
+        );
+
+        assert!(result.is_err(), "create_deposit must fail with Paused error");
+
+        // No tokens should have moved — user still holds everything
+        let user_bal = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&user);
+        assert_eq!(
+            user_bal,
+            ONE_TOKEN * 2,
+            "no tokens must transfer when create_deposit reverts due to pause"
+        );
+    }
+
+    /// cancel_deposit must succeed while the protocol is paused so users can
+    /// always recover pending funds.
+    #[test]
+    fn cancel_deposit_succeeds_when_paused() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &ONE_TOKEN);
+
+        // Create deposit through the handler directly (before pausing)
+        let key = DepositHandlerClient::new(&w.env, &w.dep_handler).create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: ONE_TOKEN,
+                short_token_amount: 0,
+                min_market_tokens: 0,
+                execution_fee: 0,
+            },
+        );
+
+        let router = ExchangeRouterClient::new(&w.env, &w.router);
+
+        // Pause the protocol
+        router.set_paused(&true);
+
+        // Cancel must succeed — cancellations are whitelisted while paused
+        router.cancel_deposit(&user, &key);
+
+        assert!(
+            DepositHandlerClient::new(&w.env, &w.dep_handler)
+                .get_deposit(&key)
+                .is_none(),
+            "deposit must be gone after cancel"
+        );
+        let balance = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&user);
+        assert_eq!(balance, ONE_TOKEN, "tokens must be refunded after cancel while paused");
     }
 
     // ── Issue #135: Router multicall E2E tests ────────────────────────────────

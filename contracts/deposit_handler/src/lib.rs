@@ -1085,6 +1085,68 @@ mod tests {
         );
     }
 
+    // ── Issue #174: atomicity — failed execute must not mutate state ──────────
+
+    /// If execute_deposit panics (InsufficientLpOut), Soroban transaction semantics
+    /// must revert ALL intermediate writes: vault balance and pool amount must be
+    /// identical before and after the failed attempt.
+    #[test]
+    fn execute_deposit_revert_leaves_state_unchanged() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+
+        let hc = DepositHandlerClient::new(env, &w.handler);
+        let ds_c = DsClient::new(env, &w.ds);
+
+        let key = hc.create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: 1_000_0000i128,
+                short_token_amount: 0,
+                // Demand more LP than can possibly be minted → InsufficientLpOut
+                min_market_tokens: i128::MAX,
+                execution_fee: 0,
+            },
+        );
+
+        let pool_before =
+            ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.long_tk));
+        let vault_before = token::Client::new(env, &w.long_tk).balance(&w.vault);
+
+        // Must fail with InsufficientLpOut
+        let result = hc.try_execute_deposit(&w.keeper, &key);
+        assert!(result.is_err(), "execute_deposit must fail when mint_amount < min_market_tokens");
+
+        // Pool amount unchanged — apply_delta_to_pool_amount was reverted
+        let pool_after =
+            ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.long_tk));
+        assert_eq!(
+            pool_before, pool_after,
+            "pool amount must be unchanged after failed execute"
+        );
+
+        // Vault balance unchanged — transfer_out was reverted
+        let vault_after = token::Client::new(env, &w.long_tk).balance(&w.vault);
+        assert_eq!(
+            vault_before, vault_after,
+            "vault balance must be unchanged after failed execute"
+        );
+
+        // Deposit record still exists — remove_deposit was reverted
+        assert!(
+            hc.get_deposit(&key).is_some(),
+            "deposit record must survive a failed execute"
+        );
+    }
+
     // ── Issue #37: Token validation ────────────────────────────────────────────
 
     /// Depositing with wrong long token must revert BEFORE any transfer.

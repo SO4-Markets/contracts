@@ -198,10 +198,9 @@ impl Oracle {
                 panic_with_error!(&env, Error::StalePrice);
             }
 
-            // keeper_ledger_seq must be within LEDGER_SEQ_WINDOW of current
-            if sp.ledger_seq > current_seq
-                || current_seq.saturating_sub(sp.ledger_seq) > LEDGER_SEQ_WINDOW
-            {
+            // keeper_ledger_seq must be within LEDGER_SEQ_WINDOW of current.
+            // is_seq_stale uses u64 arithmetic to safely handle u32 wrap-around.
+            if is_seq_stale(current_seq, sp.ledger_seq, LEDGER_SEQ_WINDOW) {
                 panic_with_error!(&env, Error::StalePrice);
             }
 
@@ -359,6 +358,17 @@ impl Oracle {
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
+
+/// Returns true if the submitted ledger sequence is too old (or from the future).
+///
+/// Casts both values to u64 so the subtraction is always safe: when `submitted > current`
+/// (which happens after a u32 sequence wrap-around where a pre-wrap sequence numerically
+/// exceeds the post-wrap current) the first branch triggers and we treat it as stale.
+fn is_seq_stale(current: u32, submitted: u32, window: u32) -> bool {
+    let c = current as u64;
+    let s = submitted as u64;
+    s > c || (c - s) > window as u64
+}
 
 fn require_order_keeper(env: &Env, caller: &Address) {
     let role_store: Address = env
@@ -589,6 +599,32 @@ mod tests {
 
         client.clear_price(&admin, &token);
         assert!(client.try_get_price(&token).is_none());
+    }
+
+    // ── Issue #172: ledger sequence wrap-around staleness ─────────────────────
+
+    /// Post-wrap scenario: current_seq = 1, submitted = u32::MAX.
+    /// The submitted sequence numerically exceeds current (pre-wrap artifact) and
+    /// must be rejected as stale regardless of the apparent numeric difference.
+    #[test]
+    fn seq_staleness_rejects_pre_wrap_sequence_as_stale() {
+        assert!(is_seq_stale(1, u32::MAX, 60), "u32::MAX > 1 must be stale");
+        assert!(is_seq_stale(1, u32::MAX - 1, 60), "u32::MAX-1 > 1 must be stale");
+        // Edge: submitted exactly equals current — fresh (age = 0)
+        assert!(!is_seq_stale(1, 1, 60), "same-ledger submission must be fresh");
+    }
+
+    /// Normal (non-wrap) staleness check must still work after the refactor.
+    #[test]
+    fn seq_staleness_normal_case_works() {
+        // On boundary (60 ledgers ago) → fresh
+        assert!(!is_seq_stale(100, 40, 60));
+        // One beyond boundary (61 ledgers ago) → stale
+        assert!(is_seq_stale(100, 39, 60));
+        // Just submitted (same ledger) → fresh
+        assert!(!is_seq_stale(100, 100, 60));
+        // One ledger ago → fresh
+        assert!(!is_seq_stale(100, 99, 60));
     }
 
     #[test]
