@@ -704,11 +704,21 @@ impl OrderHandler {
             OrderType::StopIncrease if index_price.min < order.trigger_price => {
                 panic_with_error!(&env, Error::UnsatisfiedTrigger);
             }
-            OrderType::LimitDecrease if index_price.max < order.trigger_price => {
-                panic_with_error!(&env, Error::UnsatisfiedTrigger);
+            OrderType::LimitDecrease => {
+                if order.is_long && index_price.max < order.trigger_price {
+                    panic_with_error!(&env, Error::UnsatisfiedTrigger);
+                }
+                if !order.is_long && index_price.max > order.trigger_price {
+                    panic_with_error!(&env, Error::UnsatisfiedTrigger);
+                }
             }
-            OrderType::StopLossDecrease if index_price.min > order.trigger_price => {
-                panic_with_error!(&env, Error::UnsatisfiedTrigger);
+            OrderType::StopLossDecrease => {
+                if order.is_long && index_price.min > order.trigger_price {
+                    panic_with_error!(&env, Error::UnsatisfiedTrigger);
+                }
+                if !order.is_long && index_price.min < order.trigger_price {
+                    panic_with_error!(&env, Error::UnsatisfiedTrigger);
+                }
             }
             // LimitSwap: execute only when the index price is at or below trigger_price.
             // A non-zero trigger_price means the user wants to swap only when the

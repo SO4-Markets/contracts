@@ -90,6 +90,7 @@ pub enum Error {
     CodeTooLong = 9,
     InvalidCodeCharacters = 10,
     EmptyCode = 11,
+    InvalidTierConfig = 12,
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -231,8 +232,14 @@ impl ReferralStorage {
             panic_with_error!(&env, Error::InvalidTier);
         }
         // Validate config parameters
-        if config.total_rebate_bps > 10000 || config.discount_share_bps > 10000 {
-            panic_with_error!(&env, Error::InvalidInput);
+        let discount_bps = ((config.total_rebate_bps as u64) * (config.discount_share_bps as u64) / 10000) as u32;
+        let rebate_bps = if config.total_rebate_bps >= discount_bps {
+            config.total_rebate_bps - discount_bps
+        } else {
+            panic_with_error!(&env, Error::InvalidTierConfig);
+        };
+        if discount_bps > 10000 || rebate_bps > 10000 || config.total_rebate_bps > 10000 || config.discount_share_bps > 10000 {
+            panic_with_error!(&env, Error::InvalidTierConfig);
         }
         env.storage()
             .persistent()
@@ -546,6 +553,41 @@ mod tests {
             discount_share_bps: 10_000,
         };
         client(&w).set_tier_config(&w.admin, &1u32, &cfg);
+    }
+
+    /// Unit test: valid tier config (1000 bps discount + 200 bps rebate) — succeeds
+    #[test]
+    fn set_tier_config_valid_discount_and_rebate_succeeds() {
+        let w = setup();
+        let cfg = TierConfig {
+            total_rebate_bps: 1200,      // total rebate (discount + rebate)
+            discount_share_bps: 8333,    // discount share (~83.33% of 1200 = 1000)
+        };
+        client(&w).set_tier_config(&w.admin, &0u32, &cfg);
+    }
+
+    /// Unit test: discount = 10_001 — reverts
+    #[test]
+    #[should_panic]
+    fn set_tier_config_discount_overflow_reverts() {
+        let w = setup();
+        let cfg = TierConfig {
+            total_rebate_bps: 10_001,
+            discount_share_bps: 10_000,
+        };
+        client(&w).set_tier_config(&w.admin, &0u32, &cfg);
+    }
+
+    /// Unit test: discount = 9_000, rebate = 2_000 (sum = 11_000) — reverts
+    #[test]
+    #[should_panic]
+    fn set_tier_config_sum_overflow_reverts() {
+        let w = setup();
+        let cfg = TierConfig {
+            total_rebate_bps: 11_000,
+            discount_share_bps: 8181,    // 9000 discount share (9000/11000 * 10000)
+        };
+        client(&w).set_tier_config(&w.admin, &0u32, &cfg);
     }
 
     // ─── Issue #89: valid configs persist and are readable ───────────────────
