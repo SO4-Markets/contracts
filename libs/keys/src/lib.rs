@@ -594,6 +594,34 @@ pub fn keeper_public_key_prefix(env: &Env) -> BytesN<32> {
     sha256(env, &b)
 }
 
+/// sha256("LAST_KEEPER_ACTIVITY" ‖ role)
+///
+/// Ledger sequence of the most recent successful execution by a holder of
+/// `role`. Updated by handlers on every successful keeper action so the protocol
+/// has an on-chain liveness signal per keeper role (issue #249).
+pub fn last_keeper_activity_key(env: &Env, role: &BytesN<32>) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "LAST_KEEPER_ACTIVITY");
+    b.extend_from_array(&role.to_array());
+    sha256(env, &b)
+}
+
+/// sha256("KEEPER_HEARTBEAT_TIMEOUT" ‖ role)
+///
+/// Maximum number of ledgers a keeper `role` may go silent before it is
+/// considered stale. Admin-configured; falls back to
+/// `DEFAULT_KEEPER_HEARTBEAT_TIMEOUT` when unset (issue #249).
+pub fn keeper_heartbeat_timeout_key(env: &Env, role: &BytesN<32>) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "KEEPER_HEARTBEAT_TIMEOUT");
+    b.extend_from_array(&role.to_array());
+    sha256(env, &b)
+}
+
+/// Default keeper heartbeat timeout: 2880 ledgers (~4 hours at ~5s/ledger).
+/// Used when `keeper_heartbeat_timeout_key(role)` is unset in data_store.
+pub const DEFAULT_KEEPER_HEARTBEAT_TIMEOUT: u64 = 2880;
+
 /// Market token wasm hash (for factory to deploy LP tokens)
 pub fn market_token_wasm_hash_key(env: &Env) -> BytesN<32> {
     let mut b = Bytes::new(env);
@@ -626,6 +654,23 @@ pub fn is_adl_enabled_key(env: &Env, market: &Address, is_long: bool) -> BytesN<
 }
 
 /// Max PnL factor for ADL triggering
+/// sha256("POSITION_MANAGER" ‖ owner ‖ market)
+pub fn position_manager_key(env: &Env, owner: &Address, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "POSITION_MANAGER");
+    push_addr(&mut b, env, owner);
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+/// sha256("LIQUIDATION_EXECUTION_FEE" ‖ market)
+pub fn liquidation_execution_fee_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "LIQUIDATION_EXECUTION_FEE");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
 pub fn max_pnl_factor_for_adl_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "MAX_PNL_FACTOR_FOR_ADL");
@@ -678,6 +723,82 @@ pub fn max_pnl_factor_for_withdrawals_key(env: &Env) -> BytesN<32> {
 pub fn global_pause_key(env: &Env) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "GLOBAL_PAUSE");
+    sha256(env, &b)
+}
+
+/// The max allowed percentage price movement (e.g. 500 = 5%) before the circuit
+/// breaker pauses the market (issue #203). Stored in FLOAT_PRECISION in data_store.
+pub fn circuit_breaker_factor_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "CIRCUIT_BREAKER_FACTOR");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+/// Stores whether a specific market is paused (issue #203). Stored as a bool in data_store.
+pub fn is_market_paused_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "IS_MARKET_PAUSED");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+// ─── Fee tier keys (issue #204) ───────────────────────────────────────────────
+
+/// Volume threshold (USD, FLOAT_PRECISION) required to qualify for fee tier N.
+pub fn fee_tier_volume_threshold_key(env: &Env, market: &Address, tier: u32) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "FEE_TIER_VOL_THRESH");
+    push_addr(&mut b, env, market);
+    b.push_back((tier & 0xff) as u8);
+    sha256(env, &b)
+}
+
+/// Position fee factor (FLOAT_PRECISION) for a specific fee tier in a market.
+pub fn fee_tier_position_fee_factor_key(env: &Env, market: &Address, tier: u32) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "FEE_TIER_POS_FEE");
+    push_addr(&mut b, env, market);
+    b.push_back((tier & 0xff) as u8);
+    sha256(env, &b)
+}
+
+/// 30-day rolling trade volume (USD, FLOAT_PRECISION) for a trader in a market.
+pub fn trader_volume_key(env: &Env, trader: &Address, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "TRADER_VOLUME");
+    push_addr(&mut b, env, trader);
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+/// Ledger sequence at which the trader's rolling volume window started.
+pub fn trader_volume_window_start_key(env: &Env, trader: &Address, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "TRADER_VOL_WIN");
+    push_addr(&mut b, env, trader);
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+// ─── Unpause timelock key (issue #282) ───────────────────────────────────────
+
+/// Ledger sequence at which `execute_unpause` is allowed (issue #282).
+/// Written by `schedule_unpause`; cleared when the market is re-paused or unpause executes.
+pub fn scheduled_unpause_ledger_key(env: &Env) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "SCHEDULED_UNPAUSE_LEDGER");
+    sha256(env, &b)
+}
+
+// ─── Auto-compound fee key (issue #285) ──────────────────────────────────────
+
+/// Bool stored in data_store: when `true`, position fees for `market` are retained
+/// in `pool_amount` rather than accrued to the claimable balance. (issue #285)
+pub fn auto_compound_fees_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "AUTO_COMPOUND_FEES");
+    push_addr(&mut b, env, market);
     sha256(env, &b)
 }
 

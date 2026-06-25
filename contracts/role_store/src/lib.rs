@@ -431,4 +431,38 @@ mod tests {
         // impostor does not hold ROLE_ADMIN — revoke must panic.
         client.revoke_role(&impostor, &holder, &ctrl);
     }
+
+    // ── Issue #233: CONTROLLER cannot self-grant ROLE_ADMIN ──────────────────
+
+    /// A CONTROLLER-only address cannot call grant_role to elevate itself to
+    /// ROLE_ADMIN. The require_admin guard inside grant_role is gated on
+    /// role_store's own storage — not on the CONTROLLER role in data_store.
+    #[test]
+    #[should_panic]
+    fn controller_cannot_grant_self_admin() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let admin_role = roles::role_admin(&env);
+        let controller_addr = Address::generate(&env);
+        // Grant CONTROLLER but NOT ROLE_ADMIN
+        client.grant_role(&admin, &controller_addr, &ctrl);
+        // CONTROLLER tries to elevate itself to ROLE_ADMIN — must panic Unauthorized
+        client.grant_role(&controller_addr, &controller_addr, &admin_role);
+    }
+
+    /// A CONTROLLER-only address cannot grant ROLE_ADMIN to any third party either.
+    #[test]
+    #[should_panic]
+    fn controller_cannot_call_grant_role_directly() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let admin_role = roles::role_admin(&env);
+        let controller_addr = Address::generate(&env);
+        let victim = Address::generate(&env);
+        client.grant_role(&admin, &controller_addr, &ctrl);
+        // CONTROLLER tries to grant ROLE_ADMIN to victim — must panic Unauthorized
+        client.grant_role(&controller_addr, &victim, &admin_role);
+    }
 }

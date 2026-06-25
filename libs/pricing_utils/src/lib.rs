@@ -1355,4 +1355,28 @@ mod tests {
             "rebate must be capped at pool_usd={pool_usd}, got {impact}"
         );
     }
+
+    /// Documents the tuning example in docs/price-impact.md:
+    /// target 0.5% impact on a 50,000 USD trade with quadratic position impact.
+    ///
+    ///   target_impact = 50,000 * 50 bps / 10,000 = 250 USD
+    ///   factor        = target_impact / trade^2
+    ///                 = 250 / 2,500,000,000 = 1e-7
+    ///   scaled factor = 1e-7 * FLOAT_PRECISION = 1e23
+    #[test]
+    fn test_price_impact_tuning_example_derives_factor() {
+        let trade_usd: i128 = 50_000;
+        let target_bps: i128 = 50;
+        let target_impact_usd = trade_usd * target_bps / 10_000;
+
+        let factor_scaled =
+            target_impact_usd * FLOAT_PRECISION / (trade_usd * trade_usd);
+
+        assert_eq!(target_impact_usd, 250);
+        assert_eq!(factor_scaled, 100_000_000_000_000_000_000_000);
+
+        let recomputed_impact_usd =
+            factor_scaled * trade_usd * trade_usd / FLOAT_PRECISION;
+        assert_eq!(recomputed_impact_usd, target_impact_usd);
+    }
 }

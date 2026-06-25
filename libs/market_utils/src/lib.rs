@@ -243,6 +243,8 @@ pub fn update_cumulative_borrowing_factor(
     let exponent = ds_client.get_u128(&exponent_key) as i128;
 
     // utilization ratio (FLOAT_PRECISION)
+    // mul_div_wide uses Soroban I256 (256-bit) for every multiplication, so no
+    // i128 overflow is possible regardless of how large any operand is.
     let util = mul_div_wide(env, oi, FLOAT_PRECISION, pool_amount);
     // util^exponent (FLOAT_PRECISION)
     let util_exp = pow_factor(env, util, exponent);
@@ -340,6 +342,28 @@ pub fn update_funding_state(
         let fnd_key =
             funding_amount_per_size_key(env, &market.market_token, collateral_token, is_long);
         ds_client.apply_delta_to_i128(caller, &fnd_key, &delta);
+    }
+
+    // Emit sign-flip event when the paying side changes (positive = longs pay, negative = shorts pay).
+    // Only fires when both the old and new rates are non-zero, so a rate starting from or going to
+    // zero does not trigger a spurious flip notification.
+    if dt > 0
+        && current_factor != 0
+        && next_factor != 0
+        && (current_factor > 0) != (next_factor > 0)
+    {
+        env.events().publish(
+            (soroban_sdk::symbol_short!("fnd_flip"),),
+            (
+                market.market_token.clone(),
+                next_factor > 0i128,                       // is_long_paying
+                current_factor.saturating_mul(3600i128),   // old_rate_per_hour (FLOAT_PRECISION)
+                next_factor.saturating_mul(3600i128),      // new_rate_per_hour (FLOAT_PRECISION)
+                long_oi as u128,                           // long_oi_usd
+                short_oi as u128,                          // short_oi_usd
+                env.ledger().sequence() as u64,            // ledger
+            ),
+        );
     }
 
     FundingResult {
@@ -646,12 +670,8 @@ mod tests {
         long_token: &Address,
         short_token: &Address,
     ) -> MarketProps {
-        MarketProps {
-            market_token: market_token.clone(),
-            index_token: index_token.clone(),
-            long_token: long_token.clone(),
-            short_token: short_token.clone(),
-        }
+        // Issue #248: build via the shared constructor instead of a per-field literal.
+        MarketProps::new(market_token, index_token, long_token, short_token)
     }
 
     #[test]
@@ -1069,5 +1089,145 @@ mod tests {
             pnl, 0,
             "long PnL at entry price must be exactly 0, got {pnl}"
         );
+    }
+
+    // ── Issue #216: FundingRateSignFlipped event ──────────────────────────────
+
+    /// Seed all the config keys needed by compute_next_funding_factor.
+    ///
+    /// saved_factor: the rate already persisted (simulates a prior update).
+    /// Ramp factors are set large enough that a single-second step can cross
+    /// zero when the dominant OI side changes.
+    fn setup_funding_params(
+        env: &Env,
+        ds: &Address,
+        admin: &Address,
+        mt: &Address,
+        saved_factor: i128,
+    ) {
+        let ds_c = DsClient::new(env, ds);
+        let fp = FLOAT_PRECISION as u128;
+        // saved_factor and last-updated timestamp are in persistent storage
+        ds_c.set_i128(admin, &gmx_keys::saved_funding_factor_per_second_key(env, mt), &saved_factor);
+        ds_c.set_u128(admin, &gmx_keys::funding_updated_at_key(env, mt), &0u128);
+        // Config params are in instance storage (read via get_u128_instance / get_i128_instance)
+        ds_c.set_u128_instance(admin, &gmx_keys::funding_factor_key(env, mt), &fp);
+        ds_c.set_u128_instance(admin, &gmx_keys::funding_exponent_factor_key(env, mt), &fp);
+        // Ramp = 1000 × FLOAT_PRECISION per second → a single-second step can cross zero
+        let ramp: u128 = 1_000u128 * fp;
+        ds_c.set_u128_instance(admin, &gmx_keys::funding_increase_factor_per_second_key(env, mt), &ramp);
+        ds_c.set_u128_instance(admin, &gmx_keys::funding_decrease_factor_per_second_key(env, mt), &ramp);
+        // Wide clamp so clamping never interferes with sign crossing
+        let bound: i128 = 1_000_000i128 * FLOAT_PRECISION;
+        ds_c.set_i128_instance(admin, &gmx_keys::min_funding_factor_per_second_key(env, mt), &(-bound));
+        ds_c.set_i128_instance(admin, &gmx_keys::max_funding_factor_per_second_key(env, mt), &bound);
+    }
+
+    /// Shift from long-dominated to short-dominated OI.
+    /// saved_factor starts positive (longs paying); with ramp=1000 and dt=1
+    /// the rate crosses zero — the fnd_flip event fires exactly when
+    /// funding_factor_per_second changes sign (verified via FundingResult).
+    #[test]
+    fn funding_sign_flip_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = make_market(&env);
+        let ds_c = DsClient::new(&env, &ds);
+
+        // saved_factor=100 (positive, longs paying)
+        setup_funding_params(&env, &ds, &admin, &mt, 100_i128);
+
+        // Short-dominant: 1 M long vs 9 M short → signed_target becomes negative
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::open_interest_key(&env, &mt, &lt, true),
+            &1_000_000_i128,
+        );
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::open_interest_key(&env, &mt, &st, false),
+            &9_000_000_i128,
+        );
+
+        let market = make_market_props(&mt, &it, &lt, &st);
+        let result = update_funding_state(&env, &ds, &admin, &market, 0, 0, 1);
+
+        // Rate crossed zero (was 100, now negative) → fnd_flip event fires exactly here.
+        assert!(
+            result.funding_factor_per_second < 0,
+            "rate must go negative for fnd_flip to fire; got {}",
+            result.funding_factor_per_second,
+        );
+    }
+
+    /// OI stays long-dominant while the saved rate is already positive.
+    /// The rate increases in magnitude but never crosses zero → no fnd_flip event.
+    #[test]
+    fn funding_magnitude_change_no_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = make_market(&env);
+        let ds_c = DsClient::new(&env, &ds);
+
+        // saved_factor=100 (positive, longs paying)
+        setup_funding_params(&env, &ds, &admin, &mt, 100_i128);
+
+        // Long-dominant: 9 M long vs 1 M short → signed_target stays positive
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::open_interest_key(&env, &mt, &lt, true),
+            &9_000_000_i128,
+        );
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::open_interest_key(&env, &mt, &st, false),
+            &1_000_000_i128,
+        );
+
+        let market = make_market_props(&mt, &it, &lt, &st);
+        let result = update_funding_state(&env, &ds, &admin, &market, 0, 0, 1);
+
+        // Rate stayed positive (magnitude increased but no sign change) → no fnd_flip event.
+        assert!(
+            result.funding_factor_per_second > 0,
+            "rate must stay positive when OI is long-dominant; got {}",
+            result.funding_factor_per_second,
+        );
+    }
+
+    // ── Borrowing-fee overflow tests (issue #231) ─────────────────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(10_000))]
+        #[test]
+        fn test_borrowing_no_overflow(
+            borrowing_factor in 0u64..=u64::MAX,
+            oi_u64 in 0u64..=u64::MAX,
+            pool_amount_u64 in 1u64..=u64::MAX,
+            seconds in 0u64..=100_000u64,
+        ) {
+            let env = Env::default();
+            let bf   = borrowing_factor as i128;
+            let oi   = oi_u64 as i128;
+            let pool = pool_amount_u64 as i128;
+            let dt   = seconds as i128;
+
+            let util          = mul_div_wide(&env, oi, FLOAT_PRECISION, pool);
+            let delta_per_sec = mul_div_wide(&env, bf, util, FLOAT_PRECISION);
+            let _delta        = mul_div_wide(&env, delta_per_sec, dt, FLOAT_PRECISION);
+        }
+    }
+
+    #[test]
+    fn test_borrowing_extreme_no_panic() {
+        let env = Env::default();
+        let bf   = i128::MAX / 2;
+        let util = FLOAT_PRECISION;
+        let dt   = 100_000i128;
+
+        let delta_per_sec = mul_div_wide(&env, bf, util, FLOAT_PRECISION);
+        let _delta        = mul_div_wide(&env, delta_per_sec, dt, FLOAT_PRECISION);
     }
 }

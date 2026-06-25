@@ -308,7 +308,11 @@ pub fn is_liquidatable(
         collateral_token_price,
         TOKEN_PRECISION,
     );
-    let remaining = collateral_usd - fees_usd + pnl_usd;
+    // net_collateral excludes PnL — used for the min_collateral_factor adequacy check.
+    // PnL should not mask a collateral shortfall: a profitable unrealised gain does
+    // not mean the deposited collateral is sufficient to absorb liquidation costs.
+    let net_collateral = collateral_usd - fees_usd;
+    let remaining = net_collateral + pnl_usd;
 
     // 4. Min required collateral
     let ds = DataStoreClient::new(env, data_store);
@@ -326,7 +330,8 @@ pub fn is_liquidatable(
         min_collateral_factor,
         FLOAT_PRECISION,
     );
-    remaining < min_required
+    // Use net_collateral (no PnL) so unrealised gains cannot hide a collateral shortfall.
+    net_collateral < min_required
 }
 
 // ─── Position key ─────────────────────────────────────────────────────────────
@@ -414,12 +419,8 @@ mod tests {
     }
 
     fn make_market(w: &World) -> MarketProps {
-        MarketProps {
-            market_token: w.market_tk.clone(),
-            index_token: w.index_tk.clone(),
-            long_token: w.long_tk.clone(),
-            short_token: w.short_tk.clone(),
-        }
+        // Issue #248: build via the shared constructor instead of a per-field literal.
+        MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk)
     }
 
     fn make_position(
@@ -1160,6 +1161,105 @@ mod tests {
         assert_eq!(
             fees.borrowing_fee_amount, 6_000_000,
             "known numeric: 20% of 3 tokens = 0.6 tokens = 6_000_000 units"
+        );
+    }
+
+    /// Bug #2 — PnL must not mask a collateral shortfall in the min_collateral_factor check.
+    ///
+    /// Setup: size=$10 000, collateral=$500 gross, pending borrowing fees≈$420
+    ///   → net_collateral = $500 - $420 = $80
+    ///   → min_collateral_factor = 1% → min_required = $100
+    ///   → net_collateral ($80) < min_required ($100) → LIQUIDATABLE
+    ///
+    /// The position also has +$100 unrealised PnL. Before this fix, the old code
+    /// computed `remaining = $80 + $100 = $180 ≥ $100` and returned false (not
+    /// liquidatable). The fixed code must return true.
+    #[test]
+    fn pnl_does_not_mask_collateral_shortfall_below_min_factor() {
+        let w = setup();
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        let market = make_market(&w);
+
+        // 1% min collateral factor
+        let min_factor = FP / 100;
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::min_collateral_factor_key(&w.env, &w.market_tk),
+            &(min_factor as u128),
+        );
+
+        // Position: $10 000 notional, collateral_price = $2 000/token
+        // We want collateral_usd ≈ $500 → collateral_amount ≈ 0.25 tokens
+        let collateral_price = 2_000 * FP;
+        let size_usd = 10_000 * FP;
+        // 0.25 tokens × $2 000 = $500 gross collateral
+        let collateral_tokens = ONE_TOKEN / 4;
+
+        // Set a large cumulative borrowing factor so fees ≈ $420
+        // We need: borrowing_fee_amount × collateral_price / TOKEN_PRECISION ≈ $420 * FP
+        // borrowing_fee_amount = delta × size_in_tokens / FP
+        // size_in_tokens = size_usd / entry_price × TOKEN_PRECISION = 10_000*FP / (2_000*FP) × TOKEN_PRECISION = 5 tokens
+        // We want fee_amount_tokens such that fee_amount_tokens × 2_000*FP / TOKEN_PRECISION ≈ 420*FP
+        // fee_amount_tokens ≈ 420*FP × TOKEN_PRECISION / (2_000*FP) = 210 * ONE_TOKEN / 100 = 2_100_000
+        // delta × 5 tokens / FP = 2_100_000 → delta = 2_100_000 × FP / (5 × TOKEN_PRECISION)
+        //                                            = 2_100_000 × FP / 50_000_000 = 42 * FP / 1_000
+        let size_in_tokens = 5 * ONE_TOKEN; // 5 tokens
+        let delta = 42 * FP / 1_000;        // cumulative borrowing factor delta
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::cumulative_borrowing_factor_key(&w.env, &w.market_tk, true),
+            &(delta as u128),
+        );
+
+        let mut position = make_position(&w, size_usd, collateral_tokens, collateral_price);
+        position.size_in_tokens = size_in_tokens;
+        position.borrowing_factor = 0; // opened at cum=0
+
+        // Price advances 2% → unrealised PnL ≈ +$200 (should NOT save the position)
+        let current_price = 2_040 * FP; // slight profit
+        let price_props = PriceProps {
+            min: current_price,
+            max: current_price,
+        };
+
+        // Fixed: net_collateral < min_required → must be liquidatable
+        assert!(
+            is_liquidatable(&w.env, &w.ds, &position, &market, collateral_price, &price_props),
+            "position with net_collateral below min_collateral_factor must be liquidatable even with positive PnL"
+        );
+    }
+
+    /// Preservation: a position that is healthy on net collateral (after fees)
+    /// must not be liquidatable regardless of PnL.
+    #[test]
+    fn healthy_net_collateral_not_liquidatable_regardless_of_pnl() {
+        let w = setup();
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        let market = make_market(&w);
+
+        // 1% min collateral factor
+        let min_factor = FP / 100;
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::min_collateral_factor_key(&w.env, &w.market_tk),
+            &(min_factor as u128),
+        );
+
+        let collateral_price = 2_000 * FP;
+        let size_usd = 10_000 * FP;
+        // Large collateral: 2 tokens = $4 000 gross; net well above $100 min_required
+        let position = make_position(&w, size_usd, 2 * ONE_TOKEN, collateral_price);
+
+        // Even with negative PnL (price drops slightly) — collateral is still healthy
+        let lower_price = 1_900 * FP;
+        let price_props = PriceProps {
+            min: lower_price,
+            max: lower_price,
+        };
+
+        assert!(
+            !is_liquidatable(&w.env, &w.ds, &position, &market, collateral_price, &price_props),
+            "well-collateralised position with healthy net collateral must not be liquidatable"
         );
     }
 }

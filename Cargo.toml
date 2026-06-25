@@ -11,6 +11,7 @@ members = [
   "libs/swap_utils",
   "libs/increase_position_utils",
   "libs/decrease_position_utils",
+  "tests",
 ]
 
 [workspace.dependencies]

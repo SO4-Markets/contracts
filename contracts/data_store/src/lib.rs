@@ -447,6 +447,48 @@ impl DataStore {
         env.storage().persistent().set(&key, &next);
         next as u64
     }
+
+    // ── Position Manager (delegated position control for copy-trading) ────────
+
+    /// Get the authorized position manager for a given owner and market.
+    /// Returns None if no manager is set or if revoked (zero address).
+    pub fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address> {
+        use gmx_keys::position_manager_key;
+        let key = DataKey::Addr(position_manager_key(&env, &owner, &market));
+        env.storage().persistent().get(&key)
+    }
+
+    /// Set or revoke a position manager for a given owner and market.
+    /// Only the owner can call this. Pass zero_address to revoke.
+    pub fn set_position_manager(env: Env, owner: Address, market: Address, manager: Address) -> Address {
+        owner.require_auth();
+        // Note: We don't check for CONTROLLER role here because the owner can revoke their own manager.
+        // Setting a manager is an authorization, not a state modification done by the protocol.
+        use gmx_keys::position_manager_key;
+        let key = DataKey::Addr(position_manager_key(&env, &owner, &market));
+        env.storage().persistent().set(&key, &manager);
+        manager
+    }
+
+    // ── Liquidation Execution Fee (keeper reimbursement on liquidation) ───────
+
+    /// Get the liquidation execution fee for a given market.
+    /// This fee is paid to the keeper from position collateral on successful liquidation.
+    pub fn get_liquidation_execution_fee(env: Env, market: Address) -> u128 {
+        use gmx_keys::liquidation_execution_fee_key;
+        let key = DataKey::U128(liquidation_execution_fee_key(&env, &market));
+        env.storage().persistent().get(&key).unwrap_or(0u128)
+    }
+
+    /// Set the liquidation execution fee for a given market (admin-only).
+    pub fn set_liquidation_execution_fee(env: Env, caller: Address, market: Address, fee: u128) -> u128 {
+        caller.require_auth();
+        require_controller(&env, &caller);
+        use gmx_keys::liquidation_execution_fee_key;
+        let key = DataKey::U128(liquidation_execution_fee_key(&env, &market));
+        env.storage().persistent().set(&key, &fee);
+        fee
+    }
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -671,6 +713,35 @@ mod tests {
         let n2 = client.increment_nonce(&admin);
         assert_eq!(n1, 1);
         assert_eq!(n2, 2);
+    }
+
+    // ── Issue #179: get_address Option semantics ─────────────────────────────
+
+    /// Reading an address for a key that was never written must return None, not panic.
+    #[test]
+    fn get_address_returns_none_for_missing_key() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xFFu8; 32]);
+        assert!(
+            client.get_address(&key).is_none(),
+            "missing key must return None, not panic"
+        );
+    }
+
+    /// Reading an address for a key that was written must return Some(addr).
+    #[test]
+    fn get_address_returns_some_for_present_key() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xFEu8; 32]);
+        let value = Address::generate(&env);
+        client.set_address(&admin, &key, &value);
+        assert_eq!(
+            client.get_address(&key),
+            Some(value),
+            "present key must return Some(addr)"
+        );
     }
 
     // ── Issue #109: CONTROLLER authorization matrix ───────────────────────────

@@ -468,12 +468,9 @@ mod tests {
         // Seed some collateral into the market pool (simulates vault transfer)
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(ONE_TOKEN * 100));
 
-        let market = gmx_types::MarketProps {
-            market_token: w.market_tk.clone(),
-            index_token: w.index_tk.clone(),
-            long_token: w.long_tk.clone(),
-            short_token: w.short_tk.clone(),
-        };
+        // Issue #248: build via the shared constructor instead of a per-field literal.
+        let market =
+            gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
         let index_price_props = gmx_types::PriceProps {
             min: index_price,
             max: index_price,
@@ -525,12 +522,9 @@ mod tests {
 
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(ONE_TOKEN * 100));
 
-        let market = gmx_types::MarketProps {
-            market_token: w.market_tk.clone(),
-            index_token: w.index_tk.clone(),
-            long_token: w.long_tk.clone(),
-            short_token: w.short_tk.clone(),
-        };
+        // Issue #248: build via the shared constructor instead of a per-field literal.
+        let market =
+            gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
         let index_price_props = gmx_types::PriceProps {
             min: index_price,
             max: index_price,
@@ -579,12 +573,9 @@ mod tests {
 
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(ONE_TOKEN * 200));
 
-        let market = gmx_types::MarketProps {
-            market_token: w.market_tk.clone(),
-            index_token: w.index_tk.clone(),
-            long_token: w.long_tk.clone(),
-            short_token: w.short_tk.clone(),
-        };
+        // Issue #248: build via the shared constructor instead of a per-field literal.
+        let market =
+            gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
         let index_price_props = gmx_types::PriceProps {
             min: index_price,
             max: index_price,
@@ -660,12 +651,9 @@ mod tests {
 
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(ONE_TOKEN * 100));
 
-        let market = gmx_types::MarketProps {
-            market_token: w.market_tk.clone(),
-            index_token: w.index_tk.clone(),
-            long_token: w.long_tk.clone(),
-            short_token: w.short_tk.clone(),
-        };
+        // Issue #248: build via the shared constructor instead of a per-field literal.
+        let market =
+            gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
         let index_price_props = gmx_types::PriceProps {
             min: index_price,
             max: index_price,
@@ -744,12 +732,9 @@ mod tests {
         set_prices(&w, index_price);
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(ONE_TOKEN * 500));
 
-        let market = gmx_types::MarketProps {
-            market_token: w.market_tk.clone(),
-            index_token: w.index_tk.clone(),
-            long_token: w.long_tk.clone(),
-            short_token: w.short_tk.clone(),
-        };
+        // Issue #248: build via the shared constructor instead of a per-field literal.
+        let market =
+            gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
         let price_props = gmx_types::PriceProps {
             min: index_price,
             max: index_price,
@@ -787,12 +772,9 @@ mod tests {
             &cap,
         );
 
-        let market = gmx_types::MarketProps {
-            market_token: w.market_tk.clone(),
-            index_token: w.index_tk.clone(),
-            long_token: w.long_tk.clone(),
-            short_token: w.short_tk.clone(),
-        };
+        // Issue #248: build via the shared constructor instead of a per-field literal.
+        let market =
+            gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
         let price_props = gmx_types::PriceProps {
             min: index_price,
             max: index_price,
@@ -839,12 +821,9 @@ mod tests {
             &cap,
         );
 
-        let market = gmx_types::MarketProps {
-            market_token: w.market_tk.clone(),
-            index_token: w.index_tk.clone(),
-            long_token: w.long_tk.clone(),
-            short_token: w.short_tk.clone(),
-        };
+        // Issue #248: build via the shared constructor instead of a per-field literal.
+        let market =
+            gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
         let price_props = gmx_types::PriceProps {
             min: index_price,
             max: index_price,
@@ -880,12 +859,9 @@ mod tests {
             &long_cap,
         );
 
-        let market = gmx_types::MarketProps {
-            market_token: w.market_tk.clone(),
-            index_token: w.index_tk.clone(),
-            long_token: w.long_tk.clone(),
-            short_token: w.short_tk.clone(),
-        };
+        // Issue #248: build via the shared constructor instead of a per-field literal.
+        let market =
+            gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
         let price_props = gmx_types::PriceProps {
             min: index_price,
             max: index_price,
