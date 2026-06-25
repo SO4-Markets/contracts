@@ -137,7 +137,23 @@ bash scripts/submit_prices.sh testnet my-keeper
 
 ## 5. Signer Key Rotation
 
-If a keeper private key is compromised, rotate it immediately:
+If a keeper private key is compromised, rotate it immediately.
+
+### OracleSignerRotated event
+
+Every successful rotation emits an `OracleSignerRotated` event:
+
+```
+topic:  sig_rot
+payload:
+  keeper_index : u32         — the slot index whose key was replaced
+  old_signer   : BytesN<32>  — the 32-byte pubkey that was overwritten
+  new_signer   : BytesN<32>  — the 32-byte pubkey that now holds the slot
+```
+
+Off-chain monitoring services can subscribe to this event to audit key changes in real time and invalidate any in-flight price bundles signed by the old key before they are submitted.
+
+### Manual rotation via data_store
 
 1. Generate a new keypair (Step 1 above).
 2. Overwrite the same `keeper_index` slot in `data_store` with the new 32-byte public key (same `set_bytes32` command as Step 3, same `KEY_HEX`, new `--value`).
