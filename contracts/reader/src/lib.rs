@@ -15,7 +15,7 @@ use gmx_keys::{
     market_short_token_key, open_interest_key, order_list_key, position_key, position_list_key,
     saved_funding_factor_per_second_key, withdrawal_list_key, DEFAULT_KEEPER_HEARTBEAT_TIMEOUT,
 };
-use gmx_market_utils::{get_open_interest_for_side, get_pool_value};
+use gmx_market_utils::{get_market_token_price, get_open_interest_for_side, get_pool_value};
 use gmx_math::{mul_div_wide, TOKEN_PRECISION};
 use gmx_position_utils::{get_position_fees, get_position_pnl_usd, is_liquidatable};
 use gmx_pricing_utils::{get_execution_price, get_position_price_impact};
@@ -178,7 +178,38 @@ impl Reader {
             maximize,
         )
     }
-
+/// USD price per 1 market (GM) token, scaled to FLOAT_PRECISION.
+/// Uses oracle max prices when maximize=true (conservative for minting),
+/// min prices when maximize=false (conservative for burning).
+/// Returns FLOAT_PRECISION ($1.00) when supply is zero (seed price).
+pub fn get_market_token_price(
+    env: Env,
+    data_store: Address,
+    oracle: Address,
+    market: Address,
+    maximize: bool,
+) -> i128 {
+    let market_props = Self::get_market(env.clone(), data_store.clone(), market);
+    let oracle_client = OracleClient::new(&env, &oracle);
+    let long_price = oracle_client
+        .get_primary_price(&market_props.long_token)
+        .mid_price();
+    let short_price = oracle_client
+        .get_primary_price(&market_props.short_token)
+        .mid_price();
+    let index_price = oracle_client
+        .get_primary_price(&market_props.index_token)
+        .mid_price();
+    get_market_token_price(
+        &env,
+        &data_store,
+        &market_props,
+        long_price,
+        short_price,
+        index_price,
+        maximize,
+    )
+}
     /// Get open interest for both sides of a market.
     /// Returns (long_oi_usd, short_oi_usd).
     pub fn get_open_interest(env: Env, data_store: Address, market_token: Address) -> (i128, i128) {
