@@ -297,6 +297,7 @@ invoke "$REFERRAL_STORAGE" initialize --admin "$ADMIN"
 ok "referral_storage     $REFERRAL_STORAGE"
 
 READER=$(deploy_contract "reader" "$READER_HASH")
+invoke "$READER" initialize --admin "$ADMIN"
 ok "reader               $READER"
 sep
 

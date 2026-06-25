@@ -575,6 +575,7 @@ A `Makefile` is provided for the most common workflows.
 | `make check` | Type-check without producing wasm (`cargo check`) |
 | `make lint` | Run Clippy with warnings as errors |
 | `make test` | Run the full Soroban sandbox test suite |
+| `make testnet-smoke` | Create and execute a small testnet deposit and verify GM tokens were minted |
 | `make deploy-all` | Deploy the full protocol graph to **testnet** (default) |
 | `make deploy-contract` | Deploy one standalone contract Wasm for debugging |
 | `make upgrade-contract` | Upload new Wasm and upgrade one existing deployed contract |
@@ -641,6 +642,11 @@ echo $EXCHANGE_ROUTER
 ---
 
 ## Testnet Market Bootstrap
+
+For the current end-to-end operator procedure, including signed-oracle setup,
+exact initialization arguments, and the deposit smoke test, follow
+[`docs/deployment.md`](docs/deployment.md). The commands below are a shorter
+reference and may omit production oracle details.
 
 After the protocol contracts are deployed, you need to create a market, grant keeper roles, set config parameters, and seed initial liquidity before the protocol is usable. `scripts/bootstrap.sh` automates all of these steps.
 
@@ -1217,6 +1223,10 @@ This matrix maps every contract under `contracts/*` to its state ownership, init
 
 Definitions for every domain term used throughout the codebase and issue tracker.
 New contributors should read this before working on math, risk, or fee logic.
+Storage contributors should also read the [Soroban TTL and rent strategy](docs/ttl-strategy.md),
+which records the current bump policy and known renewal gaps. Market operators
+should read the [price impact tuning guide](docs/price-impact.md) before
+changing impact factors.
 
 | Term | Definition |
 |---|---|
@@ -1227,6 +1237,7 @@ New contributors should read this before working on math, risk, or fee logic.
 | **Pool amount** | The protocol-tracked balance of a specific token held by a market pool. Stored in `data_store` under `pool_amount_key(market, token)`. Updated on deposit, withdrawal, and position settlement. |
 | **Open interest (OI)** | The total notional USD size of all open positions on one side (long or short) of a market. Tracked separately for longs and shorts. Used to compute funding rates and ADL eligibility. |
 | **Funding fee** | A periodic payment between long and short position holders to balance open interest. The dominant side pays the subordinate side. Accumulated as `funding_amount_per_size` and settled when a position is increased, decreased, or liquidated. |
+| **Claimable funding amount** (`claimable_funding_amount`) | An accrued funding rebate available to an account for one market and token. It is stored in `data_store` as a `u128` under `claimable_funding_amount_key(market, token, account)`; long-token and short-token amounts therefore have separate entries. `update_funding_state` updates the signed `i128` per-size accumulators, and `settle_funding_fees` credits this claimable balance when a position is owed funding. Funding owed by a position follows the separate signed `funding_fee_amount` path rather than being stored as a negative claimable amount. `claim_funding_fees` reduces the entry as it pays the account. |
 | **Borrowing fee** | A fee charged to position holders for consuming pool liquidity. Proportional to position size and the fraction of the pool that is "borrowed" by open interest. Accumulated as a cumulative factor and settled on position change. |
 | **ADL (Auto-Deleveraging)** | A risk-management mechanism that partially closes the most profitable positions on the winning side when the pool's total unrealised PnL exceeds a safe threshold. Triggered by an ADL keeper via `adl_handler`. |
 | **Keeper** | An off-chain bot that submits transactions to execute pending requests (orders, deposits, withdrawals) and perform risk operations (liquidations, ADL). Keepers hold role-store roles such as `ORDER_KEEPER`, `LIQUIDATION_KEEPER`, and `ADL_KEEPER`. |
@@ -1234,6 +1245,7 @@ New contributors should read this before working on math, risk, or fee logic.
 | **Position** | An open leveraged trade, stored in `order_handler`'s persistent storage under `PositionStorageKey::Position(key)`. Tracks size, collateral, entry price, accumulated fee indices, and direction (long/short). |
 | **Collateral token** | The token deposited by a trader to back a position. For longs, this is the long token; for shorts, the short token. Determines which pool the collateral is drawn from. |
 | **Execution price** | The price at which an order is filled, adjusted for price impact. Derived from the oracle mid-price plus or minus the price impact of the trade on pool balance. |
+| **Execution delta** (`execution_delta`) | The signed difference between an order's execution price and its oracle mid-price, expressed as an `i128` USD price at `FLOAT_PRECISION` scaling. A positive trader-relative delta denotes a worse fill (price-impact cost); a negative delta denotes a better fill (impact rebate). The delta is not stored under its own `data_store` key: its price-impact value is accounted for through `swap_impact_pool_amount_key(market, token)` or `position_impact_pool_amount_key(market)`, increasing the relevant pool for costs and drawing from it for rebates. |
 | **Price impact** | A fee/rebate that incentivises trades that balance pool OI. Negative impact (paid by trader) is added to the impact pool; positive impact (rebate to trader) is drawn from the impact pool. |
 | **Swap path** | An ordered list of market addresses through which tokens are routed in a multi-hop swap. Each hop transfers a token into one market pool and out of another. |
 | **Trigger price** | The oracle price level at which a limit or stop order becomes eligible for execution. Checked by the keeper before calling `execute_order`. |

@@ -726,6 +726,23 @@ pub fn global_pause_key(env: &Env) -> BytesN<32> {
     sha256(env, &b)
 }
 
+/// The max allowed percentage price movement (e.g. 500 = 5%) before the circuit
+/// breaker pauses the market (issue #203). Stored in FLOAT_PRECISION in data_store.
+pub fn circuit_breaker_factor_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "CIRCUIT_BREAKER_FACTOR");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+/// Stores whether a specific market is paused (issue #203). Stored as a bool in data_store.
+pub fn is_market_paused_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "IS_MARKET_PAUSED");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
 // ─── Fee tier keys (issue #204) ───────────────────────────────────────────────
 
 /// Volume threshold (USD, FLOAT_PRECISION) required to qualify for fee tier N.
@@ -760,6 +777,27 @@ pub fn trader_volume_window_start_key(env: &Env, trader: &Address, market: &Addr
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "TRADER_VOL_WIN");
     push_addr(&mut b, env, trader);
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+// ─── Unpause timelock key (issue #282) ───────────────────────────────────────
+
+/// Ledger sequence at which `execute_unpause` is allowed (issue #282).
+/// Written by `schedule_unpause`; cleared when the market is re-paused or unpause executes.
+pub fn scheduled_unpause_ledger_key(env: &Env) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "SCHEDULED_UNPAUSE_LEDGER");
+    sha256(env, &b)
+}
+
+// ─── Auto-compound fee key (issue #285) ──────────────────────────────────────
+
+/// Bool stored in data_store: when `true`, position fees for `market` are retained
+/// in `pool_amount` rather than accrued to the claimable balance. (issue #285)
+pub fn auto_compound_fees_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "AUTO_COMPOUND_FEES");
     push_addr(&mut b, env, market);
     sha256(env, &b)
 }

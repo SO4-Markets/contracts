@@ -243,6 +243,8 @@ pub fn update_cumulative_borrowing_factor(
     let exponent = ds_client.get_u128(&exponent_key) as i128;
 
     // utilization ratio (FLOAT_PRECISION)
+    // mul_div_wide uses Soroban I256 (256-bit) for every multiplication, so no
+    // i128 overflow is possible regardless of how large any operand is.
     let util = mul_div_wide(env, oi, FLOAT_PRECISION, pool_amount);
     // util^exponent (FLOAT_PRECISION)
     let util_exp = pow_factor(env, util, exponent);
@@ -1221,6 +1223,42 @@ fn market_token_price_one_dollar_at_parity() {
             "rate must stay positive when OI is long-dominant; got {}",
             result.funding_factor_per_second,
         );
+    }
+
+    // ── Borrowing-fee overflow tests (issue #231) ─────────────────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(10_000))]
+        #[test]
+        fn test_borrowing_no_overflow(
+            borrowing_factor in 0u64..=u64::MAX,
+            oi_u64 in 0u64..=u64::MAX,
+            pool_amount_u64 in 1u64..=u64::MAX,
+            seconds in 0u64..=100_000u64,
+        ) {
+            let env = Env::default();
+            let bf   = borrowing_factor as i128;
+            let oi   = oi_u64 as i128;
+            let pool = pool_amount_u64 as i128;
+            let dt   = seconds as i128;
+
+            let util          = mul_div_wide(&env, oi, FLOAT_PRECISION, pool);
+            let delta_per_sec = mul_div_wide(&env, bf, util, FLOAT_PRECISION);
+            let _delta        = mul_div_wide(&env, delta_per_sec, dt, FLOAT_PRECISION);
+        }
+    }
+
+    #[test]
+    fn test_borrowing_extreme_no_panic() {
+        let env = Env::default();
+        let bf   = i128::MAX / 2;
+        let util = FLOAT_PRECISION;
+        let dt   = 100_000i128;
+
+        let delta_per_sec = mul_div_wide(&env, bf, util, FLOAT_PRECISION);
+        let _delta        = mul_div_wide(&env, delta_per_sec, dt, FLOAT_PRECISION);
     }
 }
 

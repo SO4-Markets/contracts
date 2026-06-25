@@ -41,6 +41,7 @@ pub enum Error {
     DepositNotFound = 4,
     InsufficientLpOut = 5,
     ZeroDeposit = 6,
+    InsufficientVaultBalance = 7,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -96,6 +97,7 @@ trait IOracle {
 #[soroban_sdk::contractclient(name = "DepositVaultClient")]
 trait IDepositVault {
     fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128);
+    fn get_recorded_balance(env: Env, token: Address) -> i128;
 }
 
 #[allow(dead_code)]
@@ -297,6 +299,23 @@ impl DepositHandler {
             .get_primary_price(&market.index_token)
             .mid_price();
 
+        // Verify vault actually holds at least what was recorded at deposit time.
+        // This guards against fee-on-transfer tokens and any balance discrepancy
+        // that could cause the pool to be under-collateralised.
+        let vault_client = DepositVaultClient::new(&env, &deposit_vault);
+        if deposit.long_token_amount > 0 {
+            let actual = vault_client.get_recorded_balance(&market.long_token);
+            if actual < deposit.long_token_amount {
+                panic_with_error!(&env, Error::InsufficientVaultBalance);
+            }
+        }
+        if deposit.short_token_amount > 0 {
+            let actual = vault_client.get_recorded_balance(&market.short_token);
+            if actual < deposit.short_token_amount {
+                panic_with_error!(&env, Error::InsufficientVaultBalance);
+            }
+        }
+
         // USD value of the incoming tokens (FLOAT_PRECISION)
         let long_usd = if deposit.long_token_amount > 0 {
             mul_div_wide(&env, deposit.long_token_amount, long_price, TOKEN_PRECISION)
@@ -332,8 +351,6 @@ impl DepositHandler {
         if mint_amount < deposit.min_market_tokens {
             panic_with_error!(&env, Error::InsufficientLpOut);
         }
-
-        let vault_client = DepositVaultClient::new(&env, &deposit_vault);
 
         // Move pool tokens: vault → market_token contract (the pool)
         if deposit.long_token_amount > 0 {
@@ -1085,6 +1102,68 @@ mod tests {
         );
     }
 
+    // ── Issue #174: atomicity — failed execute must not mutate state ──────────
+
+    /// If execute_deposit panics (InsufficientLpOut), Soroban transaction semantics
+    /// must revert ALL intermediate writes: vault balance and pool amount must be
+    /// identical before and after the failed attempt.
+    #[test]
+    fn execute_deposit_revert_leaves_state_unchanged() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+
+        let hc = DepositHandlerClient::new(env, &w.handler);
+        let ds_c = DsClient::new(env, &w.ds);
+
+        let key = hc.create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: 1_000_0000i128,
+                short_token_amount: 0,
+                // Demand more LP than can possibly be minted → InsufficientLpOut
+                min_market_tokens: i128::MAX,
+                execution_fee: 0,
+            },
+        );
+
+        let pool_before =
+            ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.long_tk));
+        let vault_before = token::Client::new(env, &w.long_tk).balance(&w.vault);
+
+        // Must fail with InsufficientLpOut
+        let result = hc.try_execute_deposit(&w.keeper, &key);
+        assert!(result.is_err(), "execute_deposit must fail when mint_amount < min_market_tokens");
+
+        // Pool amount unchanged — apply_delta_to_pool_amount was reverted
+        let pool_after =
+            ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.long_tk));
+        assert_eq!(
+            pool_before, pool_after,
+            "pool amount must be unchanged after failed execute"
+        );
+
+        // Vault balance unchanged — transfer_out was reverted
+        let vault_after = token::Client::new(env, &w.long_tk).balance(&w.vault);
+        assert_eq!(
+            vault_before, vault_after,
+            "vault balance must be unchanged after failed execute"
+        );
+
+        // Deposit record still exists — remove_deposit was reverted
+        assert!(
+            hc.get_deposit(&key).is_some(),
+            "deposit record must survive a failed execute"
+        );
+    }
+
     // ── Issue #37: Token validation ────────────────────────────────────────────
 
     /// Depositing with wrong long token must revert BEFORE any transfer.
@@ -1719,5 +1798,89 @@ mod tests {
             hc.get_deposit(&key).is_some(),
             "deposit must still be readable after upgrade"
         );
+    }
+
+    // ── Bug fix: vault balance verification ────────────────────────────────────
+
+    /// execute_deposit must revert with InsufficientVaultBalance when the vault
+    /// recorded balance is less than the deposit's long_token_amount.
+    ///
+    /// We simulate a fee-on-transfer scenario by:
+    /// 1. Creating a deposit for X tokens (vault receives X, recorded = X).
+    /// 2. Manually draining tokens from the vault (simulating a fee-on-transfer
+    ///    token that delivered fewer tokens than requested, or a balance manipulation).
+    /// 3. Calling execute_deposit — must panic (InsufficientVaultBalance).
+    #[test]
+    #[should_panic]
+    fn execute_deposit_reverts_when_vault_balance_below_recorded() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        // Mint 1 000 long tokens to user and create deposit
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+
+        let hc = DepositHandlerClient::new(env, &w.handler);
+        let key = hc.create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: 1_000_0000i128,
+                short_token_amount: 0,
+                min_market_tokens: 1,
+                execution_fee: 0,
+            },
+        );
+
+        // Drain tokens from vault to a third address, simulating fee-on-transfer behaviour:
+        // vault now holds 0 but recorded balance (from create_deposit time) is still 1_000_0000.
+        // We use the vault's transfer_out directly (admin is CONTROLLER).
+        let drain_addr = Address::generate(env);
+        DVClient::new(env, &w.vault).transfer_out(
+            &w.admin,
+            &w.long_tk,
+            &drain_addr,
+            &1_000_0000i128,
+        );
+
+        // execute_deposit must now revert: vault holds 0 but deposit recorded 1_000_0000
+        hc.execute_deposit(&w.keeper, &key);
+    }
+
+    /// Standard (non-fee) token deposit where vault balance equals recorded amount
+    /// must still succeed after the vault balance check is added.
+    #[test]
+    fn execute_deposit_normal_token_unaffected_by_vault_check() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+
+        let hc = DepositHandlerClient::new(env, &w.handler);
+        let key = hc.create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: 1_000_0000i128,
+                short_token_amount: 0,
+                min_market_tokens: 1,
+                execution_fee: 0,
+            },
+        );
+
+        // No tampering — vault holds exactly what was recorded
+        hc.execute_deposit(&w.keeper, &key);
+
+        let lp = MtClient::new(env, &w.market_tk).balance(&user);
+        assert!(lp > 0, "normal deposit must still mint LP tokens after vault check added");
     }
 }

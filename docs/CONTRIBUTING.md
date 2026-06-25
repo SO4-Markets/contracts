@@ -103,3 +103,121 @@ When implementing or modifying handlers (e.g. deposit, withdrawal, order, liquid
 ### Contract Responsibility Matrix
 Before introducing new contract types or modifying existing ones, consult the **Contract Responsibility Matrix** in [README.md](README.md#contract-responsibility-matrix) (Issue #4). Ensure all new code complies with the specified storage access rules, caller roles, and upgrade capabilities.
 
+## Adding a New Market
+
+Use this guide when the protocol is already deployed and you want to add a second (or nth) perpetuals market. All steps run against a network where `.deployed/<NETWORK>.env` already exists.
+
+The fastest path is `bash scripts/create_market.sh [NETWORK] [SOURCE_KEY]`, which automates Steps 1–3. The manual steps below describe exactly what the script does.
+
+### Step 1: Deploy the Market Token (SEP-41)
+
+Call `market_factory::create_market` with the three constituent token addresses. The caller must hold the `MARKET_KEEPER` role.
+
+```bash
+MARKET_TYPE=$(python3 scripts/compute_key.py market_type_default)
+
+MARKET_TOKEN=$(stellar contract invoke \
+  --id   "$MARKET_FACTORY" \
+  --source "$SOURCE" \
+  --network "$NETWORK" \
+  -- create_market \
+  --caller      "$ADMIN" \
+  --index_token "$INDEX_TOKEN" \
+  --long_token  "$LONG_TOKEN" \
+  --short_token "$SHORT_TOKEN" \
+  --market_type "$MARKET_TYPE" \
+  | python3 -c "import sys,json; print(json.loads(sys.stdin.read().strip())['market_token'])")
+
+echo "market_token: $MARKET_TOKEN"
+```
+
+`create_market` deploys the GM token contract deterministically (salt = `sha256("GMX_MARKET" ‖ index ‖ long ‖ short ‖ type)`) and registers the market in `data_store` automatically. Record the returned address.
+
+### Step 2: Configure Market Parameters in data_store
+
+Run `configure_market.sh` to write all required keys. Every key is a `u128` stored via `data_store.set_u128`. The caller must hold the `CONTROLLER` role (the admin address set during deployment already has it).
+
+```bash
+export DATA_STORE MARKET_TOKEN LONG_TOKEN SHORT_TOKEN
+bash scripts/configure_market.sh "$NETWORK" "$SOURCE"
+```
+
+The script writes these keys (all names match the functions in `libs/keys/src/lib.rs`):
+
+| Key function | Side | Default |
+|---|---|---|
+| `pool_amount_key(market, long_token)` | long | 0 (set by deposits) |
+| `max_pool_amount_key(market, long_token)` | long | 1 000 000 tokens |
+| `max_open_interest_key(market, is_long=true)` | long | 500 000 USD |
+| `max_open_interest_key(market, is_long=false)` | short | 500 000 USD |
+| `min_collateral_factor_key(market)` | both | 1 % |
+| `borrowing_factor_key(market, is_long=true)` | long | 10^24 |
+| `borrowing_factor_key(market, is_long=false)` | short | 10^24 |
+| `borrowing_exponent_factor_key(market, is_long=true)` | long | 1.0 |
+| `borrowing_exponent_factor_key(market, is_long=false)` | short | 1.0 |
+| `funding_exponent_factor_key(market)` | both | 1.0 |
+| `position_fee_factor_key(market, for_positive_impact=true)` | both | 0.1 % |
+| `position_fee_factor_key(market, for_positive_impact=false)` | both | 0.1 % |
+| `position_impact_factor_key(market, is_positive=true)` | both | 10^23 |
+| `position_impact_factor_key(market, is_positive=false)` | both | 2×10^23 |
+
+All values are in `FLOAT_PRECISION` units (10^30) except pool/token amounts (10^7 stroops). Tune these values for production before launch.
+
+### Step 3: Register the Oracle Keeper Public Key
+
+Prices for the index token must be signed by a registered keeper. See [docs/oracle.md](oracle.md) for the full key-registration flow.
+
+```bash
+# Compute the data_store key for keeper index 0
+KEY_HEX=$(python3 scripts/compute_key.py keeper_pubkey_key 0)
+
+# Register the 32-byte ed25519 public key (CONTROLLER role required)
+stellar contract invoke \
+  --id   "$DATA_STORE" \
+  --source "$SOURCE" \
+  --network "$NETWORK" \
+  -- set_bytes32 \
+  --caller "$ADMIN" \
+  --key    "$KEY_HEX" \
+  --value  "<32-byte-pubkey-hex>"
+```
+
+Verify with:
+
+```bash
+bash scripts/submit_prices.sh "$NETWORK" my-keeper
+```
+
+### Step 4: Handler Role Grants
+
+No additional CONTROLLER grants are needed. `market_factory` itself holds CONTROLLER and writes all market metadata to `data_store` during `create_market`. Handlers (deposit, withdrawal, order, liquidation) hold their own persistent storage and do not require any new grants per market.
+
+If you are adding a brand-new handler contract (not adding a market), follow the role-grant steps in `scripts/bootstrap.sh`.
+
+### Step 5: Smoke Test
+
+Make a small initial deposit to verify the market is correctly wired:
+
+1. Approve tokens:
+   ```bash
+   stellar contract invoke --id "$LONG_TOKEN"  -- approve --from "$ADMIN" --spender "$DEPOSIT_HANDLER" --amount 10000000 --expiration_ledger 999999
+   stellar contract invoke --id "$SHORT_TOKEN" -- approve --from "$ADMIN" --spender "$DEPOSIT_HANDLER" --amount 10000000 --expiration_ledger 999999
+   ```
+
+2. Submit oracle prices (required before execute_deposit):
+   ```bash
+   bash scripts/submit_prices.sh "$NETWORK" my-keeper
+   ```
+
+3. Create and execute a deposit:
+   ```bash
+   bash scripts/seed_liquidity.sh "$NETWORK" "$SOURCE"
+   ```
+
+4. Assert the caller's GM token balance is greater than zero:
+   ```bash
+   stellar contract invoke --id "$MARKET_TOKEN" -- balance --id "$ADMIN"
+   ```
+
+If the balance is non-zero the market is live.
+

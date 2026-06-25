@@ -20,16 +20,20 @@ gmx-increase-position-utils  = { path = "../../libs/increase_position_utils" }
 gmx-decrease-position-utils  = { path = "../../libs/decrease_position_utils" }
 
 [dev-dependencies]
-soroban-sdk     = { workspace = true, features = ["testutils"] }
-role-store      = { path = "../role_store" }
-data-store      = { path = "../data_store" }
-oracle          = { path = "../oracle", features = ["testutils"] }
-order-vault     = { path = "../order_vault" }
-deposit-vault   = { path = "../deposit_vault" }
-deposit-handler = { path = "../deposit_handler" }
-market-token    = { path = "../market_token" }
-market-factory  = { path = "../market_factory" }
-criterion       = { version = "0.5", features = ["html_reports"] }
+soroban-sdk       = { workspace = true, features = ["testutils"] }
+role-store        = { path = "../role_store" }
+data-store        = { path = "../data_store" }
+oracle            = { path = "../oracle", features = ["testutils"] }
+order-vault       = { path = "../order_vault" }
+deposit-vault     = { path = "../deposit_vault" }
+deposit-handler   = { path = "../deposit_handler" }
+market-token      = { path = "../market_token" }
+market-factory    = { path = "../market_factory" }
+referral-storage  = { path = "../referral_storage" }
+gmx-types         = { path = "../../libs/types" }
+gmx-keys          = { path = "../../libs/keys" }
+gmx-math          = { path = "../../libs/math" }
+criterion         = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "order_execution"

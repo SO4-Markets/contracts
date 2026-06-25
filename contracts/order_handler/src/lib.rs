@@ -25,7 +25,7 @@ use gmx_keys::{
     max_leverage_key, order_key, order_list_key, position_fee_factor_key, position_key,
     fee_tier_position_fee_factor_key, fee_tier_volume_threshold_key,
     trader_volume_key, trader_volume_window_start_key,
-    roles, DEFAULT_KEEPER_HEARTBEAT_TIMEOUT,
+    roles, DEFAULT_KEEPER_HEARTBEAT_TIMEOUT, is_market_paused_key,
 };
 use gmx_math::{mul_div_wide, FLOAT_PRECISION};
 use gmx_swap_utils::swap_with_path;
@@ -77,6 +77,10 @@ pub enum Error {
     MaxLeverageExceeded = 13,
     /// `create_orders` received more than 5 orders in a single batch.
     BatchSizeLimitExceeded = 14,
+    /// The target market is paused due to circuit breaker (issue #203).
+    MarketPaused = 15,
+    /// swap_path contains a repeated market address — would corrupt pool accounting (issue #232).
+    CyclicSwapPath = 16,
 }
 
 
@@ -154,6 +158,7 @@ trait IDataStore {
     fn remove_bytes32_from_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
     fn contains_bytes32(env: Env, set_key: BytesN<32>, value: BytesN<32>) -> bool;
     fn set_address(env: Env, caller: Address, key: BytesN<32>, value: Address) -> Address;
+    fn get_bool(env: Env, key: BytesN<32>) -> bool;
 }
 
 #[allow(dead_code)]
@@ -528,6 +533,28 @@ impl OrderHandler {
         let handler = env.current_contract_address();
         let ds = DataStoreClient::new(&env, &data_store);
 
+        if ds.get_bool(&is_market_paused_key(&env, &params.market)) {
+            panic_with_error!(&env, Error::MarketPaused);
+        }
+
+        // Issue #232: reject cyclic swap paths at creation time; any repeated market
+        // would double-mutate pool state and corrupt price-impact accounting.
+        {
+            let path = &params.swap_path;
+            let path_len = path.len();
+            let mut i = 0u32;
+            while i < path_len {
+                let mut j = i + 1;
+                while j < path_len {
+                    if path.get(i).unwrap() == path.get(j).unwrap() {
+                        panic_with_error!(&env, Error::CyclicSwapPath);
+                    }
+                    j += 1;
+                }
+                i += 1;
+            }
+        }
+
         // Determine whether this order type requires upfront collateral in the vault.
         // Increase and swap orders pull from the vault; decrease orders do not deposit.
         let is_increase_or_swap = matches!(
@@ -652,6 +679,11 @@ impl OrderHandler {
             panic_with_error!(&env, Error::OrderFrozen);
         }
 
+        let ds = DataStoreClient::new(&env, &data_store);
+        if ds.get_bool(&is_market_paused_key(&env, &order.market)) {
+            panic_with_error!(&env, Error::MarketPaused);
+        }
+
         // Load market props
         let market = load_market_props(&env, &data_store, &order.market);
 
@@ -672,11 +704,21 @@ impl OrderHandler {
             OrderType::StopIncrease if index_price.min < order.trigger_price => {
                 panic_with_error!(&env, Error::UnsatisfiedTrigger);
             }
-            OrderType::LimitDecrease if index_price.max < order.trigger_price => {
-                panic_with_error!(&env, Error::UnsatisfiedTrigger);
+            OrderType::LimitDecrease => {
+                if order.is_long && index_price.max < order.trigger_price {
+                    panic_with_error!(&env, Error::UnsatisfiedTrigger);
+                }
+                if !order.is_long && index_price.max > order.trigger_price {
+                    panic_with_error!(&env, Error::UnsatisfiedTrigger);
+                }
             }
-            OrderType::StopLossDecrease if index_price.min > order.trigger_price => {
-                panic_with_error!(&env, Error::UnsatisfiedTrigger);
+            OrderType::StopLossDecrease => {
+                if order.is_long && index_price.min > order.trigger_price {
+                    panic_with_error!(&env, Error::UnsatisfiedTrigger);
+                }
+                if !order.is_long && index_price.min < order.trigger_price {
+                    panic_with_error!(&env, Error::UnsatisfiedTrigger);
+                }
             }
             // LimitSwap: execute only when the index price is at or below trigger_price.
             // A non-zero trigger_price means the user wants to swap only when the
@@ -1350,12 +1392,13 @@ mod tests {
     use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
     use gmx_keys::{position_key, roles};
     use gmx_types::TokenPrice;
+    use soroban_sdk::testutils::Ledger as _;
     use market_token::{MarketToken, MarketTokenClient as MtClient};
     use oracle::{Oracle, OracleClient as OClient};
     use order_vault::{OrderVault, OrderVaultClient as OVClient};
     use role_store::{RoleStore, RoleStoreClient as RsClient};
     use soroban_sdk::{
-        testutils::{Address as _, BytesN as _},
+        testutils::{Address as _, BytesN as _, Ledger as _},
         token::StellarAssetClient,
         BytesN, Env, Vec,
     };
@@ -2995,5 +3038,169 @@ mod tests {
         assert!(matches!(tp.order_type, OrderType::LimitDecrease));
         assert_eq!(sl.trigger_price, 1800 * fp);
         assert_eq!(tp.trigger_price, 2500 * fp);
+    }
+
+    // ── Issue #232: cyclic swap_path rejected at create_order time ────────────
+
+    /// [A, A] — immediate repeat must revert with CyclicSwapPath at creation.
+    #[test]
+    #[should_panic]
+    fn create_order_swap_path_aa_reverts() {
+        let w = setup();
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        hc.create_order(
+            &w.user,
+            &CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::from_array(&w.env, [w.market_tk.clone(), w.market_tk.clone()]),
+                size_delta_usd: 100 * gmx_math::FLOAT_PRECISION,
+                collateral_delta_amount: 0,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketDecrease,
+                is_long: true,
+            },
+        );
+    }
+
+    /// [A, B, A] — indirect repeat must revert with CyclicSwapPath at creation.
+    #[test]
+    #[should_panic]
+    fn create_order_swap_path_aba_reverts() {
+        let w = setup();
+        let env = &w.env;
+        let market_tk2 = env.register(MarketToken, ());
+        MtClient::new(env, &market_tk2).initialize(
+            &w.admin,
+            &w.rs,
+            &7u32,
+            &soroban_sdk::String::from_str(env, "Market2"),
+            &soroban_sdk::String::from_str(env, "M2"),
+        );
+        let hc = OrderHandlerClient::new(env, &w.ord_handler);
+        hc.create_order(
+            &w.user,
+            &CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::from_array(
+                    env,
+                    [w.market_tk.clone(), market_tk2, w.market_tk.clone()],
+                ),
+                size_delta_usd: 100 * gmx_math::FLOAT_PRECISION,
+                collateral_delta_amount: 0,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketDecrease,
+                is_long: true,
+            },
+        );
+    }
+
+    /// [A, B, C] — three distinct markets must be accepted at creation.
+    #[test]
+    fn create_order_swap_path_abc_accepted() {
+        let w = setup();
+        let env = &w.env;
+        let market_tk2 = env.register(MarketToken, ());
+        MtClient::new(env, &market_tk2).initialize(
+            &w.admin,
+            &w.rs,
+            &7u32,
+            &soroban_sdk::String::from_str(env, "Market2"),
+            &soroban_sdk::String::from_str(env, "M2"),
+        );
+        let market_tk3 = env.register(MarketToken, ());
+        MtClient::new(env, &market_tk3).initialize(
+            &w.admin,
+            &w.rs,
+            &7u32,
+            &soroban_sdk::String::from_str(env, "Market3"),
+            &soroban_sdk::String::from_str(env, "M3"),
+        );
+        // MarketSwap requires vault collateral (is_increase_or_swap = true)
+        StellarAssetClient::new(env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+        let hc = OrderHandlerClient::new(env, &w.ord_handler);
+        let key = hc.create_order(
+            &w.user,
+            &CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::from_array(env, [w.market_tk.clone(), market_tk2, market_tk3]),
+                size_delta_usd: 0,
+                collateral_delta_amount: COLLATERAL,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketSwap,
+                is_long: false,
+            },
+        );
+        assert!(
+            hc.get_order(&key).is_some(),
+            "order with distinct 3-market path must be stored"
+        );
+    }
+
+    // ── Issue #234: attacker cannot pre-occupy victim's position slot ─────────
+
+    /// An attacker who opens their own position cannot occupy the victim's slot.
+    /// Position keys encode the actual caller (enforced by require_auth), so
+    /// attacker's key and victim's key are always distinct.
+    #[test]
+    fn third_party_cannot_precreate_victim_position() {
+        let w = setup();
+        set_prices(&w, 2000 * gmx_math::FLOAT_PRECISION);
+        seed_pool(&w);
+
+        let attacker = Address::generate(&w.env);
+        let victim = w.user.clone();
+
+        // Attacker funds and opens their own long position
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let a_key = hc.create_order(
+            &attacker,
+            &CreateOrderParams {
+                receiver: attacker.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                size_delta_usd: 2000 * gmx_math::FLOAT_PRECISION,
+                collateral_delta_amount: COLLATERAL,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketIncrease,
+                is_long: true,
+            },
+        );
+        set_prices(&w, 2000 * gmx_math::FLOAT_PRECISION);
+        hc.execute_order(&w.keeper, &a_key);
+
+        let attacker_pos_key =
+            position_key(&w.env, &attacker, &w.market_tk, &w.long_tk, true);
+        let victim_pos_key =
+            position_key(&w.env, &victim, &w.market_tk, &w.long_tk, true);
+
+        assert_ne!(attacker_pos_key, victim_pos_key, "position keys must differ");
+        assert!(
+            hc.get_position(&attacker_pos_key).is_some(),
+            "attacker has their own position"
+        );
+        assert!(
+            hc.get_position(&victim_pos_key).is_none(),
+            "victim slot must be untouched"
+        );
     }
 }

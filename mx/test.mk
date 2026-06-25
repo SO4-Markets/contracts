@@ -14,8 +14,8 @@ test-snap:
 
 testnet-smoke: preflight
 	@test -f "$(DEPLOY_ENV)" || { printf 'Missing %s. Run make deploy-all first.\n' "$(DEPLOY_ENV)"; exit 1; }
-	source "$(DEPLOY_ENV)"
-	stellar contract invoke --id "$$ROLE_STORE" --source "$(SOURCE)" --network "$(NETWORK)" -- get_role_count
+	DEPLOY_ENV="$(DEPLOY_ENV)" TOKEN_ENV="$(TOKEN_ENV)" \
+		bash scripts/smoke_test.sh "$(NETWORK)" "$(SOURCE)"
 
 smoke-prices:
 	@bash scripts/submit_prices.sh
