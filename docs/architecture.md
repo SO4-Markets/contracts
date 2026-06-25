@@ -175,3 +175,28 @@ The following contracts expose a `pub fn upgrade(env, new_wasm_hash)` entry poin
 - **`data_store`** — upgrading the state store would risk a storage layout mismatch. All protocol state is keyed by deterministic 32-byte hashes computed in `libs/keys`; a new data_store could not safely change those layouts without a coordinated migration.
 - **`role_store`** — the access-control contract must be trusted unconditionally by every other contract. Making it upgradeable would give the admin the ability to silently rewrite role assignments.
 - **`market_token`** — an LP token contract should not be upgradeable after deployment; token holders must be able to trust that the mint/burn logic is fixed.
+
+---
+
+## 6. Position Key Security
+
+Position keys are deterministic sha256 hashes (issue #234):
+
+```
+position_key = sha256("POSITION" ‖ account ‖ market ‖ collateral_token ‖ is_long)
+```
+
+(See `libs/keys/src/lib.rs` lines 201–216.)
+
+All components are on-chain public data — any observer can compute the key for any position. This is intentional: liquidators and keepers need to look up positions without on-chain enumeration. It does not constitute a vulnerability because:
+
+**1. `caller.require_auth()` binds the key to the authenticated caller.**
+`create_order` (order_handler line 519) calls `caller.require_auth()` before any state is written. For non-manager calls (line 569), `actual_owner = caller`. An attacker cannot submit a transaction that names a victim as `caller` without possessing the victim's private key — Soroban's auth model enforces this at the protocol level.
+
+**2. Separate storage namespace.**
+`PositionStorageKey::Position(key)` is stored in order_handler's own persistent storage — not in data_store. The CONTROLLER role grants write access only to data_store; there is no write path from data_store into order_handler's storage.
+
+**3. No collision benefit.**
+An attacker who opens their own position produces a key keyed by the attacker's address. The victim's position slot is unaffected.
+
+**Invariant enforced by test:** `third_party_cannot_precreate_victim_position` in `contracts/order_handler/src/lib.rs` verifies that after an attacker executes an increase order, the victim's position slot remains empty and the two position keys are distinct.
