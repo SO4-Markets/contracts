@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-soroban-sdk = { workspace = true }
+soroban-sdk = { workspace = true, features = ["testutils"] }
 gmx-types = { path = "../libs/types" }
 gmx-keys = { path = "../libs/keys" }
 gmx-math = { path = "../libs/math" }
@@ -12,7 +12,7 @@ gmx-math = { path = "../libs/math" }
 # Contracts
 data-store = { path = "../contracts/data_store" }
 role-store = { path = "../contracts/role_store" }
-oracle = { path = "../contracts/oracle" }
+oracle = { path = "../contracts/oracle", features = ["testutils"] }
 order-handler = { path = "../contracts/order_handler" }
 order-vault = { path = "../contracts/order_vault" }
 deposit-vault = { path = "../contracts/deposit_vault" }
@@ -47,3 +47,7 @@ path = "take_profit.rs"
 [[test]]
 name = "lifecycle_long"
 path = "lifecycle_long.rs"
+
+[[test]]
+name = "order_cancellation"
+path = "order_cancellation.rs"
