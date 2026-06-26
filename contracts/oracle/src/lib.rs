@@ -17,8 +17,14 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use gmx_keys::{keeper_public_key_prefix, stable_price_key, market_list_key, market_index_token_key, market_long_token_key, market_short_token_key};
-use gmx_types::{PriceProps, TokenPrice};
+use gmx_keys::{
+    keeper_public_key_prefix, market_index_token_key, market_list_key, market_long_token_key,
+    market_short_token_key, stable_price_key,
+};
+use gmx_types::PriceProps;
+
+#[cfg(any(test, feature = "testutils"))]
+use gmx_types::TokenPrice;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     Bytes, BytesN, Env, Vec,
@@ -38,6 +44,8 @@ pub enum Error {
     PriceNotFound = 6,
     InvalidSignature = 7,
     NoKeepers = 8,
+    QuorumNotMet = 9,
+    DuplicateSigner = 10,
 }
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
@@ -49,6 +57,13 @@ enum InstanceKey {
     RoleStore,
     DataStore,
     NetworkPassphrase,
+}
+
+#[contracttype]
+enum PersistentKey {
+    TokenSigner(Address, u32),
+    TokenSignerCount(Address),
+    TokenQuorum(Address),
 }
 
 #[contracttype]
@@ -159,39 +174,113 @@ impl Oracle {
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
+    /// Configure the trusted signer set and quorum for a token.
+    ///
+    /// `signer_indices` refer to keeper public key indices stored in data_store.
+    /// `quorum` is the minimum number of valid submitted signer prices required.
+    pub fn set_token_signers(
+        env: Env,
+        caller: Address,
+        token: Address,
+        signer_indices: Vec<u32>,
+        quorum: u32,
+    ) {
+        caller.require_auth();
+        require_admin(&env, &caller);
+
+        if signer_indices.len() == 0 {
+            panic_with_error!(&env, Error::NoKeepers);
+        }
+
+        if quorum == 0 || quorum > signer_indices.len() {
+            panic_with_error!(&env, Error::QuorumNotMet);
+        }
+
+        // Reject duplicate signer indices in the new configuration.
+        for i in 0..signer_indices.len() {
+            let current = signer_indices.get(i).unwrap();
+
+            for j in (i + 1)..signer_indices.len() {
+                if signer_indices.get(j).unwrap() == current {
+                    panic_with_error!(&env, Error::DuplicateSigner);
+                }
+            }
+        }
+
+        // Remove the previous signer configuration for this token.
+        let old_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&PersistentKey::TokenSignerCount(token.clone()))
+            .unwrap_or(0);
+
+        for i in 0..old_count {
+            env.storage()
+                .persistent()
+                .remove(&PersistentKey::TokenSigner(token.clone(), i));
+        }
+
+        // Store the new signer configuration.
+        for i in 0..signer_indices.len() {
+            let signer_index = signer_indices.get(i).unwrap();
+
+            env.storage()
+                .persistent()
+                .set(&PersistentKey::TokenSigner(token.clone(), i), &signer_index);
+        }
+
+        let signer_count = signer_indices.len();
+
+        env.storage().persistent().set(
+            &PersistentKey::TokenSignerCount(token.clone()),
+            &signer_count,
+        );
+
+        env.storage()
+            .persistent()
+            .set(&PersistentKey::TokenQuorum(token), &quorum);
+    }
+
     // ── Keeper price submission ───────────────────────────────────────────────
 
     /// Submit a batch of keeper-signed prices.
     ///
-    /// Each price is individually signature-verified against the registered
-    /// keeper public key at `keeper_index`. The caller must have ORDER_KEEPER role.
+    /// Each submitted price is signature-verified against the registered keeper
+    /// public key at `keeper_index`. Prices are then grouped by token and the
+    /// oracle stores the median min price and median max price for each token.
     pub fn set_prices(env: Env, caller: Address, prices: Vec<SignedPrice>) {
         caller.require_auth();
         require_order_keeper(&env, &caller);
+
+        if prices.len() == 0 {
+            panic_with_error!(&env, Error::NoKeepers);
+        }
 
         let passphrase: Bytes = env
             .storage()
             .instance()
             .get(&InstanceKey::NetworkPassphrase)
             .unwrap();
+
         let data_store: Address = env
             .storage()
             .instance()
             .get(&InstanceKey::DataStore)
             .unwrap();
+
         // Allow prices signed up to ~5 minutes ago (5s/ledger × 60 = 60 ledgers).
         const LEDGER_SEQ_WINDOW: u32 = 60;
         let current_seq = env.ledger().sequence();
 
+        // First pass: validate every submitted price and verify its signature.
         for i in 0..prices.len() {
             let sp = prices.get(i).unwrap();
 
-            // Basic validation
             if sp.min_price <= 0 || sp.max_price <= 0 || sp.min_price > sp.max_price {
                 panic_with_error!(&env, Error::InvalidPrice);
             }
 
-            // Timestamp must be within 5 minutes of current ledger time
+            // Timestamp must be within 5 minutes of current ledger time.
             let now = env.ledger().timestamp();
             let age = now.saturating_sub(sp.timestamp);
             if age > 300 {
@@ -204,7 +293,16 @@ impl Oracle {
                 panic_with_error!(&env, Error::StalePrice);
             }
 
-            // Verify ed25519 signature using the keeper-provided ledger_seq
+            // If a per-token signer set is configured, this keeper index must be allowed.
+            if !is_token_signer(&env, &sp.token, sp.keeper_index) {
+                panic_with_error!(&env, Error::Unauthorized);
+            }
+
+            // A single signer must not be counted more than once for the same token.
+            if has_duplicate_keeper_for_token(&prices, &sp.token, sp.keeper_index) {
+                panic_with_error!(&env, Error::DuplicateSigner);
+            }
+
             let msg = build_price_message(
                 &env,
                 &passphrase,
@@ -214,21 +312,71 @@ impl Oracle {
                 sp.max_price,
                 sp.timestamp,
             );
+
             let pubkey = get_keeper_pubkey(&env, &data_store, sp.keeper_index);
-            // ed25519_verify takes (&BytesN<32> pubkey, &Bytes message, &BytesN<64> sig)
+
             env.crypto().ed25519_verify(&pubkey, &msg, &sp.signature);
+        }
 
-            // Check circuit breaker before overwriting price
-            check_circuit_breaker(&env, &data_store, &sp.token, sp.min_price, sp.max_price);
+        // Second pass: process each unique token once.
+        for i in 0..prices.len() {
+            let current = prices.get(i).unwrap();
 
-            // Store in temporary storage and bump its TTL so the price survives
-            // the keeper's set_prices → execute_* batch window (see PRICE_TTL_LEDGERS).
+            // Skip this token if it was already processed earlier.
+            let mut already_processed = false;
+
+            for j in 0..i {
+                let previous = prices.get(j).unwrap();
+
+                if previous.token == current.token {
+                    already_processed = true;
+                    break;
+                }
+            }
+
+            if already_processed {
+                continue;
+            }
+
+            let mut mins = Vec::new(&env);
+            let mut maxs = Vec::new(&env);
+            let mut submitted_count = 0u32;
+
+            // Collect all valid submitted prices for this token.
+            for j in 0..prices.len() {
+                let sp = prices.get(j).unwrap();
+
+                if sp.token == current.token {
+                    mins.push_back(sp.min_price);
+                    maxs.push_back(sp.max_price);
+                    submitted_count += 1;
+                }
+            }
+
+            let quorum = get_token_quorum(&env, &current.token, submitted_count);
+
+            if submitted_count < quorum {
+                panic_with_error!(&env, Error::QuorumNotMet);
+            }
+
+            let median_min = median_i128(&env, mins);
+            let median_max = median_i128(&env, maxs);
+
+            check_circuit_breaker(&env, &data_store, &current.token, median_min, median_max);
+
             let price = PriceProps {
-                min: sp.min_price,
-                max: sp.max_price,
+                min: median_min,
+                max: median_max,
             };
-            let price_key = TempKey::Price(sp.token.clone());
+
+            if price.min <= 0 || price.max <= 0 || price.min > price.max {
+                panic_with_error!(&env, Error::InvalidPrice);
+            }
+
+            let price_key = TempKey::Price(current.token.clone());
+
             env.storage().temporary().set(&price_key, &price);
+
             env.storage()
                 .temporary()
                 .extend_ttl(&price_key, PRICE_TTL_LEDGERS, PRICE_TTL_LEDGERS);
@@ -335,21 +483,27 @@ impl Oracle {
             .instance()
             .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-
         for i in 0..prices.len() {
             let tp = prices.get(i).unwrap();
+
             if tp.min <= 0 || tp.max <= 0 || tp.min > tp.max {
                 panic_with_error!(&env, Error::InvalidPrice);
             }
 
             check_circuit_breaker(&env, &data_store, &tp.token, tp.min, tp.max);
-
             let price = PriceProps {
                 min: tp.min,
                 max: tp.max,
             };
+
+            if price.min <= 0 || price.max <= 0 || price.min > price.max {
+                panic_with_error!(&env, Error::InvalidPrice);
+            }
+
             let price_key = TempKey::Price(tp.token.clone());
+
             env.storage().temporary().set(&price_key, &price);
+
             env.storage()
                 .temporary()
                 .extend_ttl(&price_key, PRICE_TTL_LEDGERS, PRICE_TTL_LEDGERS);
@@ -368,6 +522,141 @@ fn is_seq_stale(current: u32, submitted: u32, window: u32) -> bool {
     let c = current as u64;
     let s = submitted as u64;
     s > c || (c - s) > window as u64
+}
+
+#[allow(dead_code)]
+fn median_i128(env: &Env, values: Vec<i128>) -> i128 {
+    let len = values.len();
+
+    if len == 0 {
+        panic_with_error!(env, Error::InvalidPrice);
+    }
+
+    let mut sorted = values.clone();
+
+    // Insertion sort is enough here because the signer set is expected to be small.
+    // Typical quorum configurations are 1-of-1, 2-of-3, or similar.
+    let mut i = 1;
+    while i < len {
+        let key = sorted.get(i).unwrap();
+        let mut j = i;
+
+        // Shift larger values one position to the right.
+        while j > 0 {
+            let prev = sorted.get(j - 1).unwrap();
+
+            if prev <= key {
+                break;
+            }
+
+            sorted.set(j, prev);
+            j -= 1;
+        }
+
+        // Insert the current value in its sorted position.
+        sorted.set(j, key);
+        i += 1;
+    }
+
+    let mid = len / 2;
+
+    if len % 2 == 1 {
+        // Odd number of values: return the middle value.
+        sorted.get(mid).unwrap()
+    } else {
+        // Even number of values: return the average of the two middle values.
+        // This form avoids potential overflow from `(a + b) / 2`.
+        let a = sorted.get(mid - 1).unwrap();
+        let b = sorted.get(mid).unwrap();
+
+        a + ((b - a) / 2)
+    }
+}
+
+fn require_admin(env: &Env, caller: &Address) {
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&InstanceKey::Admin)
+        .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
+
+    if &admin != caller {
+        panic_with_error!(env, Error::Unauthorized);
+    }
+}
+
+fn is_token_signer(env: &Env, token: &Address, keeper_index: u32) -> bool {
+    let count: u32 = env
+        .storage()
+        .persistent()
+        .get(&PersistentKey::TokenSignerCount(token.clone()))
+        .unwrap_or(0);
+
+    // Backward compatibility:
+    // If no per-token signer set is configured, preserve the previous behavior
+    // and allow any registered keeper public key index.
+    if count == 0 {
+        return true;
+    }
+
+    for i in 0..count {
+        let configured: u32 = env
+            .storage()
+            .persistent()
+            .get(&PersistentKey::TokenSigner(token.clone(), i))
+            .unwrap();
+
+        if configured == keeper_index {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn get_token_quorum(env: &Env, token: &Address, submitted_count: u32) -> u32 {
+    let configured_quorum: u32 = env
+        .storage()
+        .persistent()
+        .get(&PersistentKey::TokenQuorum(token.clone()))
+        .unwrap_or(0);
+
+    // Backward compatibility:
+    // If no quorum is configured, one signed price is enough, matching the old
+    // single-signer behavior.
+    if configured_quorum == 0 {
+        return 1;
+    }
+
+    // Never require more signatures than the configured signer set size.
+    // Invalid configs are rejected by set_token_signers, so this is defensive.
+    if configured_quorum > submitted_count {
+        return configured_quorum;
+    }
+
+    configured_quorum
+}
+
+fn has_duplicate_keeper_for_token(
+    prices: &Vec<SignedPrice>,
+    token: &Address,
+    keeper_index: u32,
+) -> bool {
+    let mut count = 0u32;
+
+    for i in 0..prices.len() {
+        let sp = prices.get(i).unwrap();
+
+        if sp.token == *token && sp.keeper_index == keeper_index {
+            count += 1;
+
+            if count > 1 {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 fn require_order_keeper(env: &Env, caller: &Address) {
@@ -427,38 +716,52 @@ fn build_price_message(
     buf
 }
 
-fn check_circuit_breaker(env: &Env, data_store: &Address, token: &Address, new_min: i128, new_max: i128) {
+fn check_circuit_breaker(
+    env: &Env,
+    data_store: &Address,
+    token: &Address,
+    new_min: i128,
+    new_max: i128,
+) {
     let price_key = TempKey::Price(token.clone());
-    let prev_price_opt = env.storage().temporary().get::<TempKey, PriceProps>(&price_key);
-    
+    let prev_price_opt = env
+        .storage()
+        .temporary()
+        .get::<TempKey, PriceProps>(&price_key);
+
     if let Some(prev_price) = prev_price_opt {
         let last_price = prev_price.mid_price();
         let new_price = (new_min + new_max) / 2;
         if last_price > 0 {
             let deviation_val = (new_price - last_price).abs();
             let deviation_bps = ((deviation_val as u128) * 10000) / (last_price as u128);
-            
+
             let ds = DataStoreClient::new(env, data_store);
-            let market_list_k = gmx_keys::market_list_key(env);
+            let market_list_k = market_list_key(env);
             let market_count = ds.get_address_set_count(&market_list_k);
             let markets = ds.get_address_set_at(&market_list_k, &0, &market_count);
-            
+
             for i in 0..markets.len() {
                 let market = markets.get(i).unwrap();
-                let index_token = ds.get_address(&gmx_keys::market_index_token_key(env, &market));
-                let long_token = ds.get_address(&gmx_keys::market_long_token_key(env, &market));
-                let short_token = ds.get_address(&gmx_keys::market_short_token_key(env, &market));
-                
+                let index_token = ds.get_address(&market_index_token_key(env, &market));
+                let long_token = ds.get_address(&market_long_token_key(env, &market));
+                let short_token = ds.get_address(&market_short_token_key(env, &market));
+
                 let matches_market = (index_token.is_some() && index_token.unwrap() == *token)
                     || (long_token.is_some() && long_token.unwrap() == *token)
                     || (short_token.is_some() && short_token.unwrap() == *token);
-                    
+
                 if matches_market {
-                    let threshold = ds.get_u128(&gmx_keys::circuit_breaker_factor_key(env, &market));
+                    let threshold =
+                        ds.get_u128(&gmx_keys::circuit_breaker_factor_key(env, &market));
                     if threshold > 0 && deviation_bps > threshold {
                         // Set market pause flag to true
-                        ds.set_bool(&env.current_contract_address(), &gmx_keys::is_market_paused_key(env, &market), &true);
-                        
+                        ds.set_bool(
+                            &env.current_contract_address(),
+                            &gmx_keys::is_market_paused_key(env, &market),
+                            &true,
+                        );
+
                         // Emit event
                         env.events().publish(
                             (soroban_sdk::symbol_short!("cb_trip"),),
@@ -468,7 +771,7 @@ fn check_circuit_breaker(env: &Env, data_store: &Address, token: &Address, new_m
                                 old_price: last_price,
                                 new_price,
                                 deviation_bps,
-                            }
+                            },
                         );
                     }
                 }
@@ -521,7 +824,7 @@ mod tests {
             &env,
             [TokenPrice {
                 token: token.clone(),
-                min: 2_000_000_000_000_000_000_000_000_000_000_000i128, // $2000 (FLOAT_PRECISION)
+                min: 2_000_000_000_000_000_000_000_000_000_000_000i128,
                 max: 2_001_000_000_000_000_000_000_000_000_000_000i128,
             }],
         );
@@ -553,7 +856,7 @@ mod tests {
         let client = OracleClient::new(&env, &oracle_id);
 
         let token = Address::generate(&env);
-        client.get_primary_price(&token); // should panic
+        client.get_primary_price(&token);
     }
 
     #[test]
@@ -565,7 +868,6 @@ mod tests {
         let client = OracleClient::new(&env, &oracle_id);
 
         let token = Address::generate(&env);
-        // min > max → invalid
         let prices = Vec::from_array(
             &env,
             [TokenPrice {
@@ -574,6 +876,7 @@ mod tests {
                 max: 500,
             }],
         );
+
         client.set_prices_simple(&admin, &prices);
     }
 
@@ -609,9 +912,15 @@ mod tests {
     #[test]
     fn seq_staleness_rejects_pre_wrap_sequence_as_stale() {
         assert!(is_seq_stale(1, u32::MAX, 60), "u32::MAX > 1 must be stale");
-        assert!(is_seq_stale(1, u32::MAX - 1, 60), "u32::MAX-1 > 1 must be stale");
+        assert!(
+            is_seq_stale(1, u32::MAX - 1, 60),
+            "u32::MAX-1 > 1 must be stale"
+        );
         // Edge: submitted exactly equals current — fresh (age = 0)
-        assert!(!is_seq_stale(1, 1, 60), "same-ledger submission must be fresh");
+        assert!(
+            !is_seq_stale(1, 1, 60),
+            "same-ledger submission must be fresh"
+        );
     }
 
     /// Normal (non-wrap) staleness check must still work after the refactor.
@@ -664,5 +973,138 @@ mod tests {
         assert_eq!(client.get_primary_price(&eth).min, 2_000 * 10i128.pow(30));
         assert_eq!(client.get_primary_price(&btc).min, 60_000 * 10i128.pow(30));
         assert_eq!(client.get_primary_price(&usdc).min, 10i128.pow(30));
+    }
+
+    #[test]
+    fn median_works_with_three_values() {
+        let env = Env::default();
+
+        let values = Vec::from_array(&env, [100i128, 300i128, 200i128]);
+
+        assert_eq!(median_i128(&env, values), 200);
+    }
+
+    #[test]
+    fn median_works_with_five_values() {
+        let env = Env::default();
+
+        let values = Vec::from_array(&env, [500i128, 100i128, 300i128, 200i128, 400i128]);
+
+        assert_eq!(median_i128(&env, values), 300);
+    }
+
+    #[test]
+    fn median_works_with_two_values() {
+        let env = Env::default();
+
+        let values = Vec::from_array(&env, [100i128, 300i128]);
+
+        assert_eq!(median_i128(&env, values), 200);
+    }
+
+    #[test]
+    fn set_prices_simple_keeps_last_submitted_price() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+
+        let prices = Vec::from_array(
+            &env,
+            [
+                TokenPrice {
+                    token: token.clone(),
+                    min: 100,
+                    max: 110,
+                },
+                TokenPrice {
+                    token: token.clone(),
+                    min: 101,
+                    max: 111,
+                },
+                TokenPrice {
+                    token: token.clone(),
+                    min: 10_000,
+                    max: 10_010,
+                },
+            ],
+        );
+
+        client.set_prices_simple(&admin, &prices);
+
+        let price = client.get_primary_price(&token);
+
+        assert_eq!(price.min, 10_000);
+        assert_eq!(price.max, 10_010);
+    }
+
+    #[test]
+    fn set_token_signers_stores_configured_quorum() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        let signer_indices = Vec::from_array(&env, [0u32, 1u32, 2u32]);
+
+        client.set_token_signers(&admin, &token, &signer_indices, &2u32);
+
+        env.as_contract(&oracle_id, || {
+            assert_eq!(get_token_quorum(&env, &token, 3), 2);
+            assert!(is_token_signer(&env, &token, 0));
+            assert!(is_token_signer(&env, &token, 1));
+            assert!(is_token_signer(&env, &token, 2));
+            assert!(!is_token_signer(&env, &token, 3));
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn set_token_signers_rejects_duplicate_signers() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        let signer_indices = Vec::from_array(&env, [0u32, 1u32, 1u32]);
+
+        client.set_token_signers(&admin, &token, &signer_indices, &2u32);
+    }
+
+    #[test]
+    #[should_panic]
+    fn set_token_signers_rejects_quorum_above_signer_count() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        let signer_indices = Vec::from_array(&env, [0u32, 1u32, 2u32]);
+
+        client.set_token_signers(&admin, &token, &signer_indices, &4u32);
+    }
+
+    #[test]
+    fn unset_token_signer_config_preserves_single_signer_behavior() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (_, _, _, oracle_id) = setup(&env);
+
+        let token = Address::generate(&env);
+
+        env.as_contract(&oracle_id, || {
+            assert_eq!(get_token_quorum(&env, &token, 1), 1);
+            assert!(is_token_signer(&env, &token, 999));
+        });
     }
 }
