@@ -862,4 +862,156 @@ mod tests {
             "short position must succeed when only long cap is set"
         );
     }
+
+    // ── Issue #284: maker/taker fee tier differentiation ─────────────────────
+
+    /// Maker (for_positive_impact=true) and taker (for_positive_impact=false) rates are
+    /// independent storage keys. When set to different values, the taker position has more
+    /// fee deducted and therefore less net collateral than the equivalent maker position.
+    #[test]
+    fn maker_fee_lower_than_taker_fee_when_rates_differ() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let index_price = 2_000 * fp;
+
+        // Set maker (positive impact) to 10 bps, taker (negative impact) to 30 bps
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::position_fee_factor_key(&w.env, &w.market_tk, true),
+            &(10 * fp as u128 / 10_000),
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::position_fee_factor_key(&w.env, &w.market_tk, false),
+            &(30 * fp as u128 / 10_000),
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::max_leverage_key(&w.env, &w.market_tk),
+            &(50 * fp as u128),
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk),
+            &(10_000 * ONE_TOKEN as u128),
+        );
+        set_prices(&w, index_price);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(ONE_TOKEN * 200));
+
+        let market = gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
+        let price_props = gmx_types::PriceProps { min: index_price, max: index_price };
+        let collateral = ONE_TOKEN * 10;
+        let size_delta = 1_000 * fp;
+
+        // Maker position
+        let maker_pos = w.env.as_contract(&w.admin, || {
+            increase_position(&w.env, &IncreasePositionParams {
+                data_store: &w.ds,
+                caller: &w.admin,
+                account: &w.user,
+                receiver: &w.user,
+                market: &market,
+                collateral_token: &w.long_tk,
+                size_delta_usd: size_delta,
+                collateral_amount: collateral,
+                acceptable_price: 0,
+                is_long: true,
+                index_token_price: &price_props,
+                collateral_price: index_price,
+                current_time: 1_000,
+                for_positive_impact: true,
+            })
+        });
+
+        // Taker position (separate account, same collateral and size)
+        let taker_pos = w.env.as_contract(&w.admin, || {
+            increase_position(&w.env, &IncreasePositionParams {
+                data_store: &w.ds,
+                caller: &w.admin,
+                account: &Address::generate(&w.env),
+                receiver: &w.user,
+                market: &market,
+                collateral_token: &w.long_tk,
+                size_delta_usd: size_delta,
+                collateral_amount: collateral,
+                acceptable_price: 0,
+                is_long: true,
+                index_token_price: &price_props,
+                collateral_price: index_price,
+                current_time: 1_000,
+                for_positive_impact: false,
+            })
+        });
+
+        // Taker pays 3× the fee, so has less collateral remaining
+        assert!(
+            maker_pos.collateral_amount > taker_pos.collateral_amount,
+            "maker collateral {} must exceed taker collateral {} (maker=10bps, taker=30bps)",
+            maker_pos.collateral_amount,
+            taker_pos.collateral_amount,
+        );
+    }
+
+    /// When maker and taker rates are identical, both positions produce equal net collateral
+    /// regardless of the for_positive_impact flag.
+    #[test]
+    fn equal_rates_give_equal_collateral_for_maker_and_taker() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let index_price = 2_000 * fp;
+
+        configure_market(&w, 20); // same 20 bps for both directions
+        set_prices(&w, index_price);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(ONE_TOKEN * 200));
+
+        let market = gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
+        let price_props = gmx_types::PriceProps { min: index_price, max: index_price };
+        let collateral = ONE_TOKEN * 10;
+        let size_delta = 1_000 * fp;
+
+        let maker_pos = w.env.as_contract(&w.admin, || {
+            increase_position(&w.env, &IncreasePositionParams {
+                data_store: &w.ds,
+                caller: &w.admin,
+                account: &w.user,
+                receiver: &w.user,
+                market: &market,
+                collateral_token: &w.long_tk,
+                size_delta_usd: size_delta,
+                collateral_amount: collateral,
+                acceptable_price: 0,
+                is_long: true,
+                index_token_price: &price_props,
+                collateral_price: index_price,
+                current_time: 1_000,
+                for_positive_impact: true,
+            })
+        });
+
+        let taker_pos = w.env.as_contract(&w.admin, || {
+            increase_position(&w.env, &IncreasePositionParams {
+                data_store: &w.ds,
+                caller: &w.admin,
+                account: &Address::generate(&w.env),
+                receiver: &w.user,
+                market: &market,
+                collateral_token: &w.long_tk,
+                size_delta_usd: size_delta,
+                collateral_amount: collateral,
+                acceptable_price: 0,
+                is_long: true,
+                index_token_price: &price_props,
+                collateral_price: index_price,
+                current_time: 1_000,
+                for_positive_impact: false,
+            })
+        });
+
+        assert_eq!(
+            maker_pos.collateral_amount,
+            taker_pos.collateral_amount,
+            "equal fee rates must produce equal net collateral for maker and taker"
+        );
+    }
 }
