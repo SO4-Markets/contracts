@@ -8,6 +8,7 @@ soroban-sdk = { workspace = true }
 gmx-types = { path = "../libs/types" }
 gmx-keys = { path = "../libs/keys" }
 gmx-math = { path = "../libs/math" }
+gmx-market-utils = { path = "../libs/market_utils" }
 
 # Contracts
 data-store = { path = "../contracts/data_store" }
@@ -23,6 +24,8 @@ liquidation-handler = { path = "../contracts/liquidation_handler" }
 adl-handler = { path = "../contracts/adl_handler" }
 fee-handler = { path = "../contracts/fee_handler" }
 market-token = { path = "../contracts/market_token" }
+reader = { path = "../contracts/reader" }
+order-cleanup = { path = "../contracts/order_cleanup" }
 
 [lib]
 path = "lib.rs"
@@ -47,3 +50,19 @@ path = "take_profit.rs"
 [[test]]
 name = "lifecycle_long"
 path = "lifecycle_long.rs"
+
+[[test]]
+name = "funding_rate"
+path = "funding_rate.rs"
+
+[[test]]
+name = "keeper_window"
+path = "keeper_window.rs"
+
+[[test]]
+name = "adl"
+path = "adl.rs"
+
+[[test]]
+name = "liquidation"
+path = "liquidation.rs"
