@@ -20,7 +20,7 @@ use gmx_decrease_position_utils::{decrease_position, DecreasePositionParams};
 use gmx_increase_position_utils::{increase_position, IncreasePositionParams};
 use gmx_keys::{
     account_order_list_key, keeper_heartbeat_timeout_key, last_keeper_activity_key,
-    liquidation_execution_fee_key,
+    liquidation_execution_fee_key, min_execution_fee_key,
     market_index_token_key, market_long_token_key, market_short_token_key,
     max_leverage_key, open_interest_key, order_key, order_list_key,
     position_fee_factor_key, position_key,
@@ -83,6 +83,8 @@ pub enum Error {
     MarketPaused = 15,
     /// swap_path contains a repeated market address — would corrupt pool accounting (issue #232).
     CyclicSwapPath = 16,
+    /// execution_fee is below the configured global minimum (issue #294).
+    InsufficientExecutionFee = 17,
 }
 
 
@@ -177,6 +179,7 @@ trait IDataStore {
     fn contains_bytes32(env: Env, set_key: BytesN<32>, value: BytesN<32>) -> bool;
     fn set_address(env: Env, caller: Address, key: BytesN<32>, value: Address) -> Address;
     fn get_bool(env: Env, key: BytesN<32>) -> bool;
+    fn get_min_execution_fee(env: Env) -> u128;
 }
 
 #[allow(dead_code)]
@@ -584,6 +587,16 @@ impl OrderHandler {
                     j += 1;
                 }
                 i += 1;
+            }
+        }
+
+        // Issue #294: reject orders that underpay the execution fee.
+        // Validation happens here (at creation) so underpaid orders never enter the queue.
+        // execution_fee is i128; reject negative values and those below the configured minimum.
+        {
+            let min_fee = ds.get_min_execution_fee();
+            if params.execution_fee < 0 || (params.execution_fee as u128) < min_fee {
+                panic_with_error!(&env, Error::InsufficientExecutionFee);
             }
         }
 
@@ -3268,6 +3281,47 @@ mod tests {
         );
     }
 
+    // ── Issue #294: minimum execution fee enforcement ─────────────────────────
+
+    /// create_order with fee below the configured minimum must revert.
+    #[test]
+    #[should_panic]
+    fn create_order_below_min_fee_reverts() {
+        let w = setup();
+        let min_fee: u128 = 1_000_000;
+        DsClient::new(&w.env, &w.ds).set_min_execution_fee(&w.admin, &min_fee);
+
+        // execution_fee = 0 < min_fee → must revert with InsufficientExecutionFee
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+        OrderHandlerClient::new(&w.env, &w.ord_handler).create_order(
+            &w.user,
+            &CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                size_delta_usd: 2000 * gmx_math::FLOAT_PRECISION,
+                collateral_delta_amount: COLLATERAL,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketIncrease,
+                is_long: true,
+            },
+        );
+    }
+
+    /// create_order with fee meeting the configured minimum must succeed.
+    #[test]
+    fn create_order_at_min_fee_succeeds() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        let min_fee: u128 = 1_000_000;
+        DsClient::new(&w.env, &w.ds).set_min_execution_fee(&w.admin, &min_fee);
+
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+        let key = OrderHandlerClient::new(&w.env, &w.ord_handler).create_order(
     // ── Issue #286: FundingRateSnapshot event emission ────────────────────────
 
     /// Executing a market increase order must emit a FundingRateSnapshot event
@@ -3293,12 +3347,18 @@ mod tests {
                 collateral_delta_amount: COLLATERAL,
                 trigger_price: 0,
                 acceptable_price: 0,
+                execution_fee: min_fee as i128,
                 execution_fee: 0,
                 min_output_amount: 0,
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
             },
         );
+        assert!(
+            OrderHandlerClient::new(&w.env, &w.ord_handler)
+                .get_order(&key)
+                .is_some(),
+            "order must be stored when fee meets the minimum"
         set_prices(&w, 2000 * fp);
         hc.execute_order(&w.keeper, &key);
 
