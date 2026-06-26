@@ -80,6 +80,7 @@ trait IOracle {
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "OrderHandlerClient")]
 trait IOrderHandler {
+    fn bump_position_ttl(env: Env, caller: Address, key: BytesN<32>) -> bool;
     fn get_position(env: Env, key: BytesN<32>) -> Option<PositionProps>;
     fn get_order(env: Env, key: BytesN<32>) -> Option<OrderProps>;
 }
@@ -392,6 +393,8 @@ impl Reader {
     ) -> Option<PositionInfo> {
         // Read position from canonical location (order_handler storage)
         let pk = position_key(&env, &account, &market, &collateral_token, is_long);
+        // Bump TTL on read so monitoring via Reader keeps positions alive.
+        OrderHandlerClient::new(&env, &order_handler).bump_position_ttl(&env.current_contract_address(), &pk);
         let position: PositionProps =
             match OrderHandlerClient::new(&env, &order_handler).get_position(&pk) {
                 Some(p) => p,
@@ -532,6 +535,7 @@ impl Reader {
     ) -> bool {
         // Read position from canonical location (order_handler storage)
         let pk = position_key(&env, &account, &market, &collateral_token, is_long);
+        OrderHandlerClient::new(&env, &order_handler).bump_position_ttl(&env.current_contract_address(), &pk);
         let position: PositionProps =
             match OrderHandlerClient::new(&env, &order_handler).get_position(&pk) {
                 Some(p) => p,
@@ -644,6 +648,8 @@ impl Reader {
         order_handler: Address,
         position_key: BytesN<32>,
     ) -> Option<PositionInfo> {
+        OrderHandlerClient::new(&env, &order_handler).bump_position_ttl(&env.current_contract_address(), &position_key);
+        OrderHandlerClient::new(&env, &order_handler).bump_position_ttl(&env.current_contract_address(), &position_key);
         let position: PositionProps =
             match OrderHandlerClient::new(&env, &order_handler).get_position(&position_key) {
                 Some(p) => p,

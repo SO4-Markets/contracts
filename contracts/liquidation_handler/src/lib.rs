@@ -60,6 +60,7 @@ trait IDataStore {
 #[soroban_sdk::contractclient(name = "OracleClient")]
 trait IOracle {
     fn get_primary_price(env: Env, token: Address) -> PriceProps;
+    fn require_price_fresh(env: Env, token: Address, expected_ledger_seq: u32) -> PriceProps;
 }
 
 #[allow(dead_code)]
@@ -148,9 +149,10 @@ impl LiquidationHandler {
 
         let market_props = load_market_props(&env, &data_store, &market);
         let oracle_client = OracleClient::new(&env, &oracle);
-        let index_price = oracle_client.get_primary_price(&market_props.index_token);
+        let index_price = oracle_client
+            .require_price_fresh(&market_props.index_token, &env.ledger().sequence());
         let collateral_price = oracle_client
-            .get_primary_price(&collateral_token)
+            .require_price_fresh(&collateral_token, &env.ledger().sequence())
             .mid_price();
 
         // Read position from order_handler via a view call
@@ -213,9 +215,10 @@ impl LiquidationHandler {
 
         let market_props = load_market_props(&env, &data_store, &market);
         let oracle_client = OracleClient::new(&env, &oracle);
-        let index_price = oracle_client.get_primary_price(&market_props.index_token);
+        let index_price = oracle_client
+            .require_price_fresh(&market_props.index_token, &env.ledger().sequence());
         let collateral_price = oracle_client
-            .get_primary_price(&collateral_token)
+            .require_price_fresh(&collateral_token, &env.ledger().sequence())
             .mid_price();
 
         // Verify position is actually liquidatable before delegating

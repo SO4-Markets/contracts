@@ -391,6 +391,20 @@ impl OrderHandler {
             .set(&InstanceKey::ReferralStorage, &referral_storage);
     }
 
+    /// Bump the TTL of a stored position by rewriting it to persistent storage.
+    /// Allows reader/view contracts to extend the lifetime of positions they access.
+    pub fn bump_position_ttl(env: Env, caller: Address, key: BytesN<32>) -> bool {
+        caller.require_auth();
+        let pos_key = PositionStorageKey::Position(key.clone());
+        match env.storage().persistent().get::<PositionStorageKey, PositionProps>(&pos_key) {
+            Some(p) => {
+                env.storage().persistent().set(&pos_key, &p);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Create up to 5 orders atomically in a single call (issue #219).
     ///
     /// All orders are created or none are (Soroban atomicity). For increase/swap orders,

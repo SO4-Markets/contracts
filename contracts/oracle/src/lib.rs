@@ -84,6 +84,13 @@ pub struct SignedPrice {
     pub ledger_seq: u32,
 }
 
+#[contracttype]
+pub struct StoredPrice {
+    pub min: i128,
+    pub max: i128,
+    pub ledger_seq: u32,
+}
+
 // ─── Cross-contract clients ───────────────────────────────────────────────────
 
 #[allow(dead_code)]
@@ -224,12 +231,13 @@ impl Oracle {
 
             // Store in temporary storage and bump its TTL so the price survives
             // the keeper's set_prices → execute_* batch window (see PRICE_TTL_LEDGERS).
-            let price = PriceProps {
+            let stored = StoredPrice {
                 min: sp.min_price,
                 max: sp.max_price,
+                ledger_seq: sp.ledger_seq,
             };
             let price_key = TempKey::Price(sp.token.clone());
-            env.storage().temporary().set(&price_key, &price);
+            env.storage().temporary().set(&price_key, &stored);
             env.storage()
                 .temporary()
                 .extend_ttl(&price_key, PRICE_TTL_LEDGERS, PRICE_TTL_LEDGERS);
@@ -243,17 +251,23 @@ impl Oracle {
 
     /// Returns the current price for a token. Panics if not set this execution.
     pub fn get_primary_price(env: Env, token: Address) -> PriceProps {
-        env.storage()
+        let stored: StoredPrice = env
+            .storage()
             .temporary()
-            .get::<TempKey, PriceProps>(&TempKey::Price(token))
-            .unwrap_or_else(|| panic_with_error!(&env, Error::PriceNotFound))
+            .get::<TempKey, StoredPrice>(&TempKey::Price(token))
+            .unwrap_or_else(|| panic_with_error!(&env, Error::PriceNotFound));
+        PriceProps {
+            min: stored.min,
+            max: stored.max,
+        }
     }
 
     /// Returns the price for a token, or None if not set.
     pub fn try_get_price(env: Env, token: Address) -> Option<PriceProps> {
         env.storage()
             .temporary()
-            .get::<TempKey, PriceProps>(&TempKey::Price(token))
+            .get::<TempKey, StoredPrice>(&TempKey::Price(token))
+            .map(|s| PriceProps { min: s.min, max: s.max })
     }
 
     /// Returns pinned stable price from data_store, or None if not configured.
@@ -287,10 +301,32 @@ impl Oracle {
                 max: stable,
             };
         }
-        env.storage()
+        let stored: StoredPrice = env
+            .storage()
             .temporary()
-            .get::<TempKey, PriceProps>(&TempKey::Price(token))
-            .unwrap_or_else(|| panic_with_error!(&env, Error::PriceNotFound))
+            .get::<TempKey, StoredPrice>(&TempKey::Price(token))
+            .unwrap_or_else(|| panic_with_error!(&env, Error::PriceNotFound));
+        PriceProps {
+            min: stored.min,
+            max: stored.max,
+        }
+    }
+
+    /// Require that the stored price for `token` was signed for `expected_ledger_seq`.
+    /// Panics with `StalePrice` if the stored ledger sequence differs.
+    pub fn require_price_fresh(env: Env, token: Address, expected_ledger_seq: u32) -> PriceProps {
+        let stored: StoredPrice = env
+            .storage()
+            .temporary()
+            .get::<TempKey, StoredPrice>(&TempKey::Price(token))
+            .unwrap_or_else(|| panic_with_error!(&env, Error::PriceNotFound));
+        if stored.ledger_seq != expected_ledger_seq {
+            panic_with_error!(&env, Error::StalePrice);
+        }
+        PriceProps {
+            min: stored.min,
+            max: stored.max,
+        }
     }
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
@@ -345,12 +381,13 @@ impl Oracle {
 
             check_circuit_breaker(&env, &data_store, &tp.token, tp.min, tp.max);
 
-            let price = PriceProps {
+            let stored = StoredPrice {
                 min: tp.min,
                 max: tp.max,
+                ledger_seq: env.ledger().sequence(),
             };
             let price_key = TempKey::Price(tp.token.clone());
-            env.storage().temporary().set(&price_key, &price);
+            env.storage().temporary().set(&price_key, &stored);
             env.storage()
                 .temporary()
                 .extend_ttl(&price_key, PRICE_TTL_LEDGERS, PRICE_TTL_LEDGERS);
