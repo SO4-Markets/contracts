@@ -989,6 +989,21 @@ impl OrderHandler {
             );
         }
 
+        if order.execution_fee > 0 {
+            let market = load_market_props(&env, &data_store, &order.market);
+            let fee_receiver = if is_keeper {
+                caller.clone()
+            } else {
+                order.account.clone()
+            };
+            OrderVaultClient::new(&env, &order_vault).transfer_out(
+                &handler,
+                &market.index_token,
+                &fee_receiver,
+                &order.execution_fee,
+            );
+        }
+
         remove_order(&env, &data_store, &handler, &key, &order.account);
 
         env.events()
