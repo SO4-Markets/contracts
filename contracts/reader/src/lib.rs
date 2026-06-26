@@ -225,6 +225,12 @@ impl Reader {
     ///
 
         /// Issue #207: per-hour funding rate view for the frontend.
+        ///
+        /// For **historical** funding rates, use the off-chain event indexer: `execute_order`
+        /// emits a `FundingRateSnapshot` Soroban event (topic: `"fund_snap"`) after every
+        /// position order execution. Filter by topic and market address to reconstruct the
+        /// funding rate time-series. Historical data is not stored on-chain to avoid
+        /// Soroban storage cost at every position execution (issue #286).
         pub fn get_funding_rate_info(
             env: Env,
             data_store: Address,
