@@ -20,3 +20,5 @@ role-store = { path = "../role_store" }
 soroban-sdk = { workspace = true, features = ["testutils"] }
 role-store  = { path = "../role_store" }
 data-store  = { path = "../data_store" }
+gmx-math    = { path = "../../libs/math" }
+oracle      = { path = ".", features = ["testutils"] }

@@ -1495,7 +1495,9 @@ version = "0.1.0"
 dependencies = [
  "data-store",
  "gmx-keys",
+ "gmx-math",
  "gmx-types",
+ "oracle",
  "role-store",
  "soroban-sdk",
 ]
