@@ -18,9 +18,7 @@ use gmx_keys::{
     account_deposit_list_key, deposit_key, deposit_list_key, market_index_token_key,
     market_long_token_key, market_short_token_key, roles,
 };
-use gmx_market_utils::{
-    apply_delta_to_pool_amount, get_market_token_price,
-};
+use gmx_market_utils::{apply_delta_to_pool_amount, get_market_token_price};
 use gmx_math::{mul_div_wide, TOKEN_PRECISION};
 pub use gmx_types::CreateDepositParams;
 use gmx_types::{DepositProps, MarketProps};
@@ -42,6 +40,8 @@ pub enum Error {
     InsufficientLpOut = 5,
     ZeroDeposit = 6,
     InsufficientVaultBalance = 7,
+    BelowMinimumDepositUsd = 8,
+    BelowMinimumDeposit = 9,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -85,6 +85,13 @@ trait IDataStore {
     fn remove_bytes32_from_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
     fn contains_bytes32(env: Env, set_key: BytesN<32>, value: BytesN<32>) -> bool;
     fn increment_nonce(env: Env, caller: Address) -> u64;
+    fn get_min_deposit_usd(env: Env, market: Address) -> u128;
+    fn set_min_deposit_usd(
+        env: Env,
+        caller: Address,
+        market: Address,
+        min_deposit_usd: u128,
+    ) -> u128;
 }
 
 #[allow(dead_code)]
@@ -98,6 +105,7 @@ trait IOracle {
 trait IDepositVault {
     fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128);
     fn get_recorded_balance(env: Env, token: Address) -> i128;
+    fn record_transfer_in(env: Env, token: Address) -> i128;
 }
 
 #[allow(dead_code)]
@@ -164,7 +172,9 @@ impl DepositHandler {
         if caller != admin {
             panic_with_error!(&env, Error::Unauthorized);
         }
-        env.storage().instance().set(&InstanceKey::Oracle, &new_oracle);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Oracle, &new_oracle);
     }
 
     // ── Create deposit ────────────────────────────────────────────────────────
@@ -190,6 +200,11 @@ impl DepositHandler {
             .instance()
             .get(&InstanceKey::DepositVault)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let oracle: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Oracle)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
         let ds = DataStoreClient::new(&env, &data_store);
 
@@ -202,14 +217,49 @@ impl DepositHandler {
         if params.short_token_amount > 0 && params.initial_short_token != market.short_token {
             panic_with_error!(&env, Error::Unauthorized); // Wrong short token
         }
+        // Validate minimum deposit USD BEFORE any token transfer.
+        let min_deposit_usd = ds.get_min_deposit_usd(&params.market);
 
+        if min_deposit_usd > 0 {
+            let oracle_client = OracleClient::new(&env, &oracle);
+
+            let long_price = oracle_client
+                .get_primary_price(&market.long_token)
+                .mid_price();
+
+            let short_price = oracle_client
+                .get_primary_price(&market.short_token)
+                .mid_price();
+
+            let mut deposit_value_usd: i128 = 0;
+
+            if params.long_token_amount > 0 {
+                deposit_value_usd +=
+                    mul_div_wide(&env, params.long_token_amount, long_price, TOKEN_PRECISION);
+            }
+
+            if params.short_token_amount > 0 {
+                deposit_value_usd += mul_div_wide(
+                    &env,
+                    params.short_token_amount,
+                    short_price,
+                    TOKEN_PRECISION,
+                );
+            }
+
+            if deposit_value_usd < min_deposit_usd as i128 {
+                panic_with_error!(&env, Error::BelowMinimumDeposit);
+            }
+        }
         // Pull tokens from caller → deposit_vault
+        let vault_client = DepositVaultClient::new(&env, &deposit_vault);
         if params.long_token_amount > 0 {
             token::Client::new(&env, &params.initial_long_token).transfer(
                 &caller,
                 &deposit_vault,
                 &params.long_token_amount,
             );
+            vault_client.record_transfer_in(&params.initial_long_token);
         }
         if params.short_token_amount > 0 {
             token::Client::new(&env, &params.initial_short_token).transfer(
@@ -217,6 +267,7 @@ impl DepositHandler {
                 &deposit_vault,
                 &params.short_token_amount,
             );
+            vault_client.record_transfer_in(&params.initial_short_token);
         }
 
         // Allocate deposit key from nonce
@@ -260,6 +311,16 @@ impl DepositHandler {
         keeper.require_auth();
         require_order_keeper(&env, &keeper);
 
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let deposit_vault: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DepositVault)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let data_store: Address = env
             .storage()
             .instance()
@@ -1134,17 +1195,18 @@ mod tests {
             },
         );
 
-        let pool_before =
-            ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.long_tk));
+        let pool_before = ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.long_tk));
         let vault_before = token::Client::new(env, &w.long_tk).balance(&w.vault);
 
         // Must fail with InsufficientLpOut
         let result = hc.try_execute_deposit(&w.keeper, &key);
-        assert!(result.is_err(), "execute_deposit must fail when mint_amount < min_market_tokens");
+        assert!(
+            result.is_err(),
+            "execute_deposit must fail when mint_amount < min_market_tokens"
+        );
 
         // Pool amount unchanged — apply_delta_to_pool_amount was reverted
-        let pool_after =
-            ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.long_tk));
+        let pool_after = ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.long_tk));
         assert_eq!(
             pool_before, pool_after,
             "pool amount must be unchanged after failed execute"
@@ -1254,7 +1316,138 @@ mod tests {
         assert_eq!(dep.long_token_amount, 1_000_0000);
         assert_eq!(dep.short_token_amount, 500_0000);
     }
+    // ── Minimum deposit USD ───────────────────────────────────────────────────
 
+    /// Minimum deposit of 0 allows any deposit size.
+    #[test]
+    fn create_deposit_zero_minimum_allows_small_deposit() {
+        let w = setup();
+        set_prices(&w);
+
+        let env = &w.env;
+        let user = Address::generate(env);
+        let amount = gmx_math::TOKEN_PRECISION / 100; // 0.01 token
+
+        StellarAssetClient::new(env, &w.short_tk).mint(&user, &amount);
+
+        let ds_client = DsClient::new(env, &w.ds);
+        ds_client.set_u128(
+            &w.admin,
+            &gmx_keys::min_deposit_usd_key(env, &w.market_tk),
+            &0u128,
+        );
+        let handler_client = DepositHandlerClient::new(env, &w.handler);
+
+        let key = handler_client.create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: 0,
+                short_token_amount: amount,
+                min_market_tokens: 0,
+                execution_fee: 0,
+            },
+        );
+
+        let dep = handler_client.get_deposit(&key).unwrap();
+        assert_eq!(dep.short_token_amount, amount);
+    }
+
+    /// Deposit below configured minimum must revert before token transfer.
+    #[test]
+    fn create_deposit_below_minimum_reverts_before_transfer() {
+        let w = setup();
+        set_prices(&w);
+
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        let deposit_amount = 50 * gmx_math::TOKEN_PRECISION; // short token = $1, so $50
+        StellarAssetClient::new(env, &w.short_tk).mint(&user, &deposit_amount);
+
+        let ds_client = DsClient::new(env, &w.ds);
+        let min_deposit_usd = 100u128 * gmx_math::FLOAT_PRECISION as u128;
+        ds_client.set_u128(
+            &w.admin,
+            &gmx_keys::min_deposit_usd_key(env, &w.market_tk),
+            &min_deposit_usd,
+        );
+
+        let token_client = token::Client::new(env, &w.short_tk);
+        let user_before = token_client.balance(&user);
+        let vault_before = token_client.balance(&w.vault);
+
+        let handler_client = DepositHandlerClient::new(env, &w.handler);
+
+        let result = handler_client.try_create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: 0,
+                short_token_amount: deposit_amount,
+                min_market_tokens: 0,
+                execution_fee: 0,
+            },
+        );
+
+        assert!(result.is_err(), "deposit below minimum must revert");
+        assert_eq!(
+            token_client.balance(&user),
+            user_before,
+            "user balance must remain unchanged"
+        );
+        assert_eq!(
+            token_client.balance(&w.vault),
+            vault_before,
+            "vault balance must remain unchanged"
+        );
+    }
+
+    /// Deposit exactly equal to configured minimum must succeed.
+    #[test]
+    fn create_deposit_equal_to_minimum_succeeds() {
+        let w = setup();
+        set_prices(&w);
+
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        let deposit_amount = 100 * gmx_math::TOKEN_PRECISION; // short token = $1, so $100
+        StellarAssetClient::new(env, &w.short_tk).mint(&user, &deposit_amount);
+
+        let ds_client = DsClient::new(env, &w.ds);
+        let min_deposit_usd = 100u128 * gmx_math::FLOAT_PRECISION as u128;
+        ds_client.set_u128(
+            &w.admin,
+            &gmx_keys::min_deposit_usd_key(env, &w.market_tk),
+            &min_deposit_usd,
+        );
+
+        let handler_client = DepositHandlerClient::new(env, &w.handler);
+
+        let key = handler_client.create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: 0,
+                short_token_amount: deposit_amount,
+                min_market_tokens: 0,
+                execution_fee: 0,
+            },
+        );
+
+        let dep = handler_client.get_deposit(&key).unwrap();
+        assert_eq!(dep.short_token_amount, deposit_amount);
+    }
     // ── Issue #42: Mixed deposit tests ─────────────────────────────────────────
 
     /// Test long-only deposit: pool accounting must be correct.
@@ -1881,6 +2074,9 @@ mod tests {
         hc.execute_deposit(&w.keeper, &key);
 
         let lp = MtClient::new(env, &w.market_tk).balance(&user);
-        assert!(lp > 0, "normal deposit must still mint LP tokens after vault check added");
+        assert!(
+            lp > 0,
+            "normal deposit must still mint LP tokens after vault check added"
+        );
     }
 }

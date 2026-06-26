@@ -460,7 +460,12 @@ impl DataStore {
 
     /// Set or revoke a position manager for a given owner and market.
     /// Only the owner can call this. Pass zero_address to revoke.
-    pub fn set_position_manager(env: Env, owner: Address, market: Address, manager: Address) -> Address {
+    pub fn set_position_manager(
+        env: Env,
+        owner: Address,
+        market: Address,
+        manager: Address,
+    ) -> Address {
         owner.require_auth();
         // Note: We don't check for CONTROLLER role here because the owner can revoke their own manager.
         // Setting a manager is an authorization, not a state modification done by the protocol.
@@ -481,7 +486,12 @@ impl DataStore {
     }
 
     /// Set the liquidation execution fee for a given market (admin-only).
-    pub fn set_liquidation_execution_fee(env: Env, caller: Address, market: Address, fee: u128) -> u128 {
+    pub fn set_liquidation_execution_fee(
+        env: Env,
+        caller: Address,
+        market: Address,
+        fee: u128,
+    ) -> u128 {
         caller.require_auth();
         require_controller(&env, &caller);
         use gmx_keys::liquidation_execution_fee_key;
@@ -489,8 +499,34 @@ impl DataStore {
         env.storage().persistent().set(&key, &fee);
         fee
     }
-}
 
+    // ── Minimum Deposit USD (dust prevention) ───────────────────────────────
+
+    /// Get the minimum deposit USD value for a given market.
+    /// Returns 0 if no minimum is configured.
+    pub fn get_min_deposit_usd(env: Env, market: Address) -> u128 {
+        use gmx_keys::min_deposit_usd_key;
+        let key = DataKey::U128(min_deposit_usd_key(&env, &market));
+        env.storage().persistent().get(&key).unwrap_or(0u128)
+    }
+
+    /// Set the minimum deposit USD value for a given market (admin-only).
+    pub fn set_min_deposit_usd(
+        env: Env,
+        caller: Address,
+        market: Address,
+        min_deposit_usd: u128,
+    ) -> u128 {
+        caller.require_auth();
+        require_controller(&env, &caller);
+
+        use gmx_keys::min_deposit_usd_key;
+        let key = DataKey::U128(min_deposit_usd_key(&env, &market));
+        env.storage().persistent().set(&key, &min_deposit_usd);
+
+        min_deposit_usd
+    }
+}
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 fn require_init(env: &Env) {

@@ -671,6 +671,13 @@ pub fn liquidation_execution_fee_key(env: &Env, market: &Address) -> BytesN<32> 
     sha256(env, &b)
 }
 
+pub fn min_deposit_usd_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "MIN_DEPOSIT_USD");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
 pub fn max_pnl_factor_for_adl_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "MAX_PNL_FACTOR_FOR_ADL");
