@@ -663,6 +663,13 @@ pub fn position_manager_key(env: &Env, owner: &Address, market: &Address) -> Byt
     sha256(env, &b)
 }
 
+/// sha256("MIN_EXECUTION_FEE") — global minimum execution fee for all order types
+pub fn min_execution_fee_key(env: &Env) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "MIN_EXECUTION_FEE");
+    sha256(env, &b)
+}
+
 /// sha256("LIQUIDATION_EXECUTION_FEE" ‖ market)
 pub fn liquidation_execution_fee_key(env: &Env, market: &Address) -> BytesN<32> {
     let mut b = Bytes::new(env);

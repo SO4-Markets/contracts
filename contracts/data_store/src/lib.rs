@@ -489,6 +489,24 @@ impl DataStore {
         env.storage().persistent().set(&key, &fee);
         fee
     }
+
+    /// Get the global minimum execution fee required for all order types.
+    /// Returns 0 if not configured (no minimum enforced).
+    pub fn get_min_execution_fee(env: Env) -> u128 {
+        use gmx_keys::min_execution_fee_key;
+        let key = DataKey::U128(min_execution_fee_key(&env));
+        env.storage().persistent().get(&key).unwrap_or(0u128)
+    }
+
+    /// Set the global minimum execution fee (controller-only).
+    pub fn set_min_execution_fee(env: Env, caller: Address, fee: u128) -> u128 {
+        caller.require_auth();
+        require_controller(&env, &caller);
+        use gmx_keys::min_execution_fee_key;
+        let key = DataKey::U128(min_execution_fee_key(&env));
+        env.storage().persistent().set(&key, &fee);
+        fee
+    }
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
