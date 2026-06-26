@@ -346,14 +346,29 @@ rustup target add wasm32-unknown-unknown
 ### 2. Stellar CLI
 
 ```bash
-# Install from crates.io with wasm optimiser enabled
-cargo install --locked stellar-cli --features opt
+# Install from crates.io
+cargo install --locked stellar-cli
 
 # Verify
 stellar --version
 ```
 
-### 3. Docker (optional — required for local node)
+### 3. wasm-opt
+
+`wasm-opt` is required for contract size measurement and CI size checks.
+
+```bash
+# macOS
+brew install binaryen
+
+# Ubuntu/Debian
+sudo apt-get update && sudo apt-get install -y binaryen
+
+# Verify
+wasm-opt --version
+```
+
+### 4. Docker (optional — required for local node)
 
 [Install Docker Desktop](https://docs.docker.com/get-docker/) if you want to run a fully local Stellar node instead of using testnet.
 

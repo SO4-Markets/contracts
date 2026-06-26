@@ -1,0 +1,49 @@
+name: WASM size
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  contract-size:
+    name: Check contract WASM sizes
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust targets
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          rustup target add wasm32v1-none
+
+      - name: Install Stellar CLI
+        run: |
+          curl -L https://github.com/stellar/stellar-cli/releases/download/v27.0.0/stellar-cli-27.0.0-x86_64-unknown-linux-gnu.tar.gz -o /tmp/stellar-cli.tar.gz
+          mkdir -p /tmp/stellar-cli
+          tar -xzf /tmp/stellar-cli.tar.gz -C /tmp/stellar-cli
+          sudo install /tmp/stellar-cli/stellar /usr/local/bin/stellar
+          stellar --version
+
+      - name: Install wasm-opt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binaryen
+          wasm-opt --version
+
+      - name: Check WASM sizes
+        run: bash scripts/measure_sizes.sh --baseline scripts/size_baseline.json --fail-on-increase
+
+      - name: Upload size report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-size-report
+          path: |
+            target/sizes.json
+            target/wasm32-unknown-unknown/release/optimized/*.wasm

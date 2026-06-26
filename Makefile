@@ -10,7 +10,7 @@ include mx/deploy.mk
 include mx/upgrade.mk
 include mx/tokens.mk
 
-.PHONY: all help clean
+.PHONY: all help clean update-size-baseline
 
 all: build test
 
@@ -22,6 +22,7 @@ help:
 	@printf '%s\n' '  make lint'
 	@printf '%s\n' '  make test'
 	@printf '%s\n' '  make build'
+	@printf '%s\n' '  make update-size-baseline'
 	@printf '%s\n' '  make smoke-prices'
 	@printf '%s\n' ''
 	@printf '%s\n' 'Deploy and upgrade:'
@@ -43,3 +44,7 @@ help:
 clean:
 	cargo clean
 	rm -rf .deployed
+
+update-size-baseline:
+	bash scripts/measure_sizes.sh
+	cp target/sizes.json scripts/size_baseline.json
