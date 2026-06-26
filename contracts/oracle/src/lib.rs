@@ -101,6 +101,7 @@ trait IDataStore {
     fn get_address_set_count(env: Env, set_key: BytesN<32>) -> u32;
     fn get_address_set_at(env: Env, set_key: BytesN<32>, start: u32, end: u32) -> Vec<Address>;
     fn set_bool(env: Env, caller: Address, key: BytesN<32>, value: bool) -> bool;
+    fn set_bytes32(env: Env, caller: Address, key: BytesN<32>, value: BytesN<32>);
 }
 
 #[contracttype]
@@ -110,6 +111,13 @@ pub struct CircuitBreakerTripped {
     pub old_price: i128,
     pub new_price: i128,
     pub deviation_bps: u128,
+}
+
+#[contracttype]
+pub struct OracleSignerRotated {
+    pub keeper_index: u32,
+    pub old_signer: BytesN<32>,
+    pub new_signer: BytesN<32>,
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -310,6 +318,38 @@ impl Oracle {
             env.storage().temporary().remove(&TempKey::Price(token));
         }
     }
+
+    // ── Signer rotation ───────────────────────────────────────────────────────
+
+    /// Atomically replace a keeper's ed25519 public key in data_store.
+    ///
+    /// Reads the current key at `keeper_index`, writes `new_pubkey` in its place,
+    /// and emits `OracleSignerRotated`. Any price bundle signed by the old key
+    /// that has not yet been submitted will be rejected once the key is replaced.
+    /// Requires the caller to be the contract admin.
+    pub fn rotate_signer(env: Env, caller: Address, keeper_index: u32, new_pubkey: BytesN<32>) {
+        caller.require_auth();
+        require_admin(&env, &caller);
+
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+
+        let key = keeper_pubkey_storage_key(&env, keeper_index);
+        let old_pubkey = DataStoreClient::new(&env, &data_store).get_bytes32(&key);
+        DataStoreClient::new(&env, &data_store).set_bytes32(&caller, &key, &new_pubkey);
+
+        env.events().publish(
+            (symbol_short!("sig_rot"),),
+            OracleSignerRotated {
+                keeper_index,
+                old_signer: old_pubkey,
+                new_signer: new_pubkey,
+            },
+        );
+    }
 }
 
 // ─── Test-only price submission ────────────────────────────────────────────────
@@ -382,19 +422,34 @@ fn require_order_keeper(env: &Env, caller: &Address) {
     }
 }
 
+fn require_admin(env: &Env, caller: &Address) {
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&InstanceKey::Admin)
+        .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
+    if *caller != admin {
+        panic_with_error!(env, Error::Unauthorized);
+    }
+}
+
+/// Compute the data_store key for a keeper public key slot by index.
+fn keeper_pubkey_storage_key(env: &Env, index: u32) -> BytesN<32> {
+    let mut buf = Bytes::new(env);
+    let prefix = keeper_public_key_prefix(env);
+    buf.extend_from_array(&prefix.to_array());
+    buf.extend_from_array(&index.to_be_bytes());
+    env.crypto().sha256(&buf).into()
+}
+
 /// Retrieve ed25519 public key for a keeper by index from data_store.
 ///
 /// Keys are stored as 32 bytes at key = sha256("KEEPER_PUBLIC_KEY" ‖ index_u32_BE).
 /// We pack two consecutive BytesN<32> to form the full 32-byte ed25519 pubkey.
 /// For simplicity we store the key at (prefix ‖ index) and read 32 bytes.
 fn get_keeper_pubkey(env: &Env, data_store: &Address, index: u32) -> BytesN<32> {
-    let mut buf = Bytes::new(env);
-    let prefix = keeper_public_key_prefix(env);
-    buf.extend_from_array(&prefix.to_array());
-    buf.extend_from_array(&index.to_be_bytes());
-    let key = env.crypto().sha256(&buf).into();
-    let client = DataStoreClient::new(env, data_store);
-    client.get_bytes32(&key)
+    let key = keeper_pubkey_storage_key(env, index);
+    DataStoreClient::new(env, data_store).get_bytes32(&key)
 }
 
 /// Build the canonical message that keepers sign.
@@ -430,35 +485,35 @@ fn build_price_message(
 fn check_circuit_breaker(env: &Env, data_store: &Address, token: &Address, new_min: i128, new_max: i128) {
     let price_key = TempKey::Price(token.clone());
     let prev_price_opt = env.storage().temporary().get::<TempKey, PriceProps>(&price_key);
-    
+
     if let Some(prev_price) = prev_price_opt {
         let last_price = prev_price.mid_price();
         let new_price = (new_min + new_max) / 2;
         if last_price > 0 {
             let deviation_val = (new_price - last_price).abs();
             let deviation_bps = ((deviation_val as u128) * 10000) / (last_price as u128);
-            
+
             let ds = DataStoreClient::new(env, data_store);
             let market_list_k = gmx_keys::market_list_key(env);
             let market_count = ds.get_address_set_count(&market_list_k);
             let markets = ds.get_address_set_at(&market_list_k, &0, &market_count);
-            
+
             for i in 0..markets.len() {
                 let market = markets.get(i).unwrap();
                 let index_token = ds.get_address(&gmx_keys::market_index_token_key(env, &market));
                 let long_token = ds.get_address(&gmx_keys::market_long_token_key(env, &market));
                 let short_token = ds.get_address(&gmx_keys::market_short_token_key(env, &market));
-                
+
                 let matches_market = (index_token.is_some() && index_token.unwrap() == *token)
                     || (long_token.is_some() && long_token.unwrap() == *token)
                     || (short_token.is_some() && short_token.unwrap() == *token);
-                    
+
                 if matches_market {
                     let threshold = ds.get_u128(&gmx_keys::circuit_breaker_factor_key(env, &market));
                     if threshold > 0 && deviation_bps > threshold {
                         // Set market pause flag to true
                         ds.set_bool(&env.current_contract_address(), &gmx_keys::is_market_paused_key(env, &market), &true);
-                        
+
                         // Emit event
                         env.events().publish(
                             (soroban_sdk::symbol_short!("cb_trip"),),
@@ -664,5 +719,80 @@ mod tests {
         assert_eq!(client.get_primary_price(&eth).min, 2_000 * 10i128.pow(30));
         assert_eq!(client.get_primary_price(&btc).min, 60_000 * 10i128.pow(30));
         assert_eq!(client.get_primary_price(&usdc).min, 10i128.pow(30));
+    }
+
+    // ── Issue #292: signer rotation ───────────────────────────────────────────
+
+    fn register_keeper_pubkey(env: &Env, ds: &Address, admin: &Address, index: u32, pubkey: &BytesN<32>) {
+        let mut buf = Bytes::new(env);
+        let prefix = keeper_public_key_prefix(env);
+        buf.extend_from_array(&prefix.to_array());
+        buf.extend_from_array(&index.to_be_bytes());
+        let key: BytesN<32> = env.crypto().sha256(&buf).into();
+        DsClient::new(env, ds).set_bytes32(admin, &key, pubkey);
+    }
+
+    /// rotate_signer replaces the stored pubkey so get_keeper_pubkey returns the new key.
+    #[test]
+    fn rotate_signer_updates_stored_pubkey() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _rs, ds, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let pubkey_a = BytesN::from_array(&env, &[0xAA; 32]);
+        let pubkey_b = BytesN::from_array(&env, &[0xBB; 32]);
+
+        // Register keeper A at index 0
+        register_keeper_pubkey(&env, &ds, &admin, 0, &pubkey_a);
+        assert_eq!(get_keeper_pubkey(&env, &ds, 0), pubkey_a);
+
+        // Rotate to keeper B
+        client.rotate_signer(&admin, &0u32, &pubkey_b);
+
+        // data_store must now return B
+        assert_eq!(get_keeper_pubkey(&env, &ds, 0), pubkey_b);
+    }
+
+    /// rotate_signer emits OracleSignerRotated with correct old and new signer fields.
+    #[test]
+    fn rotate_signer_emits_event_with_old_and_new_signer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _rs, ds, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let pubkey_a = BytesN::from_array(&env, &[0x11; 32]);
+        let pubkey_b = BytesN::from_array(&env, &[0x22; 32]);
+        register_keeper_pubkey(&env, &ds, &admin, 1, &pubkey_a);
+
+        client.rotate_signer(&admin, &1u32, &pubkey_b);
+
+        let events = env.events().all();
+        let rotation_event = events
+            .iter()
+            .find(|(_, topics, _)| topics.contains(&soroban_sdk::Val::from(symbol_short!("sig_rot"))))
+            .expect("sig_rot event must be emitted");
+        let payload: OracleSignerRotated = soroban_sdk::FromVal::from_val(&env, &rotation_event.2);
+        assert_eq!(payload.keeper_index, 1);
+        assert_eq!(payload.old_signer, pubkey_a);
+        assert_eq!(payload.new_signer, pubkey_b);
+    }
+
+    /// rotate_signer called by a non-admin must panic with Unauthorized.
+    #[test]
+    #[should_panic]
+    fn rotate_signer_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _rs, ds, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let pubkey_a = BytesN::from_array(&env, &[0xAA; 32]);
+        register_keeper_pubkey(&env, &ds, &admin, 0, &pubkey_a);
+
+        // Use a different address as caller — must be rejected
+        let non_admin = Address::generate(&env);
+        client.rotate_signer(&non_admin, &0u32, &BytesN::from_array(&env, &[0xBB; 32]));
     }
 }
