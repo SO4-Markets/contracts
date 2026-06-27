@@ -66,3 +66,13 @@ path = "adl.rs"
 [[test]]
 name = "liquidation"
 path = "liquidation.rs"
+name = "zero_amount_validation"
+path = "zero_amount_validation.rs"
+
+[[test]]
+name = "contract_upgrade"
+path = "contract_upgrade.rs"
+
+[[test]]
+name = "multi_market_execution"
+path = "multi_market_execution.rs"

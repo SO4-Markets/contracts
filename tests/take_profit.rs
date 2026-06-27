@@ -260,6 +260,7 @@ fn take_profit_triggers_below_trigger_price() {
         min_output_amount: 0,
         order_type: OrderType::LimitDecrease,
         is_long: false,
+        expiry_ledger: None,
     });
 
     // Oracle submits price below trigger (1,750 USD - even better)
@@ -315,6 +316,7 @@ fn take_profit_slippage_protection_rejects_worse_price() {
         min_output_amount: 0,
         order_type: OrderType::LimitDecrease,
         is_long: false,
+        expiry_ledger: None,
     });
 
     // Oracle submits price above acceptable (1,830 USD - worse than 1,820 for short)

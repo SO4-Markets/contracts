@@ -40,6 +40,8 @@ enum DataKey {
     B32(BytesN<32>),
     AddrSet(BytesN<32>),
     B32Set(BytesN<32>),
+    // Instance-tier cache variants for market config (#299)
+    InstanceU128(BytesN<32>),
     InstanceU128(BytesN<32>),
     InstanceI128(BytesN<32>),
 }
@@ -145,6 +147,43 @@ impl DataStore {
         require_controller(&env, &caller);
         env.storage().persistent().set(&DataKey::U128(key), &value);
         value
+    }
+
+    /// Write-through cache variant for rarely-changing market config (#299).
+    ///
+    /// Writes to both persistent storage (durable) and the instance-level cache
+    /// (cheap reads). Use for fee factors, OI caps, leverage limits, and other
+    /// admin-set parameters that change infrequently but are read on every order
+    /// execution.  Subsequent `get_u128_cached` calls are served from the
+    /// cheaper instance entry without a persistent read.
+    pub fn set_u128_config(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128 {
+        caller.require_auth();
+        require_controller(&env, &caller);
+        env.storage().persistent().set(&DataKey::U128(key.clone()), &value);
+        env.storage().instance().set(&DataKey::InstanceU128(key), &value);
+        value
+    }
+
+    /// Cache-first read for market config u128 values (#299).
+    ///
+    /// Checks the instance cache first.  On a miss, reads from persistent storage
+    /// and populates the cache so subsequent reads are served without a persistent
+    /// round-trip.  Use for the same keys managed by `set_u128_config`.
+    pub fn get_u128_cached(env: Env, key: BytesN<32>) -> u128 {
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, u128>(&DataKey::InstanceU128(key.clone()))
+        {
+            return v;
+        }
+        let v: u128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::U128(key.clone()))
+            .unwrap_or(0);
+        env.storage().instance().set(&DataKey::InstanceU128(key), &v);
+        v
     }
 
     pub fn remove_u128(env: Env, caller: Address, key: BytesN<32>) {

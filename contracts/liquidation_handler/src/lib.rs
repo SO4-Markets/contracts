@@ -53,6 +53,8 @@ trait IRoleStore {
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
+    /// Cache-first read for rarely-changing market config (issue #299).
+    fn get_u128_cached(env: Env, key: BytesN<32>) -> u128;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
 }
 
@@ -513,6 +515,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
+                expiry_ledger: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -545,6 +548,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketIncrease,
                 is_long: false,
+                expiry_ledger: None,
             },
         );
         hc.execute_order(&w.keeper, &key);

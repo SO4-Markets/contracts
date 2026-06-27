@@ -8,6 +8,11 @@ use soroban_sdk::{
     Bytes, BytesN, Env,
 };
 
+// ─── TTL constants (#297) ─────────────────────────────────────────────────────
+// Referral codes and trader links are long-lived; bump only when TTL < 15 days.
+// At 5 s/ledger: PERSISTENT_BUMP_TARGET ≈ 30 days, MIN_BUMP_THRESHOLD ≈ 15 days.
+const PERSISTENT_BUMP_TARGET: u32 = 518_400;
+const MIN_BUMP_THRESHOLD: u32 = 259_200;
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum number of bytes in a referral code.
@@ -160,6 +165,7 @@ impl ReferralStorage {
             panic_with_error!(&env, Error::CodeAlreadyTaken);
         }
         env.storage().persistent().set(&key, &caller);
+        env.storage().persistent().extend_ttl(&key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         env.events().publish_event(&CodeRegistered { caller, code });
     }
 
@@ -174,6 +180,12 @@ impl ReferralStorage {
         {
             panic_with_error!(&env, Error::CodeNotFound);
         }
+        let trader_key = ReferralKey::TraderCode(trader.clone());
+        env.storage().persistent().set(&trader_key, &code);
+        env.storage().persistent().extend_ttl(&trader_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        // Also keep the code-owner entry alive while a trader references it.
+        let owner_key = ReferralKey::CodeOwner(code.clone());
+        env.storage().persistent().extend_ttl(&owner_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         env.storage()
             .persistent()
             .set(&ReferralKey::TraderCode(trader.clone()), &code);
@@ -182,6 +194,13 @@ impl ReferralStorage {
 
     /// Look up the referral code for a trader, and return the referrer's address.
     pub fn get_trader_referrer(env: Env, trader: Address) -> Option<Address> {
+        let trader_key = ReferralKey::TraderCode(trader);
+        let code: BytesN<32> = env.storage().persistent().get(&trader_key)?;
+        env.storage().persistent().extend_ttl(&trader_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        let owner_key = ReferralKey::CodeOwner(code);
+        let referrer: Address = env.storage().persistent().get(&owner_key)?;
+        env.storage().persistent().extend_ttl(&owner_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        Some(referrer)
         let code: Bytes = env
             .storage()
             .persistent()
@@ -212,6 +231,9 @@ impl ReferralStorage {
         if tier > 2 {
             panic_with_error!(&env, Error::InvalidTier);
         }
+        let tier_key = ReferralKey::ReferrerTier(referrer);
+        env.storage().persistent().set(&tier_key, &tier);
+        env.storage().persistent().extend_ttl(&tier_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         env.storage()
             .persistent()
             .set(&ReferralKey::ReferrerTier(referrer), &tier);
@@ -231,6 +253,9 @@ impl ReferralStorage {
         if tier > 2 {
             panic_with_error!(&env, Error::InvalidTier);
         }
+        let tier_key = ReferralKey::TierConfig(tier);
+        env.storage().persistent().set(&tier_key, &config);
+        env.storage().persistent().extend_ttl(&tier_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         // Validate config parameters
         let discount_bps = ((config.total_rebate_bps as u64) * (config.discount_share_bps as u64) / 10000) as u32;
         let rebate_bps = if config.total_rebate_bps >= discount_bps {
@@ -275,6 +300,28 @@ impl ReferralStorage {
 
     /// Return the fee discount bps for a trader given their referral code, or 0 if none.
     pub fn get_trader_discount_bps(env: Env, trader: Address) -> u32 {
+        let trader_key = ReferralKey::TraderCode(trader);
+        let code: BytesN<32> = match env.storage().persistent().get(&trader_key) {
+            Some(c) => c,
+            None => return 0,
+        };
+        env.storage().persistent().extend_ttl(&trader_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+
+        let owner_key = ReferralKey::CodeOwner(code);
+        let referrer: Address = match env.storage().persistent().get(&owner_key) {
+            Some(r) => r,
+            None => return 0,
+        };
+        env.storage().persistent().extend_ttl(&owner_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+
+        let tier_key = ReferralKey::ReferrerTier(referrer);
+        let tier: u32 = env.storage().persistent().get(&tier_key).unwrap_or(0);
+        if tier > 0 {
+            env.storage().persistent().extend_ttl(&tier_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        }
+
+        let config_key = ReferralKey::TierConfig(tier);
+        let config: TierConfig = match env.storage().persistent().get(&config_key) {
         let code: Bytes = match env
             .storage()
             .persistent()
@@ -304,6 +351,8 @@ impl ReferralStorage {
             Some(c) => c,
             None => return 0,
         };
+        env.storage().persistent().extend_ttl(&config_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+
         // discount = total_rebate * discount_share / 10_000
         config.total_rebate_bps * config.discount_share_bps / 10_000
     }
