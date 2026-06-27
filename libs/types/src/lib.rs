@@ -322,6 +322,10 @@ pub struct PositionInfo {
     pub funding_fee_usd: i128,
     pub position_fee_usd: i128,
     pub liquidation_price: i128,
+    /// Issue #260: weighted average entry price across all position increases.
+    /// Computed as size_in_usd / size_in_tokens × TOKEN_PRECISION (FLOAT_PRECISION units).
+    /// Zero when size_in_tokens is zero (no open position).
+    pub avg_entry_price: i128,
 }
 
 /// ADL-eligible position candidate for auto-deleveraging.

@@ -193,6 +193,24 @@ impl DataStore {
     }
 
     /// Add `delta` (signed) to existing u128 value. Panics on underflow.
+    ///
+    /// # Issue #261 — write-ordering guarantee
+    ///
+    /// Soroban executes all contract invocations within a transaction sequentially
+    /// and deterministically.  Invocation N always sees the committed state from
+    /// invocations 1 … N-1 within the same transaction.  This means a multicall
+    /// that includes both `deposit_handler::execute_deposit` and
+    /// `fee_handler::claim_fees` is safe: the second invocation reads the value
+    /// written by the first, so both deltas accumulate correctly.
+    ///
+    /// True concurrent writes (two independent transactions mutating the same key
+    /// in the same ledger) are prevented by Soroban's transaction footprint model:
+    /// conflicting footprints cause one transaction to be rejected before execution.
+    ///
+    /// Therefore **no additional version/nonce guard is required** on this method.
+    /// Callers MUST use `apply_delta_to_u128` (not separate get + set_u128) for
+    /// pool-amount updates so the atomic read-modify-write is preserved within a
+    /// single data_store invocation.
     pub fn apply_delta_to_u128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> u128 {
         caller.require_auth();
         require_controller(&env, &caller);

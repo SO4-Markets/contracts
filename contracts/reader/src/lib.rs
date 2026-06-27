@@ -478,6 +478,13 @@ impl Reader {
             0
         };
 
+        // Issue #260: compute weighted average entry price from accumulated size_in_usd / size_in_tokens.
+        let avg_entry_price = if position.size_in_tokens > 0 {
+            mul_div_wide(&env, position.size_in_usd, TOKEN_PRECISION, position.size_in_tokens)
+        } else {
+            0
+        };
+
         Some(PositionInfo {
             position,
             pnl_usd,
@@ -486,6 +493,7 @@ impl Reader {
             funding_fee_usd,
             position_fee_usd,
             liquidation_price,
+            avg_entry_price,
         })
     }
 
@@ -727,6 +735,13 @@ impl Reader {
             0
         };
 
+        // Issue #260: weighted average entry price.
+        let avg_entry_price = if position.size_in_tokens > 0 {
+            mul_div_wide(&env, position.size_in_usd, TOKEN_PRECISION, position.size_in_tokens)
+        } else {
+            0
+        };
+
         Some(PositionInfo {
             position,
             pnl_usd,
@@ -735,6 +750,7 @@ impl Reader {
             funding_fee_usd,
             position_fee_usd,
             liquidation_price,
+            avg_entry_price,
         })
     }
 
