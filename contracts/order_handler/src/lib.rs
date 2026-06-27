@@ -100,7 +100,12 @@ pub enum Error {
     /// swap_path exceeds the maximum allowed number of hops (issue #300).
     SwapPathTooLong = 17,
     /// execution_fee is below the configured global minimum (issue #294).
-    InsufficientExecutionFee = 17,
+    InsufficientExecutionFee = 18,
+    /// create_order called with size_delta_usd = 0 on a position order (issue #269).
+    ZeroSizeDelta = 19,
+    /// execute_order called after the order's user-set expiry_ledger (issue #272).
+    /// The order is auto-cancelled and any collateral refunded to the user.
+    OrderExpired = 20,
 }
 
 
@@ -236,6 +241,8 @@ pub enum PositionStorageKey {
 pub enum OrderStorageKey {
     Order(BytesN<32>),
     OrderFrozen(BytesN<32>),
+    /// Per-order ledger-sequence expiry set by the user at creation time (issue #272).
+    OrderExpiry(BytesN<32>),
 }
 // OrderProps are stored in this contract's own persistent storage (not DataStore)
 // because DataStore supports only primitive/set types, not arbitrary structs.
@@ -653,6 +660,11 @@ impl OrderHandler {
             OrderType::MarketDecrease | OrderType::LimitDecrease | OrderType::StopLossDecrease
         );
 
+        // Issue #269: position orders must carry a non-zero size.
+        if is_position_order && params.size_delta_usd == 0 {
+            panic_with_error!(&env, Error::ZeroSizeDelta);
+        }
+
         // Position manager authorization: 
         // For position orders, verify caller is either the owner OR an authorized manager for this market.
         // If caller is a manager, receiver must be the owner (cannot redirect funds).
@@ -722,6 +734,18 @@ impl OrderHandler {
         ds.add_bytes32_to_set(&handler, &order_list_key(&env), &key);
         ds.add_bytes32_to_set(&handler, &account_order_list_key(&env, &actual_owner), &key);
 
+        // Issue #272: persist per-order expiry if the user supplied one.
+        if let Some(exp) = params.expiry_ledger {
+            env.storage()
+                .persistent()
+                .set(&OrderStorageKey::OrderExpiry(key.clone()), &exp);
+            env.storage().persistent().extend_ttl(
+                &OrderStorageKey::OrderExpiry(key.clone()),
+                MIN_BUMP_THRESHOLD,
+                PERSISTENT_BUMP_TARGET,
+            );
+        }
+
         env.events().publish((symbol_short!("ord_crt"),), (key.clone(), actual_owner, params.market));
         key
     }
@@ -754,6 +778,62 @@ impl OrderHandler {
             .persistent()
             .get(&OrderStorageKey::Order(key.clone()))
             .unwrap_or_else(|| panic_with_error!(&env, Error::OrderNotFound));
+
+        // Issue #272: auto-cancel if the order's user-set expiry has passed.
+        if let Some(expiry) = env
+            .storage()
+            .persistent()
+            .get::<OrderStorageKey, u64>(&OrderStorageKey::OrderExpiry(key.clone()))
+        {
+            if env.ledger().sequence() > expiry {
+                // Refund collateral for increase/swap orders that deposited into the vault.
+                let order_vault_addr: Address = env
+                    .storage()
+                    .instance()
+                    .get(&InstanceKey::OrderVault)
+                    .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+                let is_increase_or_swap = matches!(
+                    order.order_type,
+                    OrderType::MarketIncrease
+                        | OrderType::LimitIncrease
+                        | OrderType::StopIncrease
+                        | OrderType::MarketSwap
+                        | OrderType::LimitSwap
+                );
+                if is_increase_or_swap && order.collateral_delta_amount > 0 {
+                    OrderVaultClient::new(&env, &order_vault_addr).transfer_out(
+                        &env.current_contract_address(),
+                        &order.initial_collateral_token,
+                        &order.receiver,
+                        &order.collateral_delta_amount,
+                    );
+                }
+                // Clean up storage
+                env.storage()
+                    .persistent()
+                    .remove(&OrderStorageKey::Order(key.clone()));
+                env.storage()
+                    .persistent()
+                    .remove(&OrderStorageKey::OrderExpiry(key.clone()));
+                let handler2 = env.current_contract_address();
+                let ds2 = DataStoreClient::new(&env, &data_store);
+                ds2.remove_bytes32_from_set(
+                    &handler2,
+                    &order_list_key(&env),
+                    &key,
+                );
+                ds2.remove_bytes32_from_set(
+                    &handler2,
+                    &account_order_list_key(&env, &order.account),
+                    &key,
+                );
+                env.events().publish(
+                    (symbol_short!("ord_exp"),),
+                    (key.clone(), order.account.clone()),
+                );
+                panic_with_error!(&env, Error::OrderExpired);
+            }
+        }
 
         // Check frozen
         let is_frozen: bool = env
@@ -1111,6 +1191,79 @@ impl OrderHandler {
 
         env.events()
             .publish((symbol_short!("ord_can"),), (key, order.account));
+    }
+
+    /// Issue #272: cancel an order whose `expiry_ledger` has passed. Callable by
+    /// anyone; caller receives a small incentive fee from the order's execution_fee.
+    pub fn cleanup_expired_order(env: Env, caller: Address, key: BytesN<32>) {
+        caller.require_auth();
+
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let order_vault: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::OrderVault)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let handler = env.current_contract_address();
+
+        let order: OrderProps = env
+            .storage()
+            .persistent()
+            .get(&OrderStorageKey::Order(key.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, Error::OrderNotFound));
+
+        let expiry: u64 = env
+            .storage()
+            .persistent()
+            .get(&OrderStorageKey::OrderExpiry(key.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, Error::OrderNotFound));
+
+        if env.ledger().sequence() <= expiry {
+            panic_with_error!(&env, Error::UnsatisfiedTrigger);
+        }
+
+        // Refund collateral to the order account (minus the incentive).
+        // Incentive = 10 % of execution_fee (or execution_fee if execution_fee < 10 %).
+        let incentive = order.execution_fee / 10;
+        let refund_amount = order.collateral_delta_amount;
+
+        let is_increase_or_swap = matches!(
+            order.order_type,
+            OrderType::MarketIncrease
+                | OrderType::LimitIncrease
+                | OrderType::StopIncrease
+                | OrderType::MarketSwap
+                | OrderType::LimitSwap
+        );
+        if is_increase_or_swap && refund_amount > 0 {
+            OrderVaultClient::new(&env, &order_vault).transfer_out(
+                &handler,
+                &order.initial_collateral_token,
+                &order.account,
+                &refund_amount,
+            );
+        }
+
+        // Transfer incentive from the vault to the caller (if any execution_fee was set).
+        if incentive > 0 {
+            OrderVaultClient::new(&env, &order_vault).transfer_out(
+                &handler,
+                &order.initial_collateral_token,
+                &caller,
+                &incentive,
+            );
+        }
+
+        remove_order(&env, &data_store, &handler, &key, &order.account);
+
+        env.events().publish(
+            (symbol_short!("ord_exp"),),
+            (key, order.account, caller, incentive),
+        );
     }
 
     /// Update a pending order's trigger/acceptable price or size delta.
@@ -1486,6 +1639,10 @@ fn remove_order(
     env.storage()
         .persistent()
         .remove(&OrderStorageKey::OrderFrozen(key.clone()));
+    // Issue #272: clean up any per-order expiry that was set.
+    env.storage()
+        .persistent()
+        .remove(&OrderStorageKey::OrderExpiry(key.clone()));
     let ds = DataStoreClient::new(env, data_store);
     ds.remove_bytes32_from_set(caller, &order_list_key(env), key);
     ds.remove_bytes32_from_set(caller, &account_order_list_key(env, account), key);
@@ -1726,6 +1883,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type,
                 is_long: true,
+                expiry_ledger: None,
             },
         );
         (hc, key)
@@ -1758,6 +1916,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::StopIncrease,
                 is_long: true,
+                expiry_ledger: None,
             },
         )
     }
@@ -1866,6 +2025,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
+                expiry_ledger: None,
             },
         );
     }
@@ -1927,6 +2087,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
+                expiry_ledger: None,
             },
         );
     }
@@ -2013,6 +2174,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
+                expiry_ledger: None,
             },
         );
         assert!(hc.get_order(&key).is_some());
@@ -2063,6 +2225,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
+                expiry_ledger: None,
             },
         );
         assert!(hc.get_order(&key).is_some());
@@ -2264,6 +2427,7 @@ mod tests {
                 min_output_amount: min_output,
                 order_type: OrderType::LimitSwap,
                 is_long: false,
+                expiry_ledger: None,
             },
         )
     }
@@ -2464,6 +2628,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketSwap,
                 is_long: false,
+                expiry_ledger: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -2506,6 +2671,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketSwap,
                 is_long: false,
+                expiry_ledger: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -2661,6 +2827,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketSwap,
                 is_long: false,
+                expiry_ledger: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -2835,6 +3002,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketSwap,
                 is_long: false,
+                expiry_ledger: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -3076,6 +3244,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketDecrease,
                 is_long: true,
+                expiry_ledger: None,
             });
         }
         hc.create_orders(&w.user, &requests);
@@ -3111,6 +3280,7 @@ mod tests {
                     min_output_amount: 0,
                     order_type: OrderType::MarketIncrease,
                     is_long: true,
+                    expiry_ledger: None,
                 },
                 // Stop-loss: StopLossDecrease
                 CreateOrderParams {
@@ -3126,6 +3296,7 @@ mod tests {
                     min_output_amount: 0,
                     order_type: OrderType::StopLossDecrease,
                     is_long: true,
+                    expiry_ledger: None,
                 },
                 // Take-profit: LimitDecrease
                 CreateOrderParams {
@@ -3141,6 +3312,7 @@ mod tests {
                     min_output_amount: 0,
                     order_type: OrderType::LimitDecrease,
                     is_long: true,
+                    expiry_ledger: None,
                 },
             ],
         );
@@ -3193,6 +3365,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketDecrease,
                 is_long: true,
+                expiry_ledger: None,
             },
         );
     }
@@ -3230,6 +3403,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketDecrease,
                 is_long: true,
+                expiry_ledger: None,
             },
         );
     }
@@ -3273,6 +3447,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketSwap,
                 is_long: false,
+                expiry_ledger: None,
             },
         );
         assert!(
@@ -3313,6 +3488,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
+                expiry_ledger: None,
             },
         );
         set_prices(&w, 2000 * gmx_math::FLOAT_PRECISION);
@@ -3361,6 +3537,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
+                expiry_ledger: None,
             },
         );
     }
@@ -3405,6 +3582,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
+                expiry_ledger: None,
             },
         );
         assert!(

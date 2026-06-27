@@ -217,6 +217,7 @@ fn validate_position_rejects_below_min_collateral() {
         increased_at_time: 0,
         decreased_at_time: 0,
         is_long: true,
+        expiry_ledger: None,
     };
 
     let collateral_price = PriceProps { min: fp, max: fp }; // $1 USDC
@@ -257,6 +258,7 @@ fn open_at_min_collateral_succeeds() {
             min_output_amount: 0,
             order_type: OrderType::MarketIncrease,
             is_long: true,
+            expiry_ledger: None,
         },
     );
 
@@ -301,6 +303,7 @@ fn open_above_min_collateral_succeeds() {
             min_output_amount: 0,
             order_type: OrderType::MarketIncrease,
             is_long: true,
+            expiry_ledger: None,
         },
     );
 
@@ -345,6 +348,7 @@ fn zero_min_collateral_factor_disables_enforcement() {
             min_output_amount: 0,
             order_type: OrderType::MarketIncrease,
             is_long: true,
+            expiry_ledger: None,
         },
     );
 
@@ -410,6 +414,7 @@ fn insufficient_collateral_position_is_liquidatable() {
         increased_at_time: 0,
         decreased_at_time: 0,
         is_long: true,
+        expiry_ledger: None,
     };
 
     let index_price = PriceProps { min: 100 * fp, max: 100 * fp }; // $100

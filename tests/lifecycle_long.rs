@@ -240,6 +240,7 @@ fn full_lifecycle_deposit_long_close_withdraw() {
         min_output_amount: 0,
         order_type: OrderType::MarketIncrease,
         is_long: true,
+        expiry_ledger: None,
     });
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &open_key);
 
@@ -268,6 +269,7 @@ fn full_lifecycle_deposit_long_close_withdraw() {
         min_output_amount: 0,
         order_type: OrderType::MarketDecrease,
         is_long: true,
+        expiry_ledger: None,
     });
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &close_key);
 

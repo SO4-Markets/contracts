@@ -47,3 +47,15 @@ path = "take_profit.rs"
 [[test]]
 name = "lifecycle_long"
 path = "lifecycle_long.rs"
+
+[[test]]
+name = "zero_amount_validation"
+path = "zero_amount_validation.rs"
+
+[[test]]
+name = "contract_upgrade"
+path = "contract_upgrade.rs"
+
+[[test]]
+name = "multi_market_execution"
+path = "multi_market_execution.rs"

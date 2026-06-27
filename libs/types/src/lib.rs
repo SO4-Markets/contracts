@@ -179,6 +179,10 @@ pub struct CreateOrderParams {
     pub min_output_amount: i128,
     pub order_type: OrderType,
     pub is_long: bool,
+    /// Optional ledger-sequence deadline. If `Some(n)` the order auto-cancels
+    /// (with full refund) when the keeper calls `execute_order` after sequence `n`.
+    /// `None` means the order never expires via this mechanism.
+    pub expiry_ledger: Option<u64>,
 }
 
 // ─── Deposits / Withdrawals ───────────────────────────────────────────────────
