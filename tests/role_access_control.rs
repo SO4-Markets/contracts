@@ -198,6 +198,7 @@ fn unauthorized_execute_order_reverts() {
         min_output_amount: 0,
         order_type: OrderType::MarketIncrease,
         is_long: true,
+        expiry_ledger: None,
     });
 
     // Unauthorized user tries to execute - should fail
@@ -341,6 +342,7 @@ fn authorized_execute_order_succeeds_after_grant() {
         min_output_amount: 0,
         order_type: OrderType::MarketIncrease,
         is_long: true,
+        expiry_ledger: None,
     });
 
     // Keeper with proper role executes - should succeed
@@ -399,6 +401,7 @@ fn role_revocation_prevents_access() {
         min_output_amount: 0,
         order_type: OrderType::MarketIncrease,
         is_long: true,
+        expiry_ledger: None,
     });
 
     // Revoke ORDER_KEEPER role

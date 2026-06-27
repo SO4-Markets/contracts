@@ -183,6 +183,7 @@ fn oi_cap_exact_boundary_succeeds_one_over_fails() {
         min_output_amount: 0,
         order_type: OrderType::MarketIncrease,
         is_long: true,
+        expiry_ledger: None,
     });
 
     let result = oh_c.try_execute_order(&w.keeper, &order_key);
@@ -252,6 +253,7 @@ fn oi_cap_exactly_at_cap_succeeds() {
         min_output_amount: 0,
         order_type: OrderType::MarketIncrease,
         is_long: true,
+        expiry_ledger: None,
     });
 
     let result = oh_c.try_execute_order(&w.keeper, &order_key);
@@ -393,6 +395,7 @@ fn oi_cap_zero_means_uncapped() {
         min_output_amount: 0,
         order_type: OrderType::MarketIncrease,
         is_long: true,
+        expiry_ledger: None,
     });
 
     let result = oh_c.try_execute_order(&w.keeper, &order_key);
@@ -460,6 +463,7 @@ fn oi_cap_decrease_always_allowed() {
         min_output_amount: 0,
         order_type: OrderType::MarketDecrease,
         is_long: true,
+        expiry_ledger: None,
     });
 
     let result = oh_c.try_execute_order(&w.keeper, &order_key);

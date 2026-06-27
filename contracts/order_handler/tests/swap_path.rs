@@ -228,6 +228,7 @@ fn two_hop_swap_weth_to_wbtc() {
             min_output_amount: 0,
             order_type: OrderType::MarketSwap,
             is_long: false,
+            expiry_ledger: None,
         },
     );
 
@@ -286,6 +287,7 @@ fn two_hop_swap_min_output_not_met_reverts() {
             min_output_amount: 1_000 * TOKEN_PRECISION, // unreachably high
             order_type: OrderType::MarketSwap,
             is_long: false,
+            expiry_ledger: None,
         },
     );
 
@@ -320,6 +322,7 @@ fn swap_duplicate_market_in_path_reverts() {
             min_output_amount: 0,
             order_type: OrderType::MarketSwap,
             is_long: false,
+            expiry_ledger: None,
         },
     );
 
@@ -353,6 +356,7 @@ fn single_hop_swap_weth_to_usdc() {
             min_output_amount: 0,
             order_type: OrderType::MarketSwap,
             is_long: false,
+            expiry_ledger: None,
         },
     );
 
