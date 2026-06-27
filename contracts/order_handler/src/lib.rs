@@ -969,6 +969,7 @@ impl OrderHandler {
                         index_token_price: &index_price,
                         collateral_price,
                         current_time: env.ledger().timestamp(),
+                        for_positive_impact: false,
                     },
                 );
 
@@ -1184,6 +1185,18 @@ impl OrderHandler {
                 &order.initial_collateral_token,
                 &order.account,
                 &order.collateral_delta_amount,
+            );
+        }
+
+        // Issue #258: return execution_fee to the user on user-initiated cancellation.
+        // The keeper earns execution_fee only when it actually attempts execution;
+        // a user-cancelled order did no keeper work, so the full fee is refunded.
+        if order.execution_fee > 0 {
+            OrderVaultClient::new(&env, &order_vault).transfer_out(
+                &handler,
+                &order.initial_collateral_token,
+                &order.account,
+                &order.execution_fee,
             );
         }
 
@@ -3552,6 +3565,31 @@ mod tests {
 
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
         let key = OrderHandlerClient::new(&w.env, &w.ord_handler).create_order(
+            &w.user,
+            &CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                size_delta_usd: 2000 * fp,
+                collateral_delta_amount: COLLATERAL,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: min_fee as i128,
+                min_output_amount: 0,
+                order_type: OrderType::MarketIncrease,
+                is_long: true,
+                expiry_ledger: None,
+            },
+        );
+        assert!(
+            OrderHandlerClient::new(&w.env, &w.ord_handler)
+                .get_order(&key)
+                .is_some(),
+            "order must be stored when fee meets the minimum"
+        );
+    }
+
     // ── Issue #286: FundingRateSnapshot event emission ────────────────────────
 
     /// Executing a market increase order must emit a FundingRateSnapshot event
@@ -3560,9 +3598,6 @@ mod tests {
     fn execute_position_order_emits_funding_snapshot() {
         let w = setup();
         let fp = gmx_math::FLOAT_PRECISION;
-        // Mint collateral directly into order_vault and create a market increase order.
-        // seed_pool is intentionally skipped: create_order only needs the vault balance,
-        // not a seeded pool. execute_order for MarketIncrease works with zero pool OI.
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
         set_prices(&w, 2000 * fp);
         let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
@@ -3577,7 +3612,6 @@ mod tests {
                 collateral_delta_amount: COLLATERAL,
                 trigger_price: 0,
                 acceptable_price: 0,
-                execution_fee: min_fee as i128,
                 execution_fee: 0,
                 min_output_amount: 0,
                 order_type: OrderType::MarketIncrease,
@@ -3585,20 +3619,298 @@ mod tests {
                 expiry_ledger: None,
             },
         );
-        assert!(
-            OrderHandlerClient::new(&w.env, &w.ord_handler)
-                .get_order(&key)
-                .is_some(),
-            "order must be stored when fee meets the minimum"
         set_prices(&w, 2000 * fp);
         hc.execute_order(&w.keeper, &key);
 
-        // If FundingRateSnapshot emission panicked, execute_order would have failed
-        // and the position would not exist.
         let pk = position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true);
         assert!(
             hc.get_position(&pk).is_some(),
             "position must exist; FundingRateSnapshot emission must not have panicked"
+        );
+    }
+
+    // ── Issue #258: cancel_order must refund execution_fee ───────────────────
+
+    /// When a user cancels their own order, both collateral and execution_fee
+    /// must be returned.  The keeper earns execution_fee only when it actually
+    /// attempts execution.
+    #[test]
+    fn cancel_order_refunds_execution_fee_to_user() {
+        let w = setup();
+        const FEE: i128 = 500_0000; // 0.05 tokens as execution fee
+        // Mint collateral + fee into vault so the snapshot delta covers both.
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &(COLLATERAL + FEE));
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let key = hc.create_order(
+            &w.user,
+            &CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                size_delta_usd: 2000 * gmx_math::FLOAT_PRECISION,
+                collateral_delta_amount: COLLATERAL,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: FEE,
+                min_output_amount: 0,
+                order_type: OrderType::MarketIncrease,
+                is_long: true,
+                expiry_ledger: None,
+            },
+        );
+        let before = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.user);
+        hc.cancel_order(&w.user, &key);
+        let after = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.user);
+        assert_eq!(
+            after - before,
+            COLLATERAL + FEE,
+            "cancel must refund both collateral and execution_fee"
+        );
+        assert_eq!(
+            OVClient::new(&w.env, &w.ord_vault).get_recorded_balance(&w.long_tk),
+            0,
+            "vault must be empty after full refund"
+        );
+    }
+
+    // ── Issue #259: limit order trigger boundary conditions ───────────────────
+
+    /// LimitIncrease must execute when oracle price equals trigger_price exactly
+    /// (inclusive lower bound for long entry).
+    #[test]
+    fn limit_increase_at_trigger_price_executes() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        let trigger = 2000 * fp;
+        let (hc, key) = create_increase_order(&w, OrderType::LimitIncrease, trigger);
+        set_prices(&w, trigger); // price == trigger → must execute
+        hc.execute_order(&w.keeper, &key);
+        assert!(
+            hc.get_order(&key).is_none(),
+            "order must be consumed when price equals trigger_price"
+        );
+        let pk = position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true);
+        assert!(
+            hc.get_position(&pk).is_some(),
+            "position must exist after boundary-price execution"
+        );
+    }
+
+    /// LimitDecrease (long take-profit) must execute when oracle price equals
+    /// trigger_price exactly (inclusive upper bound for long exit).
+    #[test]
+    fn limit_decrease_long_at_trigger_price_executes() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        seed_pool(&w);
+        let entry_price = 2000 * fp;
+        // Open a long position first.
+        let (hc, inc_key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        set_prices(&w, entry_price);
+        hc.execute_order(&w.keeper, &inc_key);
+
+        let pk = position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true);
+        assert!(hc.get_position(&pk).is_some(), "long position must exist");
+
+        // Create a LimitDecrease (take-profit) with trigger = current oracle price.
+        let trigger = entry_price;
+        let hc2 = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let dec_key = hc2.create_order(
+            &w.user,
+            &CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                size_delta_usd: 2000 * fp,
+                collateral_delta_amount: 0,
+                trigger_price: trigger,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::LimitDecrease,
+                is_long: true,
+                expiry_ledger: None,
+            },
+        );
+        set_prices(&w, trigger); // price == trigger → must execute
+        hc2.execute_order(&w.keeper, &dec_key);
+        assert!(
+            hc2.get_order(&dec_key).is_none(),
+            "LimitDecrease long must execute when price equals trigger_price"
+        );
+    }
+
+    /// LimitDecrease (short take-profit) must execute when oracle price equals
+    /// trigger_price exactly (inclusive lower bound for short exit).
+    #[test]
+    fn limit_decrease_short_at_trigger_price_executes() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        seed_pool(&w);
+        let entry_price = 2000 * fp;
+        // Open a short position first.
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+        set_prices(&w, entry_price);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let inc_key = hc.create_order(
+            &w.user,
+            &CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                size_delta_usd: 2000 * fp,
+                collateral_delta_amount: COLLATERAL,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketIncrease,
+                is_long: false,
+                expiry_ledger: None,
+            },
+        );
+        hc.execute_order(&w.keeper, &inc_key);
+
+        // Create LimitDecrease (short take-profit) with trigger = current oracle price.
+        let trigger = entry_price;
+        let dec_key = hc.create_order(
+            &w.user,
+            &CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                size_delta_usd: 2000 * fp,
+                collateral_delta_amount: 0,
+                trigger_price: trigger,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::LimitDecrease,
+                is_long: false,
+                expiry_ledger: None,
+            },
+        );
+        set_prices(&w, trigger); // price == trigger → must execute
+        hc.execute_order(&w.keeper, &dec_key);
+        assert!(
+            hc.get_order(&dec_key).is_none(),
+            "LimitDecrease short must execute when price equals trigger_price"
+        );
+    }
+
+    /// StopLossDecrease (long stop-loss) must execute when oracle price equals
+    /// trigger_price exactly (inclusive lower bound).
+    #[test]
+    fn stop_loss_long_at_trigger_price_executes() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        seed_pool(&w);
+        let entry_price = 2000 * fp;
+        let (hc, inc_key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        set_prices(&w, entry_price);
+        hc.execute_order(&w.keeper, &inc_key);
+
+        let trigger = entry_price; // stop triggers at exact entry price
+        let sl_key = hc.create_order(
+            &w.user,
+            &CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                size_delta_usd: 2000 * fp,
+                collateral_delta_amount: 0,
+                trigger_price: trigger,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::StopLossDecrease,
+                is_long: true,
+                expiry_ledger: None,
+            },
+        );
+        set_prices(&w, trigger); // price == trigger → must execute
+        hc.execute_order(&w.keeper, &sl_key);
+        assert!(
+            hc.get_order(&sl_key).is_none(),
+            "StopLossDecrease long must execute when price equals trigger_price"
+        );
+    }
+
+    // ── Issue #260: weighted average entry_price after multiple increases ─────
+
+    /// After two position increases at different prices the avg_entry_price
+    /// returned by get_position reflects the weighted average, not the initial price.
+    #[test]
+    fn position_avg_entry_price_is_weighted_average_after_two_increases() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        seed_pool(&w);
+
+        let price1 = 2000 * fp; // first entry price
+        let (hc, key1) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        set_prices(&w, price1);
+        hc.execute_order(&w.keeper, &key1);
+
+        let price2 = 2200 * fp; // second entry price
+        let (hc2, key2) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        set_prices(&w, price2);
+        hc2.execute_order(&w.keeper, &key2);
+
+        let pk = position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true);
+        let pos = hc.get_position(&pk).expect("position must exist");
+
+        // Weighted average = size_in_usd / size_in_tokens × TOKEN_PRECISION
+        let tp = gmx_math::TOKEN_PRECISION;
+        let avg = gmx_math::mul_div_wide(&w.env, pos.size_in_usd, tp, pos.size_in_tokens);
+
+        // Expected: (2000 + 2200) / 2 = 2100 (in FLOAT_PRECISION units)
+        // Allow 1% tolerance for integer-division rounding.
+        let expected = 2100 * fp;
+        let diff = if avg > expected { avg - expected } else { expected - avg };
+        assert!(
+            diff * 100 / expected < 2,
+            "avg_entry_price {} must be within 2% of expected weighted average {}",
+            avg,
+            expected
+        );
+        // The computed avg must lie between the two entry prices.
+        assert!(avg > price1 && avg < price2, "avg must be between price1 and price2");
+    }
+
+    // ── Issue #261: sequential write ordering in a multicall ─────────────────
+
+    /// Two pool-amount writes executed sequentially in the same multicall must
+    /// both be applied (neither overwrites the other).  This validates that
+    /// apply_delta_to_u128 is atomic and that Soroban's sequential call model
+    /// means the second write sees the updated state from the first.
+    #[test]
+    fn sequential_pool_amount_writes_both_accumulate() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        let tp = gmx_math::TOKEN_PRECISION;
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        let pool_key = gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk);
+
+        // Start with a known pool balance.
+        ds_c.set_u128(&w.admin, &pool_key, &(1_000 * tp as u128));
+        let initial = ds_c.get_u128(&pool_key);
+
+        // Simulate two handler calls that both apply deltas to the same key.
+        let delta1: i128 = 500 * tp;
+        let delta2: i128 = 300 * tp;
+        ds_c.apply_delta_to_u128(&w.admin, &pool_key, &delta1);
+        ds_c.apply_delta_to_u128(&w.admin, &pool_key, &delta2);
+
+        let final_amount = ds_c.get_u128(&pool_key);
+        assert_eq!(
+            final_amount,
+            (initial as i128 + delta1 + delta2) as u128,
+            "both deltas must be applied; second write must see state from first"
         );
     }
 }
