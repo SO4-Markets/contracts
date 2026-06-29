@@ -634,6 +634,10 @@ mod tests {
     }
 
     fn set_prices(w: &World) {
+        set_prices_with_long_price(w, 2000);
+    }
+
+    fn set_prices_with_long_price(w: &World, long_price_usd: i128) {
         let fp = gmx_math::FLOAT_PRECISION;
         OClient::new(&w.env, &w.oracle).set_prices_simple(
             &w.keeper,
@@ -642,8 +646,8 @@ mod tests {
                 [
                     TokenPrice {
                         token: w.long_tk.clone(),
-                        min: 2000 * fp,
-                        max: 2000 * fp,
+                        min: long_price_usd * fp,
+                        max: long_price_usd * fp,
                     },
                     TokenPrice {
                         token: w.short_tk.clone(),
@@ -652,8 +656,8 @@ mod tests {
                     },
                     TokenPrice {
                         token: w.index_tk.clone(),
-                        min: 2000 * fp,
-                        max: 2000 * fp,
+                        min: long_price_usd * fp,
+                        max: long_price_usd * fp,
                     },
                 ],
             ),
@@ -1099,6 +1103,66 @@ mod tests {
         assert_eq!(
             lp1, lp2,
             "equal deposits at equal price should mint equal LP"
+        );
+    }
+
+    /// Regression for issue #253: if oracle prices move after the first deposit
+    /// and before executing the second deposit, minting must use the current pool
+    /// value computed from the freshly submitted price, not a stale prior price.
+    #[test]
+    fn second_deposit_uses_current_price_after_oracle_update() {
+        let w = setup();
+        let env = &w.env;
+        let user1 = Address::generate(env);
+        let user2 = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user1, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user2, &1_000_0000i128);
+
+        set_prices_with_long_price(&w, 2000);
+
+        let hc = DepositHandlerClient::new(env, &w.handler);
+
+        let k1 = hc.create_deposit(
+            &user1,
+            &CreateDepositParams {
+                receiver: user1.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: 1_000_0000,
+                short_token_amount: 0,
+                min_market_tokens: 1,
+                execution_fee: 0,
+            },
+        );
+        hc.execute_deposit(&w.keeper, &k1);
+        let lp1 = MtClient::new(env, &w.market_tk).balance(&user1);
+
+        // 10% price increase before the second deposit executes. The deposited
+        // token value and the pool value both increase by 10%, so LP minted for
+        // an equal-sized deposit should remain equal when the fresh price is used.
+        set_prices_with_long_price(&w, 2200);
+
+        let k2 = hc.create_deposit(
+            &user2,
+            &CreateDepositParams {
+                receiver: user2.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: 1_000_0000,
+                short_token_amount: 0,
+                min_market_tokens: 1,
+                execution_fee: 0,
+            },
+        );
+        hc.execute_deposit(&w.keeper, &k2);
+        let lp2 = MtClient::new(env, &w.market_tk).balance(&user2);
+
+        assert_eq!(
+            lp1, lp2,
+            "second deposit must price LP minting from the current oracle-updated pool value"
         );
     }
 
