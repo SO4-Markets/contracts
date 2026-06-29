@@ -627,6 +627,7 @@ mod tests {
     use super::*;
     use data_store::{DataStore, DataStoreClient as DsClient};
     use gmx_keys::roles;
+    use market_token::MarketToken;
     use role_store::{RoleStore, RoleStoreClient as RsClient};
     use soroban_sdk::{testutils::Address as _, Env};
 
@@ -1091,6 +1092,35 @@ mod tests {
         );
     }
 
+    // ── Issue: get_market_token_price unit tests ──────────────────────────────────
+
+/// Deposit 10,000 USD, supply = 10,000 GM → price = 1.00 USD
+#[test]
+fn market_token_price_one_dollar_at_parity() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, ds, mt, it, lt, st) = make_market(&env);
+    let market = make_market_props(&mt, &it, &lt, &st);
+
+    let fp = FLOAT_PRECISION;
+    let ds_c = DsClient::new(&env, &ds);
+
+    // Pool: 10,000 USDC (short token @ $1)
+    let pool_tokens = 10_000_i128 * 10_000_000; // 10,000 tokens (7 decimals)
+    ds_c.apply_delta_to_u128(
+        &admin,
+        &gmx_keys::pool_amount_key(&env, &mt, &st),
+        &pool_tokens,
+    );
+
+    let price = fp; // $1
+    let info = get_pool_value(&env, &ds, &market, price, price, price, false);
+
+    // supply = 10,000 GM tokens
+    let supply = 10_000_i128 * 10_000_000;
+    let token_price = mul_div_wide(&env, info.pool_value, TOKEN_PRECISION, supply);
+
+    assert_eq!(token_price, fp, "price must be $1.00, got {token_price}");
     // ── Issue #216: FundingRateSignFlipped event ──────────────────────────────
 
     /// Seed all the config keys needed by compute_next_funding_factor.
@@ -1231,3 +1261,61 @@ mod tests {
         let _delta        = mul_div_wide(&env, delta_per_sec, dt, FLOAT_PRECISION);
     }
 }
+
+/// After 200 USD in fees added to pool → price = 1.02 USD
+#[test]
+fn market_token_price_increases_after_fees() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, ds, mt, it, lt, st) = make_market(&env);
+    let market = make_market_props(&mt, &it, &lt, &st);
+
+    let fp = FLOAT_PRECISION;
+    let ds_c = DsClient::new(&env, &ds);
+
+    // Pool: 10,200 USDC (original 10,000 + 200 fees)
+    let pool_tokens = 10_200_i128 * 10_000_000;
+    ds_c.apply_delta_to_u128(
+        &admin,
+        &gmx_keys::pool_amount_key(&env, &mt, &st),
+        &pool_tokens,
+    );
+
+    let price = fp; // $1
+    let info = get_pool_value(&env, &ds, &market, price, price, price, false);
+
+    // supply stays at 10,000 GM
+    let supply = 10_000_i128 * 10_000_000;
+    let token_price = mul_div_wide(&env, info.pool_value, TOKEN_PRECISION, supply);
+
+    assert_eq!(token_price, 1_020_000_000_000_i128 * (fp / 1_000_000_000_000), 
+        "price must be $1.02, got {token_price}");
+    assert!(token_price > fp, "price must be above $1 after fees");
+}
+
+/// Zero supply → returns FLOAT_PRECISION (seed price $1) without panic
+#[test]
+fn market_token_price_zero_supply_returns_seed_price() {
+    let env = Env::default();
+    env.mock_all_auths();
+   let (_admin, ds, _mt, it, lt, st) = make_market(&env);
+
+    // Deploy market token at the expected address so total_supply() resolves
+    let market_token_addr = env.register(market_token::MarketToken, ());
+    let market = MarketProps {
+        market_token: market_token_addr,
+        index_token: it,
+        long_token: lt,
+        short_token: st,
+    };
+
+    let fp = FLOAT_PRECISION;
+    let price = fp;
+
+    // Supply is 0 (freshly deployed, no mints) → should return seed price
+    let token_price = get_market_token_price(&env, &ds, &market, price, price, price, false);
+
+    assert_eq!(token_price, fp, "zero supply must return seed price $1, got {token_price}");
+}
+}
+

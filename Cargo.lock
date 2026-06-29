@@ -1057,6 +1057,7 @@ dependencies = [
  "gmx-keys",
  "gmx-math",
  "gmx-types",
+ "market-token",
  "proptest",
  "role-store",
  "soroban-sdk",
