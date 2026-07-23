@@ -2975,6 +2975,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "ledger_seq"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "max"
                     },
                     "val": {
@@ -3019,6 +3027,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "ledger_seq"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "max"
                     },
                     "val": {
@@ -3061,6 +3077,14 @@
               "durability": "temporary",
               "val": {
                 "map": [
+                  {
+                    "key": {
+                      "symbol": "ledger_seq"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
                   {
                     "key": {
                       "symbol": "max"

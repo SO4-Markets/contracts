@@ -1480,6 +1480,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "ledger_seq"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "max"
                     },
                     "val": {
@@ -1524,6 +1532,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "ledger_seq"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "max"
                     },
                     "val": {
@@ -1566,6 +1582,14 @@
               "durability": "temporary",
               "val": {
                 "map": [
+                  {
+                    "key": {
+                      "symbol": "ledger_seq"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
                   {
                     "key": {
                       "symbol": "max"
@@ -1667,6 +1691,33 @@
                     }
                   ]
                 }
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "TokenBalance"
+                  },
+                  {
+                    "address": "CCFPZOCU33AWX2NKX47XD6W5JNYFP7MU57DTQFB5XOOQSJLSSC4PMX25"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "i128": "10000000"
               }
             }
           },
