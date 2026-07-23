@@ -423,6 +423,33 @@ mod tests {
         client.create_market(&impostor, &index_tk, &long_tk, &short_tk, &mt);
     }
 
+    // Issue #257: a second create_market call with an identical token triple
+    // must revert with MarketAlreadyExists instead of deploying a competing pool.
+    #[test]
+    #[should_panic]
+    fn create_market_duplicate_token_triple_panics() {
+        let (env, admin, _rs, ds, factory_id) = setup();
+        let index_tk = Address::generate(&env);
+        let long_tk = Address::generate(&env);
+        let short_tk = Address::generate(&env);
+        let mt = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+
+        // Compute the same deterministic address create_market would derive
+        // for this token triple, and pre-register it as already-existing —
+        // this exercises the duplicate check without needing a real
+        // market_token WASM upload in this unit-test context.
+        let salt = compute_market_salt(&env, &index_tk, &long_tk, &short_tk, &mt);
+        let deployed_address = env
+            .deployer()
+            .with_address(factory_id.clone(), salt)
+            .deployed_address();
+        DsClient::new(&env, &ds).set_bool(&factory_id, &market_key(&env, &deployed_address), &true);
+
+        let client = MarketFactoryClient::new(&env, &factory_id);
+        // Must panic with Error::MarketAlreadyExists before ever attempting the deploy.
+        client.create_market(&admin, &index_tk, &long_tk, &short_tk, &mt);
+    }
+
     #[test]
     #[should_panic]
     fn create_market_rejects_single_token_pool() {

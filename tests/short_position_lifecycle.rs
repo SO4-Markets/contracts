@@ -320,6 +320,91 @@ fn short_position_lifecycle_winning_short_pays_pnl_from_pool() {
     );
 }
 
+// Issue #274: position owner can delegate the payout of a closed position to
+// a separate recipient address (e.g. a cold-storage wallet) via the existing
+// `receiver` field on CreateOrderParams — the auth check still applies to the
+// order's caller/owner (Bob), not the recipient.
+#[test]
+fn short_position_lifecycle_close_pays_delegated_recipient_not_owner() {
+    let w = setup();
+    let env = &w.env;
+
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let cold_wallet = Address::generate(env);
+
+    set_prices(&w, 2000);
+    lp_deposit_short_only(&w, &alice, 20_000);
+
+    StellarAssetClient::new(env, &w.short_tk).mint(&bob, &(1_000 * ONE_TOKEN));
+    StellarAssetClient::new(env, &w.short_tk).transfer(&bob, &w.ord_vault, &(1_000 * ONE_TOKEN));
+    set_prices(&w, 2000);
+
+    let open_key = OHClient::new(env, &w.ord_handler).create_order(
+        &bob,
+        &CreateOrderParams {
+            receiver: bob.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.short_tk.clone(),
+            swap_path: Vec::new(env),
+            size_delta_usd: 10_000 * ONE_USD,
+            collateral_delta_amount: 1_000 * ONE_TOKEN,
+            trigger_price: 0,
+            acceptable_price: 1_900 * ONE_USD,
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketIncrease,
+            is_long: false,
+            expiry_ledger: None,
+        },
+    );
+    OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &open_key);
+
+    let pos_key = position_key(env, &bob, &w.market_tk, &w.short_tk, false);
+    let pos = OHClient::new(env, &w.ord_handler)
+        .get_position(&pos_key)
+        .expect("Bob must have an open short position after MarketIncrease");
+
+    set_prices(&w, 1800);
+
+    let bob_usdc_before_close = StellarAssetClient::new(env, &w.short_tk).balance(&bob);
+    let cold_wallet_usdc_before_close = StellarAssetClient::new(env, &w.short_tk).balance(&cold_wallet);
+
+    // Bob (the position owner) closes, but names cold_wallet as receiver.
+    let close_key = OHClient::new(env, &w.ord_handler).create_order(
+        &bob,
+        &CreateOrderParams {
+            receiver: cold_wallet.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.short_tk.clone(),
+            swap_path: Vec::new(env),
+            size_delta_usd: pos.size_in_usd,
+            collateral_delta_amount: pos.collateral_amount,
+            trigger_price: 0,
+            acceptable_price: 1_900 * ONE_USD,
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketDecrease,
+            is_long: false,
+            expiry_ledger: None,
+        },
+    );
+    OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &close_key);
+
+    let bob_usdc_after_close = StellarAssetClient::new(env, &w.short_tk).balance(&bob);
+    let cold_wallet_usdc_after_close = StellarAssetClient::new(env, &w.short_tk).balance(&cold_wallet);
+
+    assert_eq!(
+        bob_usdc_after_close, bob_usdc_before_close,
+        "Bob's own balance must be unchanged — the payout was delegated away from him"
+    );
+    assert_eq!(
+        cold_wallet_usdc_after_close - cold_wallet_usdc_before_close,
+        2_000 * ONE_TOKEN,
+        "cold_wallet must receive the full 2,000 USDC payout (collateral + PnL) instead of Bob"
+    );
+}
+
 #[test]
 fn short_position_lifecycle_losing_short_forfeits_collateral_to_pool() {
     let w = setup();
