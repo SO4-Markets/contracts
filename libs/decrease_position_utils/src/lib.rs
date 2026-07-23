@@ -294,12 +294,17 @@ pub fn decrease_position(env: &Env, p: &DecreasePositionParams) -> DecreasePosit
     );
 
     // 12. Collateral sum
+    // Tracks raw collateral held for this market/token/side bucket. It is credited by
+    // `net_collateral` on increase (see increase_position_utils) and must be debited here
+    // by the same kind of quantity — the collateral portion actually removed
+    // (`collateral_delta`) — not `output_amount`, which also folds in realised PnL that
+    // is already settled separately against `pool_amount` above.
     let col_sum_key =
         collateral_sum_key(env, &p.market.market_token, p.collateral_token, p.is_long);
     DataStoreClient::new(env, p.data_store).apply_delta_to_u128(
         p.caller,
         &col_sum_key,
-        &(-output_amount),
+        &(-collateral_delta),
     );
 
     // 13. Persist or remove position

@@ -521,10 +521,10 @@ fn build_price_message(
 
 fn check_circuit_breaker(env: &Env, data_store: &Address, token: &Address, new_min: i128, new_max: i128) {
     let price_key = TempKey::Price(token.clone());
-    let prev_price_opt = env.storage().temporary().get::<TempKey, PriceProps>(&price_key);
+    let prev_price_opt = env.storage().temporary().get::<TempKey, StoredPrice>(&price_key);
 
     if let Some(prev_price) = prev_price_opt {
-        let last_price = prev_price.mid_price();
+        let last_price = (prev_price.min + prev_price.max) / 2;
         let new_price = (new_min + new_max) / 2;
         if last_price > 0 {
             let deviation_val = (new_price - last_price).abs();
