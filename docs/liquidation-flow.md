@@ -130,7 +130,7 @@ remainder        = $90.00 - $4.50 = $85.50 → position owner
 
 | | Liquidation | Auto-Deleveraging (ADL) |
 |---|---|---|
-| **Trigger** | Individual position health factor < 1 | Pool-level profit-to-reserve ratio exceeds `adl_threshold_bps` |
+| **Trigger** | Individual position health factor < 1 | `total trader PnL / pool_value` (FLOAT_PRECISION-scaled ratio) exceeds the per-market-per-side threshold stored under `max_pnl_factor_for_adl_key(market, is_long)` |
 | **Executor role** | `LIQUIDATION_KEEPER` | `ADL_KEEPER` |
 | **Position selection** | Any single position below the health threshold | Highest-profit positions first (most impact on pool) |
 | **Fee charged** | Keeper fee + insurance fee | None |
