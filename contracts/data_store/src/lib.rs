@@ -6,6 +6,17 @@ use soroban_sdk::{
     BytesN, Env, Vec,
 };
 
+// ─── TTL constants (#297, #458) ──────────────────────────────────────────────────
+//
+// Lazy bump: extend_ttl only fires when the remaining TTL falls below
+// MIN_BUMP_THRESHOLD.  Both values are in ledger sequences; at 5 s/ledger:
+//   PERSISTENT_BUMP_TARGET ≈ 30 days   (518 400 ledgers)
+//   MIN_BUMP_THRESHOLD     ≈ 15 days   (259 200 ledgers)
+//
+// Only extend when current TTL < MIN_BUMP_THRESHOLD; target PERSISTENT_BUMP_TARGET.
+const PERSISTENT_BUMP_TARGET: u32 = 518_400;
+const MIN_BUMP_THRESHOLD: u32 = 259_200;
+
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
 #[contracterror]
@@ -421,17 +432,22 @@ impl DataStore {
     pub fn add_bytes32_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>) {
         caller.require_auth();
         require_controller(&env, &caller);
+        let data_key = DataKey::B32Set(set_key.clone());
         let mut set: Vec<BytesN<32>> = env
             .storage()
             .persistent()
-            .get(&DataKey::B32Set(set_key.clone()))
+            .get(&data_key)
             .unwrap_or(Vec::new(&env));
         if !vec_contains_b32(&set, &value) {
             set.push_back(value);
             env.storage()
                 .persistent()
-                .set(&DataKey::B32Set(set_key), &set);
+                .set(&data_key, &set);
         }
+        // Extend TTL on the set entry to keep enumeration index alive alongside primary keys
+        env.storage()
+            .persistent()
+            .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
     }
 
     pub fn remove_bytes32_from_set(
@@ -442,23 +458,32 @@ impl DataStore {
     ) {
         caller.require_auth();
         require_controller(&env, &caller);
+        let data_key = DataKey::B32Set(set_key.clone());
         let mut set: Vec<BytesN<32>> = env
             .storage()
             .persistent()
-            .get(&DataKey::B32Set(set_key.clone()))
+            .get(&data_key)
             .unwrap_or(Vec::new(&env));
         vec_remove_b32(&mut set, &value);
         env.storage()
             .persistent()
-            .set(&DataKey::B32Set(set_key), &set);
+            .set(&data_key, &set);
+        // Extend TTL on the set entry to keep enumeration index alive alongside primary keys
+        env.storage()
+            .persistent()
+            .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
     }
 
     pub fn get_bytes32_set_count(env: Env, set_key: BytesN<32>) -> u32 {
+        let data_key = DataKey::B32Set(set_key);
         let set: Vec<BytesN<32>> = env
             .storage()
             .persistent()
-            .get(&DataKey::B32Set(set_key))
+            .get(&data_key)
             .unwrap_or(Vec::new(&env));
+        env.storage()
+            .persistent()
+            .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         set.len()
     }
 
@@ -468,20 +493,28 @@ impl DataStore {
         start: u32,
         end: u32,
     ) -> Vec<BytesN<32>> {
+        let data_key = DataKey::B32Set(set_key);
         let set: Vec<BytesN<32>> = env
             .storage()
             .persistent()
-            .get(&DataKey::B32Set(set_key))
+            .get(&data_key)
             .unwrap_or(Vec::new(&env));
+        env.storage()
+            .persistent()
+            .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         paginate_b32(&env, &set, start, end)
     }
 
     pub fn contains_bytes32(env: Env, set_key: BytesN<32>, value: BytesN<32>) -> bool {
+        let data_key = DataKey::B32Set(set_key);
         let set: Vec<BytesN<32>> = env
             .storage()
             .persistent()
-            .get(&DataKey::B32Set(set_key))
+            .get(&data_key)
             .unwrap_or(Vec::new(&env));
+        env.storage()
+            .persistent()
+            .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         vec_contains_b32(&set, &value)
     }
 
