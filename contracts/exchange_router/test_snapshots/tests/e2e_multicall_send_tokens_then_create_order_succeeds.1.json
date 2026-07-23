@@ -1221,6 +1221,12 @@
                             },
                             {
                               "key": {
+                                "symbol": "expiry_ledger"
+                              },
+                              "val": "void"
+                            },
+                            {
+                              "key": {
                                 "symbol": "initial_collateral_token"
                               },
                               "val": {
@@ -1359,6 +1365,12 @@
                           "val": {
                             "i128": "0"
                           }
+                        },
+                        {
+                          "key": {
+                            "symbol": "expiry_ledger"
+                          },
+                          "val": "void"
                         },
                         {
                           "key": {
@@ -3485,6 +3497,33 @@
             "contract_data": {
               "ext": "v0",
               "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "U128"
+                  },
+                  {
+                    "bytes": "eb7b745dd486f99ada57bebfbe23e1c0bc08c3d6ec6e48b744d5d02cd326e746"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "u128": "20000000"
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM",
               "key": "ledger_key_contract_instance",
               "durability": "persistent",
               "val": {
@@ -3548,6 +3587,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "ledger_seq"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "max"
                     },
                     "val": {
@@ -3592,6 +3639,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "ledger_seq"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "max"
                     },
                     "val": {
@@ -3634,6 +3689,14 @@
               "durability": "temporary",
               "val": {
                 "map": [
+                  {
+                    "key": {
+                      "symbol": "ledger_seq"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
                   {
                     "key": {
                       "symbol": "max"

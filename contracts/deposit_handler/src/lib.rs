@@ -15,8 +15,8 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    account_deposit_list_key, deposit_key, deposit_list_key, market_index_token_key,
-    market_long_token_key, market_short_token_key, roles,
+    account_deposit_list_key, deposit_key, deposit_list_key, global_pause_key,
+    market_index_token_key, market_long_token_key, market_short_token_key, roles,
 };
 use gmx_market_utils::{
     apply_delta_to_pool_amount, get_market_token_price,
@@ -42,6 +42,10 @@ pub enum Error {
     InsufficientLpOut = 5,
     ZeroDeposit = 6,
     InsufficientVaultBalance = 7,
+    /// Issue #461: global protocol pause, enforced here directly (not just at
+    /// the exchange_router level) so a direct call bypassing the router is
+    /// still blocked.
+    Paused = 8,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -79,6 +83,7 @@ trait IDataStore {
     fn apply_delta_to_u128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> u128;
     fn apply_delta_to_i128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> i128;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
+    fn get_bool(env: Env, key: BytesN<32>) -> bool;
     fn add_address_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: Address);
     fn remove_address_from_set(env: Env, caller: Address, set_key: BytesN<32>, value: Address);
     fn add_bytes32_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
@@ -186,6 +191,12 @@ impl DepositHandler {
             .instance()
             .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+
+        // Issue #461: authoritative pause check — the router's own check can be
+        // bypassed by calling this handler directly, so it must gate here too.
+        if DataStoreClient::new(&env, &data_store).get_bool(&global_pause_key(&env)) {
+            panic_with_error!(&env, Error::Paused);
+        }
         let deposit_vault: Address = env
             .storage()
             .instance()
@@ -271,6 +282,13 @@ impl DepositHandler {
             .instance()
             .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+
+        // Issue #461: a global pause must also stop the keeper from executing
+        // already-pending deposits, not just block new ones via the router.
+        if DataStoreClient::new(&env, &data_store).get_bool(&global_pause_key(&env)) {
+            panic_with_error!(&env, Error::Paused);
+        }
+
         let deposit_vault: Address = env
             .storage()
             .instance()
@@ -450,6 +468,23 @@ impl DepositHandler {
         }
 
         let vault_client = DepositVaultClient::new(&env, &deposit_vault);
+
+        // Issue #463: same InsufficientVaultBalance invariant execute_deposit already
+        // enforces — the pooled vault must actually hold at least what this specific
+        // record claims before refunding it, so cancelling one record can never be
+        // paid out of a different pending record's funds.
+        if deposit.long_token_amount > 0 {
+            let actual = vault_client.get_recorded_balance(&deposit.initial_long_token);
+            if actual < deposit.long_token_amount {
+                panic_with_error!(&env, Error::InsufficientVaultBalance);
+            }
+        }
+        if deposit.short_token_amount > 0 {
+            let actual = vault_client.get_recorded_balance(&deposit.initial_short_token);
+            if actual < deposit.short_token_amount {
+                panic_with_error!(&env, Error::InsufficientVaultBalance);
+            }
+        }
 
         // Refund tokens
         if deposit.long_token_amount > 0 {
@@ -1855,6 +1890,42 @@ mod tests {
 
         // execute_deposit must now revert: vault holds 0 but deposit recorded 1_000_0000
         hc.execute_deposit(&w.keeper, &key);
+    }
+
+    /// Issue #463: cancel_deposit must apply the same InsufficientVaultBalance guard
+    /// execute_deposit already has — a drained vault must not let a cancellation pay
+    /// out more than the vault actually holds for this record.
+    #[test]
+    #[should_panic]
+    fn cancel_deposit_reverts_when_vault_balance_below_recorded() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+
+        let hc = DepositHandlerClient::new(env, &w.handler);
+        let key = hc.create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: 1_000_0000i128,
+                short_token_amount: 0,
+                min_market_tokens: 1,
+                execution_fee: 0,
+            },
+        );
+
+        // Drain the vault (simulating a fee-on-transfer token or balance discrepancy).
+        let drain_addr = Address::generate(env);
+        DVClient::new(env, &w.vault).transfer_out(&w.admin, &w.long_tk, &drain_addr, &1_000_0000i128);
+
+        // cancel_deposit must now revert: vault holds 0 but this record claims 1_000_0000.
+        hc.cancel_deposit(&user, &key);
     }
 
     /// Standard (non-fee) token deposit where vault balance equals recorded amount
