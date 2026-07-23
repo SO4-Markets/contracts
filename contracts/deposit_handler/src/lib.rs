@@ -251,9 +251,17 @@ impl DepositHandler {
         ds.add_bytes32_to_set(&handler, &deposit_list_key(&env), &key);
         ds.add_bytes32_to_set(&handler, &account_deposit_list_key(&env, &caller), &key);
 
+        // Issue #442: include the requested amounts so pending deposits can be
+        // displayed from the creation event without an extra RPC round-trip.
         env.events().publish(
             (symbol_short!("dep_crt"),),
-            (key.clone(), caller, market_addr),
+            (
+                key.clone(),
+                caller,
+                market_addr,
+                deposit.long_token_amount,
+                deposit.short_token_amount,
+            ),
         );
         key
     }

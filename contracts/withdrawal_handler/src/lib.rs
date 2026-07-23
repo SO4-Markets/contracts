@@ -245,9 +245,12 @@ impl WithdrawalHandler {
         ds.add_bytes32_to_set(&handler, &withdrawal_list_key(&env), &key);
         ds.add_bytes32_to_set(&handler, &account_withdrawal_list_key(&env, &caller), &key);
 
+        // Issue #442: include the market-token amount being redeemed so pending
+        // withdrawals can be displayed from the creation event without an extra
+        // RPC round-trip.
         env.events().publish(
             (symbol_short!("wth_crt"),),
-            (key.clone(), caller, market_addr),
+            (key.clone(), caller, market_addr, withdrawal.market_token_amount),
         );
         key
     }

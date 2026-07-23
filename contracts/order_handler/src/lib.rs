@@ -582,9 +582,18 @@ impl OrderHandler {
             ds.add_bytes32_to_set(&handler, &order_list_key(&env), &key);
             ds.add_bytes32_to_set(&handler, &account_order_list_key(&env, &caller), &key);
 
+            // Issue #442: include size/collateral/order_type so pending orders can
+            // be displayed from the creation event without an extra RPC round-trip.
             env.events().publish(
                 (symbol_short!("ord_crt"),),
-                (key.clone(), caller.clone(), params.market.clone()),
+                (
+                    key.clone(),
+                    caller.clone(),
+                    params.market.clone(),
+                    params.size_delta_usd,
+                    collateral_delta_amount,
+                    params.order_type.clone(),
+                ),
             );
             keys.push_back(key);
 
@@ -784,7 +793,19 @@ impl OrderHandler {
             );
         }
 
-        env.events().publish((symbol_short!("ord_crt"),), (key.clone(), actual_owner, params.market));
+        // Issue #442: include size/collateral/order_type so pending orders can
+        // be displayed from the creation event without an extra RPC round-trip.
+        env.events().publish(
+            (symbol_short!("ord_crt"),),
+            (
+                key.clone(),
+                actual_owner,
+                order.market.clone(),
+                order.size_delta_usd,
+                order.collateral_delta_amount,
+                order.order_type.clone(),
+            ),
+        );
         key
     }
 
@@ -951,7 +972,7 @@ impl OrderHandler {
                     &first_market,
                     &order.collateral_delta_amount,
                 );
-                let (_token_out, amount_out) = swap_with_path(
+                let (token_out, amount_out) = swap_with_path(
                     &env,
                     &data_store,
                     &handler,
@@ -964,6 +985,20 @@ impl OrderHandler {
                 if amount_out < order.min_output_amount {
                     panic_with_error!(&env, Error::PriceTooLow);
                 }
+                // Issue #440: dedicated swap-execution event carrying the actual
+                // output token/amount, instead of discarding them and falling
+                // back to the generic key+account-only execution event below.
+                env.events().publish(
+                    (symbol_short!("ord_swp"),),
+                    (
+                        key.clone(),
+                        order.account.clone(),
+                        order.initial_collateral_token.clone(),
+                        token_out,
+                        order.collateral_delta_amount,
+                        amount_out,
+                    ),
+                );
             }
 
             OrderType::MarketIncrease | OrderType::LimitIncrease | OrderType::StopIncrease => {
@@ -1360,8 +1395,20 @@ impl OrderHandler {
             .persistent()
             .remove(&OrderStorageKey::OrderFrozen(key.clone()));
 
-        env.events()
-            .publish((symbol_short!("ord_upd"),), (key, caller));
+        // Issue #441: include the account and the new field values so an
+        // indexer/UI can see what changed without re-fetching the order.
+        env.events().publish(
+            (symbol_short!("ord_upd"),),
+            (
+                key,
+                caller,
+                order.account,
+                size_delta_usd,
+                acceptable_price,
+                trigger_price,
+                min_output_amount,
+            ),
+        );
     }
 
     /// Freeze an order that cannot currently be executed.
@@ -1369,7 +1416,7 @@ impl OrderHandler {
         keeper.require_auth();
         require_order_keeper(&env, &keeper);
 
-        let _order: OrderProps = env
+        let order: OrderProps = env
             .storage()
             .persistent()
             .get(&OrderStorageKey::Order(key.clone()))
@@ -1385,7 +1432,9 @@ impl OrderHandler {
             .persistent()
             .set(&OrderStorageKey::OrderFrozen(key.clone()), &true);
 
-        env.events().publish((symbol_short!("ord_frz"),), key);
+        // Issue #441: include the affected account and the freezing keeper.
+        env.events()
+            .publish((symbol_short!("ord_frz"),), (key, order.account, keeper));
     }
 
     /// Return a stored order by key, or None if not found.
