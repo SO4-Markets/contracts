@@ -360,7 +360,10 @@ impl ExchangeRouter {
     /// double require_auth() within the same invocation frame, which Soroban rejects.
     pub fn multicall(env: Env, caller: Address, actions: Vec<RouterAction>) -> Vec<BytesN<32>> {
         caller.require_auth();
-        Self::require_not_paused(&env);
+        // Issue #453: cancellations must always be available while paused, matching
+        // the standalone cancel_* wrappers' tested behavior. The pause check is
+        // applied per-action inside the dispatch loop below instead of as one
+        // blanket gate here, explicitly skipped for the three cancel actions.
 
         let deposit_handler: Address = env
             .storage()
@@ -392,34 +395,41 @@ impl ExchangeRouter {
             let action = actions.get(i).unwrap();
             match action {
                 RouterAction::SendTokens(p) => {
+                    Self::require_not_paused(&env);
                     token::Client::new(&env, &p.token).transfer(&caller, &p.receiver, &p.amount);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateDeposit(p) => {
+                    Self::require_not_paused(&env);
                     let key = DepositHandlerClient::new(&env, &deposit_handler)
                         .create_deposit(&caller, &p);
                     results.push_back(key);
                 }
                 RouterAction::CancelDeposit(key) => {
+                    // Issue #453: cancellations must always be available while paused.
                     DepositHandlerClient::new(&env, &deposit_handler).cancel_deposit(&caller, &key);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateWithdrawal(p) => {
+                    Self::require_not_paused(&env);
                     let key = WithdrawalHandlerClient::new(&env, &withdrawal_handler)
                         .create_withdrawal(&caller, &p);
                     results.push_back(key);
                 }
                 RouterAction::CancelWithdrawal(key) => {
+                    // Issue #453: cancellations must always be available while paused.
                     WithdrawalHandlerClient::new(&env, &withdrawal_handler)
                         .cancel_withdrawal(&caller, &key);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateOrder(p) => {
+                    Self::require_not_paused(&env);
                     let key =
                         OrderHandlerClient::new(&env, &order_handler).create_order(&caller, &p);
                     results.push_back(key);
                 }
                 RouterAction::UpdateOrder(p) => {
+                    Self::require_not_paused(&env);
                     OrderHandlerClient::new(&env, &order_handler).update_order(
                         &caller,
                         &p.key,
@@ -431,6 +441,7 @@ impl ExchangeRouter {
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CancelOrder(key) => {
+                    // Issue #453: cancellations must always be available while paused.
                     OrderHandlerClient::new(&env, &order_handler).cancel_order(&caller, &key);
                     results.push_back(zero_key.clone());
                 }
@@ -1395,6 +1406,77 @@ mod tests {
         );
         let balance = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&user);
         assert_eq!(balance, ONE_TOKEN, "tokens must be refunded after cancel while paused");
+    }
+
+    /// Issue #453: multicall's pause check must not block a CancelDeposit action,
+    /// matching the standalone cancel_deposit wrapper's whitelisted behavior.
+    #[test]
+    fn multicall_cancel_deposit_succeeds_when_paused() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &ONE_TOKEN);
+
+        let key = DepositHandlerClient::new(&w.env, &w.dep_handler).create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: ONE_TOKEN,
+                short_token_amount: 0,
+                min_market_tokens: 0,
+                execution_fee: 0,
+            },
+        );
+
+        let router = ExchangeRouterClient::new(&w.env, &w.router);
+        router.set_paused(&true);
+
+        router.multicall(
+            &user,
+            &Vec::from_array(&w.env, [RouterAction::CancelDeposit(key.clone())]),
+        );
+
+        assert!(
+            DepositHandlerClient::new(&w.env, &w.dep_handler)
+                .get_deposit(&key)
+                .is_none(),
+            "deposit must be gone after multicall cancel while paused"
+        );
+        let balance = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&user);
+        assert_eq!(balance, ONE_TOKEN, "tokens must be refunded after multicall cancel while paused");
+    }
+
+    /// A multicall containing a state-creating action must still revert while
+    /// paused — only the cancel/claim actions are whitelisted.
+    #[test]
+    #[should_panic]
+    fn multicall_create_deposit_reverts_when_paused() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &ONE_TOKEN);
+
+        let router = ExchangeRouterClient::new(&w.env, &w.router);
+        router.set_paused(&true);
+
+        router.multicall(
+            &user,
+            &Vec::from_array(
+                &w.env,
+                [RouterAction::CreateDeposit(CreateDepositParams {
+                    receiver: user.clone(),
+                    market: w.market_tk.clone(),
+                    initial_long_token: w.long_tk.clone(),
+                    initial_short_token: w.short_tk.clone(),
+                    long_token_amount: ONE_TOKEN,
+                    short_token_amount: 0,
+                    min_market_tokens: 0,
+                    execution_fee: 0,
+                })],
+            ),
+        );
     }
 
     // ── Issue #135: Router multicall E2E tests ────────────────────────────────
