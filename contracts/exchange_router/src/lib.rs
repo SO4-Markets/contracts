@@ -360,7 +360,10 @@ impl ExchangeRouter {
     /// double require_auth() within the same invocation frame, which Soroban rejects.
     pub fn multicall(env: Env, caller: Address, actions: Vec<RouterAction>) -> Vec<BytesN<32>> {
         caller.require_auth();
-        Self::require_not_paused(&env);
+        // Issue #453: cancellations must always be available while paused, matching
+        // the standalone cancel_* wrappers' tested behavior. The pause check is
+        // applied per-action inside the dispatch loop below instead of as one
+        // blanket gate here, explicitly skipped for the three cancel actions.
 
         let deposit_handler: Address = env
             .storage()
@@ -392,34 +395,41 @@ impl ExchangeRouter {
             let action = actions.get(i).unwrap();
             match action {
                 RouterAction::SendTokens(p) => {
+                    Self::require_not_paused(&env);
                     token::Client::new(&env, &p.token).transfer(&caller, &p.receiver, &p.amount);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateDeposit(p) => {
+                    Self::require_not_paused(&env);
                     let key = DepositHandlerClient::new(&env, &deposit_handler)
                         .create_deposit(&caller, &p);
                     results.push_back(key);
                 }
                 RouterAction::CancelDeposit(key) => {
+                    // Issue #453: cancellations must always be available while paused.
                     DepositHandlerClient::new(&env, &deposit_handler).cancel_deposit(&caller, &key);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateWithdrawal(p) => {
+                    Self::require_not_paused(&env);
                     let key = WithdrawalHandlerClient::new(&env, &withdrawal_handler)
                         .create_withdrawal(&caller, &p);
                     results.push_back(key);
                 }
                 RouterAction::CancelWithdrawal(key) => {
+                    // Issue #453: cancellations must always be available while paused.
                     WithdrawalHandlerClient::new(&env, &withdrawal_handler)
                         .cancel_withdrawal(&caller, &key);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateOrder(p) => {
+                    Self::require_not_paused(&env);
                     let key =
                         OrderHandlerClient::new(&env, &order_handler).create_order(&caller, &p);
                     results.push_back(key);
                 }
                 RouterAction::UpdateOrder(p) => {
+                    Self::require_not_paused(&env);
                     OrderHandlerClient::new(&env, &order_handler).update_order(
                         &caller,
                         &p.key,
@@ -431,6 +441,7 @@ impl ExchangeRouter {
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CancelOrder(key) => {
+                    // Issue #453: cancellations must always be available while paused.
                     OrderHandlerClient::new(&env, &order_handler).cancel_order(&caller, &key);
                     results.push_back(zero_key.clone());
                 }
@@ -456,13 +467,17 @@ impl ExchangeRouter {
     }
 
     // ── Individual action helpers ─────────────────────────────────────────────
-
-    /// Transfer `amount` of `token` from caller to `receiver` (funds a vault).
-    pub fn send_tokens(env: Env, caller: Address, token: Address, receiver: Address, amount: i128) {
-        caller.require_auth();
-        Self::require_not_paused(&env);
-        token::Client::new(&env, &token).transfer(&caller, &receiver, &amount);
-    }
+    //
+    // Issue #452: `send_tokens`, `create_order`, and `create_orders` are
+    // deliberately NOT exposed as standalone entrypoints here. order_vault's
+    // `record_transfer_in` attributes its balance delta to whoever calls
+    // create_order/create_orders next, regardless of who actually sent the
+    // tokens — if funding and order-creation were separate, separately-callable
+    // transactions, any address could "steal" another user's just-sent
+    // collateral by racing to call create_order first. Routing both steps
+    // through `multicall` (atomic, single caller, single transaction) is the
+    // only supported path for increase/swap orders. Decrease/cancel/update
+    // actions, which never take fresh collateral, remain available standalone.
 
     /// Forward create_deposit to the deposit_handler.
     pub fn create_deposit(env: Env, caller: Address, params: CreateDepositParams) -> BytesN<32> {
@@ -512,55 +527,6 @@ impl ExchangeRouter {
             .get(&InstanceKey::WithdrawalHandler)
             .unwrap();
         WithdrawalHandlerClient::new(&env, &withdrawal_handler).cancel_withdrawal(&caller, &key);
-    }
-
-    /// Forward create_order to the order_handler.
-    ///
-    /// # Required multicall sequence for increase / swap order types
-    ///
-    /// The protocol's canonical collateral model (issue #47) requires that
-    /// the caller pushes tokens into order_vault **before** this action runs.
-    /// Use `SendTokens` with `receiver = order_vault` as the immediately
-    /// preceding step in the same multicall:
-    ///
-    /// ```text
-    /// multicall([
-    ///   SendTokens { token: collateral_token, receiver: order_vault, amount },
-    ///   CreateOrder { params },   ← order_handler snapshots the delta here
-    /// ])
-    /// ```
-    ///
-    /// Omitting `SendTokens` causes order_handler to revert with `ZeroCollateral`.
-    /// Decrease / stop-loss / liquidation orders do not require a prior token send.
-    pub fn create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32> {
-        caller.require_auth();
-        Self::require_not_paused(&env);
-        let order_handler: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::OrderHandler)
-            .unwrap();
-        OrderHandlerClient::new(&env, &order_handler).create_order(&caller, &params)
-    }
-
-    /// Create up to 5 orders atomically in a single call (issue #219).
-    ///
-    /// For increase/swap orders in the batch the caller must pre-fund the
-    /// order_vault via `SendTokens` before this call (one send per increase/swap leg).
-    /// Any failure reverts the entire batch (Soroban atomicity).
-    pub fn create_orders(
-        env: Env,
-        caller: Address,
-        requests: Vec<CreateOrderParams>,
-    ) -> Vec<BytesN<32>> {
-        caller.require_auth();
-        Self::require_not_paused(&env);
-        let order_handler: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::OrderHandler)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        OrderHandlerClient::new(&env, &order_handler).create_orders(&caller, &requests)
     }
 
     /// Forward update_order to the order_handler.
@@ -1395,6 +1361,77 @@ mod tests {
         );
         let balance = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&user);
         assert_eq!(balance, ONE_TOKEN, "tokens must be refunded after cancel while paused");
+    }
+
+    /// Issue #453: multicall's pause check must not block a CancelDeposit action,
+    /// matching the standalone cancel_deposit wrapper's whitelisted behavior.
+    #[test]
+    fn multicall_cancel_deposit_succeeds_when_paused() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &ONE_TOKEN);
+
+        let key = DepositHandlerClient::new(&w.env, &w.dep_handler).create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: ONE_TOKEN,
+                short_token_amount: 0,
+                min_market_tokens: 0,
+                execution_fee: 0,
+            },
+        );
+
+        let router = ExchangeRouterClient::new(&w.env, &w.router);
+        router.set_paused(&true);
+
+        router.multicall(
+            &user,
+            &Vec::from_array(&w.env, [RouterAction::CancelDeposit(key.clone())]),
+        );
+
+        assert!(
+            DepositHandlerClient::new(&w.env, &w.dep_handler)
+                .get_deposit(&key)
+                .is_none(),
+            "deposit must be gone after multicall cancel while paused"
+        );
+        let balance = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&user);
+        assert_eq!(balance, ONE_TOKEN, "tokens must be refunded after multicall cancel while paused");
+    }
+
+    /// A multicall containing a state-creating action must still revert while
+    /// paused — only the cancel/claim actions are whitelisted.
+    #[test]
+    #[should_panic]
+    fn multicall_create_deposit_reverts_when_paused() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &ONE_TOKEN);
+
+        let router = ExchangeRouterClient::new(&w.env, &w.router);
+        router.set_paused(&true);
+
+        router.multicall(
+            &user,
+            &Vec::from_array(
+                &w.env,
+                [RouterAction::CreateDeposit(CreateDepositParams {
+                    receiver: user.clone(),
+                    market: w.market_tk.clone(),
+                    initial_long_token: w.long_tk.clone(),
+                    initial_short_token: w.short_tk.clone(),
+                    long_token_amount: ONE_TOKEN,
+                    short_token_amount: 0,
+                    min_market_tokens: 0,
+                    execution_fee: 0,
+                })],
+            ),
+        );
     }
 
     // ── Issue #135: Router multicall E2E tests ────────────────────────────────
