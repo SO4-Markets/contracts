@@ -582,9 +582,18 @@ impl OrderHandler {
             ds.add_bytes32_to_set(&handler, &order_list_key(&env), &key);
             ds.add_bytes32_to_set(&handler, &account_order_list_key(&env, &caller), &key);
 
+            // Issue #442: include size/collateral/order_type so pending orders can
+            // be displayed from the creation event without an extra RPC round-trip.
             env.events().publish(
                 (symbol_short!("ord_crt"),),
-                (key.clone(), caller.clone(), params.market.clone()),
+                (
+                    key.clone(),
+                    caller.clone(),
+                    params.market.clone(),
+                    params.size_delta_usd,
+                    collateral_delta_amount,
+                    params.order_type.clone(),
+                ),
             );
             keys.push_back(key);
 
@@ -784,7 +793,19 @@ impl OrderHandler {
             );
         }
 
-        env.events().publish((symbol_short!("ord_crt"),), (key.clone(), actual_owner, params.market));
+        // Issue #442: include size/collateral/order_type so pending orders can
+        // be displayed from the creation event without an extra RPC round-trip.
+        env.events().publish(
+            (symbol_short!("ord_crt"),),
+            (
+                key.clone(),
+                actual_owner,
+                order.market.clone(),
+                order.size_delta_usd,
+                order.collateral_delta_amount,
+                order.order_type.clone(),
+            ),
+        );
         key
     }
 
