@@ -467,13 +467,17 @@ impl ExchangeRouter {
     }
 
     // ── Individual action helpers ─────────────────────────────────────────────
-
-    /// Transfer `amount` of `token` from caller to `receiver` (funds a vault).
-    pub fn send_tokens(env: Env, caller: Address, token: Address, receiver: Address, amount: i128) {
-        caller.require_auth();
-        Self::require_not_paused(&env);
-        token::Client::new(&env, &token).transfer(&caller, &receiver, &amount);
-    }
+    //
+    // Issue #452: `send_tokens`, `create_order`, and `create_orders` are
+    // deliberately NOT exposed as standalone entrypoints here. order_vault's
+    // `record_transfer_in` attributes its balance delta to whoever calls
+    // create_order/create_orders next, regardless of who actually sent the
+    // tokens — if funding and order-creation were separate, separately-callable
+    // transactions, any address could "steal" another user's just-sent
+    // collateral by racing to call create_order first. Routing both steps
+    // through `multicall` (atomic, single caller, single transaction) is the
+    // only supported path for increase/swap orders. Decrease/cancel/update
+    // actions, which never take fresh collateral, remain available standalone.
 
     /// Forward create_deposit to the deposit_handler.
     pub fn create_deposit(env: Env, caller: Address, params: CreateDepositParams) -> BytesN<32> {
@@ -523,60 +527,6 @@ impl ExchangeRouter {
             .get(&InstanceKey::WithdrawalHandler)
             .unwrap();
         WithdrawalHandlerClient::new(&env, &withdrawal_handler).cancel_withdrawal(&caller, &key);
-    }
-
-    /// Forward create_order to the order_handler.
-    ///
-    /// # Required multicall sequence for increase / swap order types
-    ///
-    /// The protocol's canonical collateral model (issue #47) requires that
-    /// the caller pushes tokens into order_vault **before** this action runs.
-    /// Use `SendTokens` with `receiver = order_vault` as the immediately
-    /// preceding step in the same multicall:
-    ///
-    /// ```text
-    /// multicall([
-    ///   SendTokens { token: collateral_token, receiver: order_vault, amount },
-    ///   CreateOrder { params },   ← order_handler snapshots the delta here
-    /// ])
-    /// ```
-    ///
-    /// Omitting `SendTokens` causes order_handler to revert with `ZeroCollateral`.
-    /// Decrease / stop-loss / liquidation orders do not require a prior token send.
-    pub fn create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32> {
-        caller.require_auth();
-        Self::require_not_paused(&env);
-        let order_handler: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::OrderHandler)
-            .unwrap();
-        OrderHandlerClient::new(&env, &order_handler).create_order(&caller, &params)
-    }
-
-    /// Create up to 5 orders atomically in a single call (issue #219).
-    ///
-    /// For increase/swap orders in the batch the caller must pre-fund the
-    /// order_vault via `SendTokens` before this call (one send per increase/swap leg).
-    /// Any failure reverts the entire batch (Soroban atomicity).
-    ///
-    /// At most one increase/swap leg per distinct collateral token is supported
-    /// per batch (issue #454) — `record_transfer_in`'s shared per-token balance
-    /// delta cannot unambiguously attribute funds across two legs sharing a token.
-    /// A batch violating this reverts with `DuplicateCollateralTokenInBatch`.
-    pub fn create_orders(
-        env: Env,
-        caller: Address,
-        requests: Vec<CreateOrderParams>,
-    ) -> Vec<BytesN<32>> {
-        caller.require_auth();
-        Self::require_not_paused(&env);
-        let order_handler: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::OrderHandler)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        OrderHandlerClient::new(&env, &order_handler).create_orders(&caller, &requests)
     }
 
     /// Forward update_order to the order_handler.
