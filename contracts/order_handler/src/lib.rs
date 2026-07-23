@@ -1374,8 +1374,20 @@ impl OrderHandler {
             .persistent()
             .remove(&OrderStorageKey::OrderFrozen(key.clone()));
 
-        env.events()
-            .publish((symbol_short!("ord_upd"),), (key, caller));
+        // Issue #441: include the account and the new field values so an
+        // indexer/UI can see what changed without re-fetching the order.
+        env.events().publish(
+            (symbol_short!("ord_upd"),),
+            (
+                key,
+                caller,
+                order.account,
+                size_delta_usd,
+                acceptable_price,
+                trigger_price,
+                min_output_amount,
+            ),
+        );
     }
 
     /// Freeze an order that cannot currently be executed.
@@ -1383,7 +1395,7 @@ impl OrderHandler {
         keeper.require_auth();
         require_order_keeper(&env, &keeper);
 
-        let _order: OrderProps = env
+        let order: OrderProps = env
             .storage()
             .persistent()
             .get(&OrderStorageKey::Order(key.clone()))
@@ -1399,7 +1411,9 @@ impl OrderHandler {
             .persistent()
             .set(&OrderStorageKey::OrderFrozen(key.clone()), &true);
 
-        env.events().publish((symbol_short!("ord_frz"),), key);
+        // Issue #441: include the affected account and the freezing keeper.
+        env.events()
+            .publish((symbol_short!("ord_frz"),), (key, order.account, keeper));
     }
 
     /// Return a stored order by key, or None if not found.
