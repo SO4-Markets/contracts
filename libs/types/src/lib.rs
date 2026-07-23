@@ -242,6 +242,16 @@ pub struct PoolValueInfo {
     pub impact_pool_amount: i128,
 }
 
+/// Pending (not-yet-settled) funding for a single position — issue #275.
+/// Positive = amount the holder would receive; negative = amount the holder
+/// would pay, in each of the position's long_token / short_token units.
+#[contracttype]
+pub struct FundingAmountResult {
+    pub long_token_amount: i128,
+    pub short_token_amount: i128,
+    pub at_ledger: u64,
+}
+
 /// Aggregate funding information for a market (used by Reader).
 #[contracttype]
 pub struct FundingInfo {

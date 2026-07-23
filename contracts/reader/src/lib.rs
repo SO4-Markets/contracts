@@ -16,14 +16,14 @@ use gmx_keys::{
     saved_funding_factor_per_second_key, withdrawal_list_key, DEFAULT_KEEPER_HEARTBEAT_TIMEOUT,
 };
 use gmx_market_utils::{get_open_interest_for_side, get_pool_value};
-use gmx_math::{mul_div_wide, TOKEN_PRECISION};
+use gmx_math::{mul_div_wide, FLOAT_PRECISION, TOKEN_PRECISION};
 use gmx_position_utils::{get_position_fees, get_position_pnl_usd, is_liquidatable};
 use gmx_pricing_utils::{get_execution_price, get_position_price_impact};
 use gmx_types::{
-    AdlCandidate, DepositProps, FundingInfo, FundingRateInfo, KeeperHeartbeatStatus,
-    LiquidatablePosition, MarketProps, OrderProps, PoolValueInfo, PositionFees, PositionInfo,
-    PositionLeverage, PositionProps, PriceProps, ProtocolStats, SwapEstimate, WithdrawalProps,
-    PendingOrder,
+    AdlCandidate, DepositProps, FundingAmountResult, FundingInfo, FundingRateInfo,
+    KeeperHeartbeatStatus, LiquidatablePosition, MarketProps, OrderProps, PoolValueInfo,
+    PositionFees, PositionInfo, PositionLeverage, PositionProps, PriceProps, ProtocolStats,
+    SwapEstimate, WithdrawalProps, PendingOrder,
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
@@ -84,6 +84,11 @@ trait IOrderHandler {
     fn bump_position_ttl(env: Env, caller: Address, key: BytesN<32>) -> bool;
     fn get_position(env: Env, key: BytesN<32>) -> Option<PositionProps>;
     fn get_order(env: Env, key: BytesN<32>) -> Option<OrderProps>;
+}
+
+#[soroban_sdk::contractclient(name = "MarketTokenClient")]
+trait IMarketToken {
+    fn total_supply(env: Env) -> i128;
 }
 
 #[allow(dead_code)]
@@ -178,6 +183,27 @@ impl Reader {
             index_price,
             maximize,
         )
+    }
+
+    /// Issue #276: USD price per 1 market (GM) token, FLOAT_PRECISION scaled.
+    /// `maximize = true` uses oracle max prices (conservative for minting);
+    /// `maximize = false` uses oracle min prices (conservative for burning).
+    /// Zero-supply pools return a 1.00 USD seed price rather than panicking.
+    pub fn get_market_token_price(
+        env: Env,
+        data_store: Address,
+        oracle: Address,
+        market: Address,
+        maximize: bool,
+    ) -> u128 {
+        let supply = MarketTokenClient::new(&env, &market).total_supply();
+        if supply <= 0 {
+            return FLOAT_PRECISION as u128; // seed price: 1.00 USD per GM token
+        }
+        let info = Self::get_market_pool_value_info(env.clone(), data_store, oracle, market, maximize);
+        // pool_value is USD at FLOAT_PRECISION; supply is GM tokens at TOKEN_PRECISION raw units.
+        // price_per_token (FLOAT_PRECISION USD) = pool_value × TOKEN_PRECISION / supply.
+        mul_div_wide(&env, info.pool_value.max(0), TOKEN_PRECISION, supply) as u128
     }
 
     /// Get open interest for both sides of a market.
@@ -494,6 +520,66 @@ impl Reader {
             position_fee_usd,
             liquidation_price,
             avg_entry_price,
+        })
+    }
+
+    /// Issue #275: read-only view of a position's pending (not-yet-settled) funding,
+    /// without mutating any state. Mirrors the exact math `settle_funding_fees`
+    /// (claimable side) and `get_position_fees` (owed side) apply during a real
+    /// decrease, so the returned amounts match what would actually be
+    /// credited/debited if the position were decreased right now.
+    pub fn get_claimable_funding_amount(
+        env: Env,
+        data_store: Address,
+        oracle: Address,
+        order_handler: Address,
+        account: Address,
+        market: Address,
+        collateral_token: Address,
+        is_long: bool,
+    ) -> Option<FundingAmountResult> {
+        let pk = position_key(&env, &account, &market, &collateral_token, is_long);
+        let position: PositionProps =
+            OrderHandlerClient::new(&env, &order_handler).get_position(&pk)?;
+
+        let market_props = Self::get_market(env.clone(), data_store.clone(), position.market.clone());
+        let ds = DataStoreClient::new(&env, &data_store);
+
+        // Claimable side: same per-size delta settle_funding_fees computes, for both tokens.
+        let mut claimable = [0i128, 0i128]; // [long_token, short_token]
+        for (i, (tok, tracker)) in [
+            (&market_props.long_token, position.long_claim_fnd_per_size),
+            (&market_props.short_token, position.short_claim_fnd_per_size),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fnd_key = funding_amount_per_size_key(&env, &market_props.market_token, tok, position.is_long);
+            let latest = ds.get_i128(&fnd_key);
+            let claimable_per_size = tracker - latest;
+            if claimable_per_size > 0 {
+                claimable[i] = mul_div_wide(&env, claimable_per_size, position.size_in_usd, FLOAT_PRECISION);
+            }
+        }
+
+        // Owed side: same funding_fee_amount get_position_fees computes on a real decrease,
+        // expressed in the position's own collateral token (long_token or short_token).
+        let oracle_client = OracleClient::new(&env, &oracle);
+        let collateral_price = oracle_client.get_primary_price(&position.collateral_token).mid_price();
+        let fees = get_position_fees(&env, &data_store, &market_props, &position, collateral_price, 0, false);
+
+        let mut long_token_amount = claimable[0];
+        let mut short_token_amount = claimable[1];
+        if position.collateral_token == market_props.long_token {
+            long_token_amount -= fees.funding_fee_amount;
+        } else if position.collateral_token == market_props.short_token {
+            short_token_amount -= fees.funding_fee_amount;
+        }
+
+        Some(FundingAmountResult {
+            long_token_amount,
+            short_token_amount,
+            at_ledger: env.ledger().sequence() as u64,
         })
     }
 
