@@ -195,19 +195,15 @@ impl ReferralStorage {
     /// Look up the referral code for a trader, and return the referrer's address.
     pub fn get_trader_referrer(env: Env, trader: Address) -> Option<Address> {
         let trader_key = ReferralKey::TraderCode(trader);
-        let code: BytesN<32> = env.storage().persistent().get(&trader_key)?;
+        // Issue #443: TraderCode is always stored as `Bytes` (referral codes are
+        // 1-20 bytes, never exactly 32), so this must read back as `Bytes`, not
+        // the fixed-size `BytesN<32>` the earlier version of this function used.
+        let code: Bytes = env.storage().persistent().get(&trader_key)?;
         env.storage().persistent().extend_ttl(&trader_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         let owner_key = ReferralKey::CodeOwner(code);
         let referrer: Address = env.storage().persistent().get(&owner_key)?;
         env.storage().persistent().extend_ttl(&owner_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         Some(referrer)
-        let code: Bytes = env
-            .storage()
-            .persistent()
-            .get(&ReferralKey::TraderCode(trader))?;
-        env.storage()
-            .persistent()
-            .get(&ReferralKey::CodeOwner(code))
     }
 
     /// Return the referral code for a trader, or None.
@@ -234,9 +230,6 @@ impl ReferralStorage {
         let tier_key = ReferralKey::ReferrerTier(referrer);
         env.storage().persistent().set(&tier_key, &tier);
         env.storage().persistent().extend_ttl(&tier_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
-        env.storage()
-            .persistent()
-            .set(&ReferralKey::ReferrerTier(referrer), &tier);
     }
 
     /// Configure the rebate/discount parameters for a tier (admin only).
@@ -301,7 +294,10 @@ impl ReferralStorage {
     /// Return the fee discount bps for a trader given their referral code, or 0 if none.
     pub fn get_trader_discount_bps(env: Env, trader: Address) -> u32 {
         let trader_key = ReferralKey::TraderCode(trader);
-        let code: BytesN<32> = match env.storage().persistent().get(&trader_key) {
+        // Issue #443: TraderCode is always stored as `Bytes` (referral codes are
+        // 1-20 bytes, never exactly 32), so this must read back as `Bytes`, not
+        // the fixed-size `BytesN<32>` the earlier version of this function used.
+        let code: Bytes = match env.storage().persistent().get(&trader_key) {
             Some(c) => c,
             None => return 0,
         };
@@ -322,32 +318,6 @@ impl ReferralStorage {
 
         let config_key = ReferralKey::TierConfig(tier);
         let config: TierConfig = match env.storage().persistent().get(&config_key) {
-        let code: Bytes = match env
-            .storage()
-            .persistent()
-            .get(&ReferralKey::TraderCode(trader))
-        {
-            Some(c) => c,
-            None => return 0,
-        };
-        let referrer: Address = match env
-            .storage()
-            .persistent()
-            .get(&ReferralKey::CodeOwner(code))
-        {
-            Some(r) => r,
-            None => return 0,
-        };
-        let tier: u32 = env
-            .storage()
-            .persistent()
-            .get(&ReferralKey::ReferrerTier(referrer))
-            .unwrap_or(0);
-        let config: TierConfig = match env
-            .storage()
-            .persistent()
-            .get(&ReferralKey::TierConfig(tier))
-        {
             Some(c) => c,
             None => return 0,
         };
