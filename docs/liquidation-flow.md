@@ -8,22 +8,33 @@ A position becomes eligible for liquidation when its health factor drops below 1
 
 ## 1. Eligibility Formula
 
-A position is liquidatable when:
+A position is liquidatable when (in the normal, configured case):
 
 ```
-collateral_usd < size_in_usd × min_collateral_factor
+net_collateral_usd < size_in_usd × min_collateral_factor
 ```
+
+where `net_collateral_usd = collateral_usd - fees_usd` — current fees (borrowing +
+funding + position fee, computed worst-case) are subtracted from collateral
+**before** the comparison. Unrealised PnL is deliberately excluded from this
+comparison: a profitable unrealised gain must not mask a genuine collateral
+shortfall.
 
 Where:
 - `collateral_usd` — current mark-to-market value of the position's collateral, in USD at `FLOAT_PRECISION`
+- `fees_usd` — all currently-accrued fees on the position, in USD
 - `size_in_usd` — total notional size of the position
 - `min_collateral_factor` — per-market configuration stored under `min_collateral_factor_key(market)` in `data_store`
+
+If `min_collateral_factor` is unset (0, the fallback case only), the check instead
+uses `net_collateral_usd + pnl_usd < 0` — unrealised PnL only enters the
+liquidation check in this fallback branch, never in the primary comparison above.
 
 The `is_liquidatable` helper in `libs/position_utils` encodes this check and is the sole gate called by `LiquidationHandler::check_liquidatable`. If the check passes (position is healthy) the liquidation reverts with `PositionNotLiquidatable`.
 
 ### Why the factor matters
 
-`min_collateral_factor` is typically 1% (`FLOAT_PRECISION / 100`). A $10,000 notional position needs at least $100 of collateral. As unrealised PnL moves against the position, available collateral erodes — once it falls below this threshold the position can be forcibly closed to prevent bad debt from accumulating in the pool.
+`min_collateral_factor` is typically 1% (`FLOAT_PRECISION / 100`). A $10,000 notional position needs at least $100 of net collateral (after fees). As fees accrue (and, in the fallback case only, as unrealised PnL moves against the position), available collateral erodes — once it falls below this threshold the position can be forcibly closed to prevent bad debt from accumulating in the pool.
 
 ---
 
