@@ -90,3 +90,7 @@ path = "lp_fee_distribution.rs"
 [[test]]
 name = "multi_market_funding_isolation"
 path = "multi_market_funding_isolation.rs"
+
+[[test]]
+name = "funding_conservation_e2e"
+path = "funding_conservation_e2e.rs"
