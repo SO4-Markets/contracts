@@ -43,7 +43,7 @@ SO4.market uses a **two-step execution model**: users create requests on-chain (
 
 **Mitigations in place:**
 1. Multiple-keeper competition: anyone granted `LIQUIDATION_KEEPER` can liquidate any eligible position. If one keeper is slow or malicious, others will act to earn the fee.
-2. `liquidate_position` reverts if the position is not actually underwater (`health_check` must fail). A keeper cannot liquidate a healthy position regardless of intent.
+2. `liquidate_position` reverts if the position is not actually underwater (`is_liquidatable` in `libs/position_utils`, called by `LiquidationHandler::check_liquidatable`, must return true). A keeper cannot liquidate a healthy position regardless of intent.
 3. The execution fee is user-set and fixed, providing no extra marginal revenue for delayed execution.
 
 **Recommended Additional Mitigation:**
@@ -65,7 +65,7 @@ SO4.market uses a **two-step execution model**: users create requests on-chain (
 
 **Mitigations in place:**
 1. ADL is only possible when the ADL condition is met (protocol checks open interest vs. reserve); keepers cannot trigger ADL on a healthy market.
-2. `adl_handler` verifies `adl_conditions_are_met` before calling `order_handler.execute_adl`; the selection is constrained to positions that actually need ADL.
+2. `adl_handler` verifies `is_adl_required(market, is_long)` before calling `order_handler.execute_adl`; the selection is constrained to positions that actually need ADL.
 3. Multiple ADL keepers can act; a biased keeper's self-serving selection will be corrected when another keeper selects the largest profitable position.
 
 **Recommended Additional Mitigation:**
@@ -125,14 +125,14 @@ Operators running or auditing keepers should monitor the following:
 ### Order Keeper
 - **Pending orders queue depth**: alert if > N orders are unexecuted for > M ledgers.
 - **Cancelled vs executed ratio**: a high cancellation rate on limit orders may indicate price staleness or keeper avoidance of certain order types.
-- **`last_keeper_activity` key in DataStore**: if the last activity ledger is > `keeper_heartbeat_timeout` ledgers ago, the keeper is considered inactive and orders can revert with `KeeperInactive`.
+- **`last_keeper_activity` key in DataStore**: if the last activity ledger is > `keeper_heartbeat_timeout` ledgers ago, the keeper is considered inactive. Query via `order_handler::check_keeper_heartbeat(data_store, role)` (returns `KeeperHeartbeatStatus { last_active_ledger, ledgers_since_last_activity, is_stale }`). There is no `KeeperInactive` error that causes order execution to revert — the on-chain response is admin-initiated: `flag_stale_keeper` emits `KeeperHeartbeatMissed` once staleness is confirmed, and the admin then calls `role_store::revoke_role`.
 
 ### Liquidation Keeper
 - **Positions near the liquidation threshold**: monitor positions with collateral ratio ≤ 120% of `min_collateral_factor`; alert if any such position goes unexecuted for > 10 ledgers.
-- **Insurance fund balance**: track `insurance_fund_balance_key` in DataStore; a falling balance with active ADL is a sign of sustained bad debt.
+- **Insurance fund balance**: there is no DataStore key for this — the balance is read directly from the underlying token contract at the address stored under `insurance_fund_address_key(market)` (via `insurance_fund_router::configure_insurance_fund`). A falling balance with active ADL is a sign of sustained bad debt.
 
 ### ADL Keeper
-- **ADL condition flag**: check `is_adl_enabled_key` per market; when `true`, the keeper should execute ADL within 2–3 ledgers.
+- **ADL condition**: call `adl_handler::is_adl_required(market, is_long)`; when `true`, the keeper should execute ADL within 2–3 ledgers. (`is_adl_enabled_key` exists in `gmx_keys` but is currently dead — no contract reads or writes it; ADL eligibility is computed dynamically via `is_adl_required` instead. Do not build monitoring against this key.)
 - **Largest profitable position**: off-chain keepers should always target the position with the highest PnL first to minimise total ADL events.
 
 ### General
