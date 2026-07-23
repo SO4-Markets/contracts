@@ -454,6 +454,15 @@ pub fn max_pool_amount_key(env: &Env, market: &Address, token: &Address) -> Byte
     sha256(env, &b)
 }
 
+/// Issue #279: minimum USD value (FLOAT_PRECISION-scaled) a deposit must meet
+/// to prevent dust LP positions. 0 means uncapped (default, no regression).
+pub fn min_deposit_usd_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "MIN_DEPOSIT_USD");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
 pub fn max_open_interest_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "MAX_OPEN_INTEREST");

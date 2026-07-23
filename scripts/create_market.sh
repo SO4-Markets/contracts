@@ -123,7 +123,7 @@ echo
 # ── Step 3: Oracle keeper registration reminder ───────────────────────────────
 log "[3/3] Oracle keeper setup"
 
-KEEPER_KEY_HEX=$(key keeper_pubkey_key 0 2>/dev/null || echo "<run: python3 scripts/compute_key.py keeper_pubkey_key 0>")
+KEEPER_KEY_HEX=$(key keeper_public_key 0 2>/dev/null || echo "<run: python3 scripts/compute_key.py keeper_public_key 0>")
 
 echo -e "  Register a 32-byte ed25519 public key so the oracle can verify prices for"
 echo -e "  index token ${CYAN}$INDEX_TOKEN${NC}."

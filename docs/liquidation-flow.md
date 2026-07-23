@@ -33,21 +33,21 @@ Any account holding the `LIQUIDATION_KEEPER` role may call:
 
 ```
 LiquidationHandler::liquidate_position(
-    caller,
+    keeper,
     account,
     market,
     collateral_token,
     is_long,
-    index_token_price,
-    long_token_price,
-    short_token_price,
 )
 ```
 
+The function takes no price parameters — it fetches the current index price and
+collateral price itself from the oracle internally before checking liquidatability.
+
 The contract executes the following steps:
 
-1. Verifies `caller` holds the `LIQUIDATION_KEEPER` role (via `role_store.has_role`).
-2. Calls `is_liquidatable` with the supplied prices — reverts if the position is still healthy.
+1. Verifies `keeper` holds the `LIQUIDATION_KEEPER` role (via `role_store.has_role`).
+2. Fetches current prices from the oracle and calls `is_liquidatable` — reverts if the position is still healthy.
 3. Delegates to `order_handler.liquidate_position` to execute the close and distribute remaining collateral.
 4. Emits a `liq_done` event carrying the position key and keeper address.
 

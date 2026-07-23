@@ -59,7 +59,7 @@ The value at that key is the raw 32-byte ed25519 public key (`BytesN<32>`).
 Use `scripts/compute_key.py` to derive the `data_store_key`:
 
 ```bash
-python3 scripts/compute_key.py keeper_pubkey_key <keeper_index>
+python3 scripts/compute_key.py keeper_public_key <keeper_index>
 ```
 
 ### Verification call
@@ -106,7 +106,7 @@ EOF "G..."
 
 ```bash
 KEEPER_INDEX=0    # increment for each additional keeper
-KEY_HEX=$(python3 scripts/compute_key.py keeper_pubkey_key "$KEEPER_INDEX")
+KEY_HEX=$(python3 scripts/compute_key.py keeper_public_key "$KEEPER_INDEX")
 echo "data_store key: $KEY_HEX"
 ```
 
