@@ -169,7 +169,7 @@ Prices for the index token must be signed by a registered keeper. See [docs/orac
 
 ```bash
 # Compute the data_store key for keeper index 0
-KEY_HEX=$(python3 scripts/compute_key.py keeper_pubkey_key 0)
+KEY_HEX=$(python3 scripts/compute_key.py keeper_public_key 0)
 
 # Register the 32-byte ed25519 public key (CONTROLLER role required)
 stellar contract invoke \
