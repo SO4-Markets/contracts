@@ -462,6 +462,16 @@ pub fn max_open_interest_key(env: &Env, market: &Address, is_long: bool) -> Byte
     sha256(env, &b)
 }
 
+/// Issue #278: per-market, per-side cap on a single position's size_in_usd.
+/// A value of 0 means uncapped.
+pub fn max_position_size_usd_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "MAX_POSITION_SIZE_USD");
+    push_addr(&mut b, env, market);
+    push_bool(&mut b, env, is_long);
+    sha256(env, &b)
+}
+
 pub fn min_collateral_factor_key(env: &Env, market: &Address) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "MIN_COLLATERAL_FACTOR");

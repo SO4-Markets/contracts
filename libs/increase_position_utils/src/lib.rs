@@ -12,7 +12,7 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use gmx_keys::{account_position_list_key, collateral_sum_key, pool_amount_key, position_fee_factor_key, position_key, position_list_key};
+use gmx_keys::{account_position_list_key, collateral_sum_key, max_position_size_usd_key, pool_amount_key, position_fee_factor_key, position_key, position_list_key};
 use gmx_market_utils::{
     apply_delta_to_open_interest, apply_delta_to_open_interest_in_tokens,
 };
@@ -168,6 +168,14 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
     position.size_in_usd += p.size_delta_usd;
     position.size_in_tokens += new_size_in_tokens;
     position.increased_at_time = p.current_time;
+
+    // Issue #278: per-trader (this position), per-market, per-side max size cap.
+    // 0 means uncapped (default, no regression for existing markets).
+    let max_pos_size_key = max_position_size_usd_key(env, &p.market.market_token, p.is_long);
+    let max_position_size_usd = ds.get_u128(&max_pos_size_key) as i128;
+    if max_position_size_usd > 0 && position.size_in_usd > max_position_size_usd {
+        soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(3u32));
+    }
 
     // Open interest deltas
     apply_delta_to_open_interest(
@@ -868,6 +876,87 @@ mod tests {
             short_pos.size_in_usd > 0,
             "short position must succeed when only long cap is set"
         );
+    }
+
+    // ── Issue #278: max position size per trader ──────────────────────────────
+
+    /// A position increase beyond the configured max_position_size_usd cap must revert.
+    #[test]
+    #[should_panic]
+    fn max_position_size_over_cap_reverts() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let index_price = 2_000 * fp;
+
+        configure_market(&w, 10);
+        set_prices(&w, index_price);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(ONE_TOKEN * 500));
+
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::max_position_size_usd_key(&w.env, &w.market_tk, true),
+            &(50_000u128 * fp as u128),
+        );
+
+        let market = gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
+        let price_props = gmx_types::PriceProps { min: index_price, max: index_price };
+
+        // 60,000 USD position against a 50,000 USD cap must revert.
+        w.env.as_contract(&w.admin, || {
+            increase_position(
+                &w.env,
+                &open_params(&w, &market, &price_props, 60_000 * fp, index_price),
+            );
+        });
+    }
+
+    /// Two independent traders each opening a 40,000 USD position against a 50,000 USD
+    /// cap must both succeed — the cap is per position (per trader), not a shared total.
+    #[test]
+    fn max_position_size_two_traders_under_cap_both_succeed() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let index_price = 2_000 * fp;
+
+        configure_market(&w, 10);
+        set_prices(&w, index_price);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(ONE_TOKEN * 500));
+
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::max_position_size_usd_key(&w.env, &w.market_tk, true),
+            &(50_000u128 * fp as u128),
+        );
+
+        let market = gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
+        let price_props = gmx_types::PriceProps { min: index_price, max: index_price };
+
+        let trader_a = Address::generate(&w.env);
+        let params_a = IncreasePositionParams {
+            data_store: &w.ds,
+            caller: &w.admin,
+            account: &trader_a,
+            receiver: &trader_a,
+            market: &market,
+            collateral_token: &w.long_tk,
+            size_delta_usd: 40_000 * fp,
+            collateral_amount: ONE_TOKEN * 4_000,
+            acceptable_price: 0,
+            is_long: true,
+            index_token_price: &price_props,
+            collateral_price: index_price,
+            current_time: 1_000,
+            for_positive_impact: true,
+        };
+        let pos_a = w.env.as_contract(&w.admin, || increase_position(&w.env, &params_a));
+        assert_eq!(pos_a.size_in_usd, 40_000 * fp, "trader A's 40,000 USD position must succeed");
+
+        let trader_b = Address::generate(&w.env);
+        let params_b = IncreasePositionParams { account: &trader_b, receiver: &trader_b, ..params_a };
+        let pos_b = w.env.as_contract(&w.admin, || increase_position(&w.env, &params_b));
+        assert_eq!(pos_b.size_in_usd, 40_000 * fp, "trader B's own 40,000 USD position must independently succeed");
     }
 
     // ── Issue #284: maker/taker fee tier differentiation ─────────────────────
