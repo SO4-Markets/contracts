@@ -32,6 +32,9 @@ trait IDataStore {
 /// `size_delta_usd` — the portion of the position being closed (= position.size_in_usd for full).
 ///
 /// Returns (pnl_usd, uncapped_pnl_usd) — same value for now; capping happens in get_pool_value.
+/// When prorating a loss (negative PnL), rounds the magnitude up so the trader pays the pool
+/// the full amount owed (protocol-favoring direction). For profit (positive PnL), floors toward
+/// zero (trader-favoring direction), already correct per GMX invariant.
 pub fn get_position_pnl_usd(
     env: &Env,
     position: &PositionProps,
@@ -57,8 +60,17 @@ pub fn get_position_pnl_usd(
         position.size_in_usd - position_value
     };
 
-    // Scale to the slice being closed
-    let pnl_usd = mul_div_wide(env, total_pnl, size_delta_usd, position.size_in_usd);
+    // Scale to the slice being closed, rounding based on sign:
+    //   Profit (total_pnl >= 0): use floor (mul_div_wide) → protocol favoring
+    //   Loss (total_pnl < 0): round magnitude up → pool gets full amount owed
+    let pnl_usd = if total_pnl >= 0 {
+        mul_div_wide(env, total_pnl, size_delta_usd, position.size_in_usd)
+    } else {
+        // For negative PnL, negate, round up, then negate back
+        let magnitude_rounded_up =
+            mul_div_wide_up(env, -total_pnl, size_delta_usd, position.size_in_usd);
+        -magnitude_rounded_up
+    };
 
     (pnl_usd, pnl_usd)
 }

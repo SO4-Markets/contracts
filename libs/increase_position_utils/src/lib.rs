@@ -12,11 +12,12 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use gmx_keys::{account_position_list_key, collateral_sum_key, max_position_size_usd_key, pool_amount_key, position_fee_factor_key, position_key, position_list_key};
+use gmx_keys::{account_position_list_key, collateral_sum_key, max_position_size_usd_key, pool_amount_key, claimable_fee_amount_key, position_key, position_list_key};
 use gmx_market_utils::{
     apply_delta_to_open_interest, apply_delta_to_open_interest_in_tokens,
 };
 use gmx_math::{mul_div_wide, FLOAT_PRECISION, TOKEN_PRECISION};
+use gmx_position_utils::get_position_fees;
 use gmx_pricing_utils::get_execution_price;
 use gmx_types::{MarketProps, PositionProps, PriceProps};
 use soroban_sdk::{contracttype, Address, BytesN, Env};
@@ -132,20 +133,18 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
         0
     };
 
-    // Compute position fee using the maker (positive impact) or taker (negative impact) rate
+    // Compute position fee using the shared helper (rounds up for protocol protection)
     let ds = DataStoreClient::new(env, p.data_store);
-    let fee_key = position_fee_factor_key(env, &p.market.market_token, p.for_positive_impact);
-    let fee_factor = ds.get_u128(&fee_key) as i128;
-    let fee_usd = if fee_factor > 0 {
-        mul_div_wide(env, p.size_delta_usd, fee_factor, FLOAT_PRECISION)
-    } else {
-        0
-    };
-    let fee_tokens = if p.collateral_price > 0 && fee_usd > 0 {
-        mul_div_wide(env, fee_usd, TOKEN_PRECISION, p.collateral_price)
-    } else {
-        0
-    };
+    let fees = get_position_fees(
+        env,
+        p.data_store,
+        p.market,
+        &position,
+        p.collateral_price,
+        p.size_delta_usd,
+        p.for_positive_impact,
+    );
+    let fee_tokens = fees.total_cost_amount;
     let net_collateral = if p.collateral_amount > fee_tokens {
         p.collateral_amount - fee_tokens
     } else {
@@ -154,6 +153,12 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
     if fee_tokens > 0 {
         let pool_key = pool_amount_key(env, &p.market.market_token, p.collateral_token);
         ds.apply_delta_to_u128(p.caller, &pool_key, &fee_tokens);
+        // Track claimable fees for claim_fees entrypoint
+        ds.apply_delta_to_u128(
+            p.caller,
+            &claimable_fee_amount_key(env, &p.market.market_token, p.collateral_token),
+            &(fee_tokens as i128),
+        );
     }
     position.collateral_amount += net_collateral;
 

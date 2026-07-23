@@ -398,6 +398,8 @@ impl ReferralStorage {
         let prev_volume: u128 = env.storage().persistent().get(&vol_key).unwrap_or(0u128);
         let cumulative_volume = prev_volume.saturating_add(volume_usd);
         env.storage().persistent().set(&vol_key, &cumulative_volume);
+        // Extend TTL so volume counter doesn't expire between trades
+        env.storage().persistent().extend_ttl(&vol_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
 
         // Auto-upgrade: find the highest tier whose threshold the referrer now qualifies for
         let old_tier: u32 = env
@@ -409,11 +411,14 @@ impl ReferralStorage {
         let mut new_tier = old_tier;
         let mut t = old_tier + 1;
         while t <= 2 {
+            let threshold_key = ReferralKey::TierUpgradeThreshold(t);
             if let Some(threshold) = env
                 .storage()
                 .persistent()
-                .get::<_, u128>(&ReferralKey::TierUpgradeThreshold(t))
+                .get::<_, u128>(&threshold_key)
             {
+                // Extend TTL on every read so config value doesn't expire
+                env.storage().persistent().extend_ttl(&threshold_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
                 if cumulative_volume >= threshold {
                     new_tier = t;
                 }

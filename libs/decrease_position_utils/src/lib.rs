@@ -22,7 +22,7 @@ use gmx_market_utils::{
     apply_delta_to_open_interest, apply_delta_to_open_interest_in_tokens,
     apply_delta_to_pool_amount, update_cumulative_borrowing_factor, update_funding_state,
 };
-use gmx_math::{mul_div_wide, TOKEN_PRECISION};
+use gmx_math::{mul_div_wide, mul_div_wide_up, TOKEN_PRECISION};
 use gmx_position_utils::{
     get_position_fees, get_position_pnl_usd, settle_funding_fees, validate_position,
 };
@@ -183,8 +183,16 @@ pub fn decrease_position(env: &Env, p: &DecreasePositionParams) -> DecreasePosit
 
     // 7. Realise PnL for the closing slice
     let (pnl_usd, _) = get_position_pnl_usd(env, &position, p.index_token_price, size_delta_usd);
+    // When converting PnL to tokens, use sign-aware rounding: round up the magnitude
+    // of any loss (negative pnl_usd) so the pool receives the full amount owed.
     let pnl_token_amount = if p.collateral_price > 0 {
-        mul_div_wide(env, pnl_usd, TOKEN_PRECISION, p.collateral_price)
+        if pnl_usd >= 0 {
+            mul_div_wide(env, pnl_usd, TOKEN_PRECISION, p.collateral_price)
+        } else {
+            let magnitude_rounded_up =
+                mul_div_wide_up(env, -pnl_usd, TOKEN_PRECISION, p.collateral_price);
+            -magnitude_rounded_up
+        }
     } else {
         0
     };
