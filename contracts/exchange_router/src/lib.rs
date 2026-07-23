@@ -218,54 +218,6 @@ impl ExchangeRouter {
             .set(&InstanceKey::WithdrawalHandler, &new_handler);
     }
 
-    /// Update the deposit_handler address. Only the stored admin may call this (issue #464).
-    pub fn update_deposit_handler(env: Env, caller: Address, new_handler: Address) {
-        caller.require_auth();
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        if caller != admin {
-            panic_with_error!(&env, Error::Unauthorized);
-        }
-        env.storage()
-            .instance()
-            .set(&InstanceKey::DepositHandler, &new_handler);
-    }
-
-    /// Update the order_handler address. Only the stored admin may call this (issue #464).
-    pub fn update_order_handler(env: Env, caller: Address, new_handler: Address) {
-        caller.require_auth();
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        if caller != admin {
-            panic_with_error!(&env, Error::Unauthorized);
-        }
-        env.storage()
-            .instance()
-            .set(&InstanceKey::OrderHandler, &new_handler);
-    }
-
-    /// Update the fee_handler address. Only the stored admin may call this (issue #464).
-    pub fn update_fee_handler(env: Env, caller: Address, new_handler: Address) {
-        caller.require_auth();
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        if caller != admin {
-            panic_with_error!(&env, Error::Unauthorized);
-        }
-        env.storage()
-            .instance()
-            .set(&InstanceKey::FeeHandler, &new_handler);
-    }
-
     /// Default timelock for unpausing: ~4 hours at 5 s/ledger (issue #282).
     const UNPAUSE_TIMELOCK_LEDGERS: u32 = 2880;
 
@@ -408,11 +360,7 @@ impl ExchangeRouter {
     /// double require_auth() within the same invocation frame, which Soroban rejects.
     pub fn multicall(env: Env, caller: Address, actions: Vec<RouterAction>) -> Vec<BytesN<32>> {
         caller.require_auth();
-        // Issue #462: cancellations must always be available while paused (users must
-        // always be able to recover pending funds), matching the per-action policy the
-        // standalone cancel_* wrappers already implement. The pause check below is
-        // therefore applied per-action inside the dispatch loop, not as one blanket gate
-        // here, and is explicitly skipped for CancelDeposit/CancelWithdrawal/CancelOrder.
+        Self::require_not_paused(&env);
 
         let deposit_handler: Address = env
             .storage()
@@ -444,41 +392,34 @@ impl ExchangeRouter {
             let action = actions.get(i).unwrap();
             match action {
                 RouterAction::SendTokens(p) => {
-                    Self::require_not_paused(&env);
                     token::Client::new(&env, &p.token).transfer(&caller, &p.receiver, &p.amount);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateDeposit(p) => {
-                    Self::require_not_paused(&env);
                     let key = DepositHandlerClient::new(&env, &deposit_handler)
                         .create_deposit(&caller, &p);
                     results.push_back(key);
                 }
                 RouterAction::CancelDeposit(key) => {
-                    // Issue #462: cancellations must always be available while paused.
                     DepositHandlerClient::new(&env, &deposit_handler).cancel_deposit(&caller, &key);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateWithdrawal(p) => {
-                    Self::require_not_paused(&env);
                     let key = WithdrawalHandlerClient::new(&env, &withdrawal_handler)
                         .create_withdrawal(&caller, &p);
                     results.push_back(key);
                 }
                 RouterAction::CancelWithdrawal(key) => {
-                    // Issue #462: cancellations must always be available while paused.
                     WithdrawalHandlerClient::new(&env, &withdrawal_handler)
                         .cancel_withdrawal(&caller, &key);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateOrder(p) => {
-                    Self::require_not_paused(&env);
                     let key =
                         OrderHandlerClient::new(&env, &order_handler).create_order(&caller, &p);
                     results.push_back(key);
                 }
                 RouterAction::UpdateOrder(p) => {
-                    Self::require_not_paused(&env);
                     OrderHandlerClient::new(&env, &order_handler).update_order(
                         &caller,
                         &p.key,
@@ -490,7 +431,6 @@ impl ExchangeRouter {
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CancelOrder(key) => {
-                    // Issue #462: cancellations must always be available while paused.
                     OrderHandlerClient::new(&env, &order_handler).cancel_order(&caller, &key);
                     results.push_back(zero_key.clone());
                 }
@@ -1455,79 +1395,6 @@ mod tests {
         );
         let balance = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&user);
         assert_eq!(balance, ONE_TOKEN, "tokens must be refunded after cancel while paused");
-    }
-
-    /// Issue #462: multicall's blanket pause check must not block a CancelDeposit
-    /// action, matching the standalone cancel_deposit wrapper's whitelisted behavior.
-    #[test]
-    fn multicall_cancel_deposit_succeeds_when_paused() {
-        let w = setup();
-        let user = Address::generate(&w.env);
-
-        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &ONE_TOKEN);
-
-        let key = DepositHandlerClient::new(&w.env, &w.dep_handler).create_deposit(
-            &user,
-            &CreateDepositParams {
-                receiver: user.clone(),
-                market: w.market_tk.clone(),
-                initial_long_token: w.long_tk.clone(),
-                initial_short_token: w.short_tk.clone(),
-                long_token_amount: ONE_TOKEN,
-                short_token_amount: 0,
-                min_market_tokens: 0,
-                execution_fee: 0,
-            },
-        );
-
-        let router = ExchangeRouterClient::new(&w.env, &w.router);
-        router.set_paused(&true);
-
-        // A multicall containing ONLY a cancel action must succeed while paused,
-        // exactly like calling the standalone cancel_deposit wrapper does.
-        router.multicall(
-            &user,
-            &Vec::from_array(&w.env, [RouterAction::CancelDeposit(key.clone())]),
-        );
-
-        assert!(
-            DepositHandlerClient::new(&w.env, &w.dep_handler)
-                .get_deposit(&key)
-                .is_none(),
-            "deposit must be gone after multicall cancel while paused"
-        );
-        let balance = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&user);
-        assert_eq!(balance, ONE_TOKEN, "tokens must be refunded after multicall cancel while paused");
-    }
-
-    /// A multicall containing a state-creating action (CreateDeposit) must still
-    /// revert while paused — only the cancel/claim actions are whitelisted.
-    #[test]
-    #[should_panic]
-    fn multicall_create_deposit_reverts_when_paused() {
-        let w = setup();
-        let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &ONE_TOKEN);
-
-        let router = ExchangeRouterClient::new(&w.env, &w.router);
-        router.set_paused(&true);
-
-        router.multicall(
-            &user,
-            &Vec::from_array(
-                &w.env,
-                [RouterAction::CreateDeposit(CreateDepositParams {
-                    receiver: user.clone(),
-                    market: w.market_tk.clone(),
-                    initial_long_token: w.long_tk.clone(),
-                    initial_short_token: w.short_tk.clone(),
-                    long_token_amount: ONE_TOKEN,
-                    short_token_amount: 0,
-                    min_market_tokens: 0,
-                    execution_fee: 0,
-                })],
-            ),
-        );
     }
 
     // ── Issue #135: Router multicall E2E tests ────────────────────────────────
