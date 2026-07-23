@@ -559,6 +559,11 @@ impl ExchangeRouter {
     /// For increase/swap orders in the batch the caller must pre-fund the
     /// order_vault via `SendTokens` before this call (one send per increase/swap leg).
     /// Any failure reverts the entire batch (Soroban atomicity).
+    ///
+    /// At most one increase/swap leg per distinct collateral token is supported
+    /// per batch (issue #454) — `record_transfer_in`'s shared per-token balance
+    /// delta cannot unambiguously attribute funds across two legs sharing a token.
+    /// A batch violating this reverts with `DuplicateCollateralTokenInBatch`.
     pub fn create_orders(
         env: Env,
         caller: Address,

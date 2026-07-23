@@ -105,6 +105,10 @@ pub enum Error {
     /// execute_order called after the order's user-set expiry_ledger (issue #272).
     /// The order is auto-cancelled and any collateral refunded to the user.
     OrderExpired = 20,
+    /// create_orders batch contains more than one increase/swap leg funded in the
+    /// same collateral token (issue #454) — record_transfer_in's shared per-token
+    /// balance delta can only unambiguously attribute one leg per token per batch.
+    DuplicateCollateralTokenInBatch = 21,
 }
 
 
@@ -456,6 +460,13 @@ impl OrderHandler {
     /// the caller must pre-fund the order_vault via SendTokens before calling this.
     /// `record_transfer_in` is called per increase/swap order to snapshot the delta.
     ///
+    /// At most one increase/swap leg per distinct `initial_collateral_token` is
+    /// supported per batch (issue #454): `record_transfer_in`'s balance delta is a
+    /// single running counter per token, so two legs sharing a token cannot be
+    /// unambiguously attributed. A batch violating this reverts up front with
+    /// `DuplicateCollateralTokenInBatch` instead of a confusing `ZeroCollateral`
+    /// panic partway through processing.
+    ///
     /// Returns the list of created order keys in the same order as `requests`.
     pub fn create_orders(
         env: Env,
@@ -485,6 +496,34 @@ impl OrderHandler {
         let mut keys: soroban_sdk::Vec<BytesN<32>> = soroban_sdk::Vec::new(&env);
 
         let len = requests.len();
+
+        // Issue #454: at most one increase/swap leg per distinct collateral token is
+        // supported per batch — record_transfer_in's shared per-token balance delta
+        // cannot unambiguously attribute funds across two legs using the same token,
+        // and the second such leg would otherwise see a non-positive delta and panic
+        // with a confusing ZeroCollateral rather than a clear, dedicated error.
+        {
+            let mut seen_tokens: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+            let mut j = 0u32;
+            while j < len {
+                let p = requests.get_unchecked(j);
+                let is_incr_or_swap = matches!(
+                    p.order_type,
+                    OrderType::MarketIncrease
+                        | OrderType::LimitIncrease
+                        | OrderType::StopIncrease
+                        | OrderType::MarketSwap
+                        | OrderType::LimitSwap
+                );
+                if is_incr_or_swap {
+                    if seen_tokens.contains(&p.initial_collateral_token) {
+                        panic_with_error!(&env, Error::DuplicateCollateralTokenInBatch);
+                    }
+                    seen_tokens.push_back(p.initial_collateral_token.clone());
+                }
+                j += 1;
+            }
+        }
         // Issue #300: read max path length once for the entire batch.
         let raw_max = ds.get_u128(&gmx_keys::max_swap_path_length_key(&env)) as usize;
         let max_swap_len = if raw_max == 0 { MAX_SWAP_PATH_LENGTH } else { raw_max };
@@ -3352,6 +3391,38 @@ mod tests {
         assert!(matches!(tp.order_type, OrderType::LimitDecrease));
         assert_eq!(sl.trigger_price, 1800 * fp);
         assert_eq!(tp.trigger_price, 2500 * fp);
+    }
+
+    /// Issue #454: two MarketIncrease legs sharing the same collateral token in one
+    /// batch must revert up front with DuplicateCollateralTokenInBatch, instead of
+    /// the first leg silently consuming the whole pre-funded balance and the second
+    /// leg panicking with a confusing ZeroCollateral.
+    #[test]
+    #[should_panic]
+    fn create_orders_two_increase_legs_same_collateral_token_reverts() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &(COLLATERAL * 2));
+
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let leg = CreateOrderParams {
+            receiver: w.user.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: Vec::new(&w.env),
+            size_delta_usd: 2000 * fp,
+            collateral_delta_amount: COLLATERAL,
+            trigger_price: 0,
+            acceptable_price: 0,
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketIncrease,
+            is_long: true,
+            expiry_ledger: None,
+        };
+        let requests = Vec::from_array(&w.env, [leg.clone(), leg]);
+        hc.create_orders(&w.user, &requests);
     }
 
     // ── Issue #232: cyclic swap_path rejected at create_order time ────────────
