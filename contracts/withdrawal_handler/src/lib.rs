@@ -15,8 +15,8 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    account_withdrawal_list_key, global_pause_key, market_index_token_key,
-    market_long_token_key, market_short_token_key, roles, withdrawal_key, withdrawal_list_key,
+    account_withdrawal_list_key, market_index_token_key, market_long_token_key,
+    market_short_token_key, roles, withdrawal_key, withdrawal_list_key,
 };
 use gmx_market_utils::{apply_delta_to_pool_amount, get_pool_amount};
 use gmx_math::mul_div_wide;
@@ -42,14 +42,6 @@ pub enum Error {
     ZeroWithdrawal = 7,
     InvalidMarket = 8,
     InvalidReceiver = 9,
-    /// Issue #461: global protocol pause, enforced here directly (not just at
-    /// the exchange_router level) so a direct call bypassing the router is
-    /// still blocked.
-    Paused = 10,
-    /// Issue #463: mirrors deposit_handler's InsufficientVaultBalance guard —
-    /// the pooled vault must actually hold at least what this record claims
-    /// before a cancellation can be refunded out of it.
-    InsufficientVaultBalance = 11,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -91,7 +83,6 @@ trait IDataStore {
     fn apply_delta_to_u128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> u128;
     fn apply_delta_to_i128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> i128;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
-    fn get_bool(env: Env, key: BytesN<32>) -> bool;
     fn add_bytes32_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
     fn remove_bytes32_from_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
     fn contains_bytes32(env: Env, set_key: BytesN<32>, value: BytesN<32>) -> bool;
@@ -108,8 +99,6 @@ trait IOracle {
 #[soroban_sdk::contractclient(name = "WithdrawalVaultClient")]
 trait IWithdrawalVault {
     fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128);
-    fn get_recorded_balance(env: Env, token: Address) -> i128;
-    fn record_transfer_in(env: Env, token: Address) -> i128;
 }
 
 #[allow(dead_code)]
@@ -219,12 +208,6 @@ impl WithdrawalHandler {
         let handler = env.current_contract_address();
         let ds = DataStoreClient::new(&env, &data_store);
 
-        // Issue #461: authoritative pause check — the router's own check can be
-        // bypassed by calling this handler directly, so it must gate here too.
-        if ds.get_bool(&global_pause_key(&env)) {
-            panic_with_error!(&env, Error::Paused);
-        }
-
         // Validate that the market token is a known market (index token must exist)
         if ds
             .get_address(&gmx_keys::market_index_token_key(&env, &params.market))
@@ -240,9 +223,6 @@ impl WithdrawalHandler {
             &withdrawal_vault,
             &params.market_token_amount,
         );
-        // Issue #463: record the vault's recorded balance so cancel_withdrawal's
-        // InsufficientVaultBalance guard has a real baseline to check against.
-        WithdrawalVaultClient::new(&env, &withdrawal_vault).record_transfer_in(&params.market);
 
         // Allocate withdrawal key from nonce
         let nonce = ds.increment_nonce(&handler);
@@ -284,12 +264,6 @@ impl WithdrawalHandler {
             .instance()
             .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        // Issue #461: a global pause must also stop the keeper from executing
-        // already-pending withdrawals, not just block new ones via the router.
-        if DataStoreClient::new(&env, &data_store).get_bool(&global_pause_key(&env)) {
-            panic_with_error!(&env, Error::Paused);
-        }
-
         let withdrawal_vault: Address = env
             .storage()
             .instance()
@@ -410,18 +384,8 @@ impl WithdrawalHandler {
             panic_with_error!(&env, Error::Unauthorized);
         }
 
-        let vault_client = WithdrawalVaultClient::new(&env, &withdrawal_vault);
-
-        // Issue #463: same InsufficientVaultBalance invariant deposit_handler's
-        // execute_deposit already enforces — the pooled vault must actually hold
-        // at least what this record claims before refunding it.
-        let actual = vault_client.get_recorded_balance(&withdrawal.market);
-        if actual < withdrawal.market_token_amount {
-            panic_with_error!(&env, Error::InsufficientVaultBalance);
-        }
-
         // Refund LP tokens
-        vault_client.transfer_out(
+        WithdrawalVaultClient::new(&env, &withdrawal_vault).transfer_out(
             &handler,
             &withdrawal.market,
             &withdrawal.account,

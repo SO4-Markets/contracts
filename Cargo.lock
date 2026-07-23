@@ -1798,7 +1798,6 @@ dependencies = [
  "gmx-position-utils",
  "gmx-pricing-utils",
  "gmx-types",
- "market-token",
  "oracle",
  "order-handler",
  "order-vault",
