@@ -951,7 +951,7 @@ impl OrderHandler {
                     &first_market,
                     &order.collateral_delta_amount,
                 );
-                let (_token_out, amount_out) = swap_with_path(
+                let (token_out, amount_out) = swap_with_path(
                     &env,
                     &data_store,
                     &handler,
@@ -964,6 +964,20 @@ impl OrderHandler {
                 if amount_out < order.min_output_amount {
                     panic_with_error!(&env, Error::PriceTooLow);
                 }
+                // Issue #440: dedicated swap-execution event carrying the actual
+                // output token/amount, instead of discarding them and falling
+                // back to the generic key+account-only execution event below.
+                env.events().publish(
+                    (symbol_short!("ord_swp"),),
+                    (
+                        key.clone(),
+                        order.account.clone(),
+                        order.initial_collateral_token.clone(),
+                        token_out,
+                        order.collateral_delta_amount,
+                        amount_out,
+                    ),
+                );
             }
 
             OrderType::MarketIncrease | OrderType::LimitIncrease | OrderType::StopIncrease => {
