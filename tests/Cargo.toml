@@ -82,3 +82,7 @@ path = "multi_market_execution.rs"
 [[test]]
 name = "short_position_lifecycle"
 path = "short_position_lifecycle.rs"
+
+[[test]]
+name = "lp_fee_distribution"
+path = "lp_fee_distribution.rs"
