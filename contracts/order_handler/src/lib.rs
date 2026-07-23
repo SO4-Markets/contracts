@@ -24,8 +24,7 @@ use gmx_keys::{
     market_index_token_key, market_long_token_key, market_short_token_key,
     max_leverage_key, max_swap_path_length_key, order_key, order_list_key,
     position_fee_factor_key, position_key,
-    max_leverage_key, open_interest_key, order_key, order_list_key,
-    position_fee_factor_key, position_key,
+    open_interest_key,
     saved_funding_factor_per_second_key,
     fee_tier_position_fee_factor_key, fee_tier_volume_threshold_key,
     trader_volume_key, trader_volume_window_start_key,
@@ -785,7 +784,7 @@ impl OrderHandler {
             .persistent()
             .get::<OrderStorageKey, u64>(&OrderStorageKey::OrderExpiry(key.clone()))
         {
-            if env.ledger().sequence() > expiry {
+            if u64::from(env.ledger().sequence()) > expiry {
                 // Refund collateral for increase/swap orders that deposited into the vault.
                 let order_vault_addr: Address = env
                     .storage()
@@ -1235,7 +1234,7 @@ impl OrderHandler {
             .get(&OrderStorageKey::OrderExpiry(key.clone()))
             .unwrap_or_else(|| panic_with_error!(&env, Error::OrderNotFound));
 
-        if env.ledger().sequence() <= expiry {
+        if u64::from(env.ledger().sequence()) <= expiry {
             panic_with_error!(&env, Error::UnsatisfiedTrigger);
         }
 

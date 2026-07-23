@@ -42,7 +42,6 @@ enum DataKey {
     B32Set(BytesN<32>),
     // Instance-tier cache variants for market config (#299)
     InstanceU128(BytesN<32>),
-    InstanceU128(BytesN<32>),
     InstanceI128(BytesN<32>),
 }
 

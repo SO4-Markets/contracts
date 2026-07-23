@@ -12,7 +12,7 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use gmx_keys::{account_position_list_key, pool_amount_key, position_fee_factor_key, position_key, position_list_key};
+use gmx_keys::{account_position_list_key, collateral_sum_key, pool_amount_key, position_fee_factor_key, position_key, position_list_key};
 use gmx_market_utils::{
     apply_delta_to_open_interest, apply_delta_to_open_interest_in_tokens,
 };
@@ -153,9 +153,16 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
     };
     if fee_tokens > 0 {
         let pool_key = pool_amount_key(env, &p.market.market_token, p.collateral_token);
-        ds.apply_delta_to_u128(p.caller, &pool_key, fee_tokens);
+        ds.apply_delta_to_u128(p.caller, &pool_key, &fee_tokens);
     }
     position.collateral_amount += net_collateral;
+
+    // Credit collateral_sum so decrease_position_utils (which debits it on close)
+    // never underflows a bucket that increase_position never funded.
+    if net_collateral > 0 {
+        let col_sum_key = collateral_sum_key(env, &p.market.market_token, p.collateral_token, p.is_long);
+        ds.apply_delta_to_u128(p.caller, &col_sum_key, &net_collateral);
+    }
 
     // Update position size
     position.size_in_usd += p.size_delta_usd;

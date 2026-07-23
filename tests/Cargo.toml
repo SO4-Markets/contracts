@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-soroban-sdk = { workspace = true }
+soroban-sdk = { workspace = true, features = ["testutils"] }
 gmx-types = { path = "../libs/types" }
 gmx-keys = { path = "../libs/keys" }
 gmx-math = { path = "../libs/math" }
@@ -13,7 +13,7 @@ gmx-market-utils = { path = "../libs/market_utils" }
 # Contracts
 data-store = { path = "../contracts/data_store" }
 role-store = { path = "../contracts/role_store" }
-oracle = { path = "../contracts/oracle" }
+oracle = { path = "../contracts/oracle", features = ["testutils"] }
 order-handler = { path = "../contracts/order_handler" }
 order-vault = { path = "../contracts/order_vault" }
 deposit-vault = { path = "../contracts/deposit_vault" }
@@ -29,7 +29,7 @@ order-cleanup = { path = "../contracts/order_cleanup" }
 
 [lib]
 path = "lib.rs"
-crate-type = ["cdylib"]
+crate-type = ["lib"]
 
 [[test]]
 name = "stop_loss"
@@ -66,6 +66,8 @@ path = "adl.rs"
 [[test]]
 name = "liquidation"
 path = "liquidation.rs"
+
+[[test]]
 name = "zero_amount_validation"
 path = "zero_amount_validation.rs"
 
@@ -76,3 +78,7 @@ path = "contract_upgrade.rs"
 [[test]]
 name = "multi_market_execution"
 path = "multi_market_execution.rs"
+
+[[test]]
+name = "short_position_lifecycle"
+path = "short_position_lifecycle.rs"
