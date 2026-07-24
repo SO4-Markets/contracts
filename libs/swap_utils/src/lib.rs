@@ -84,8 +84,16 @@ fn swap_with_prices(
         for_positive_impact,
     );
 
+    // The caller already physically transferred `amount_in` of `token_in` into
+    // this market before invoking this function (see the token-movement notes
+    // above). If a hop's amount_out rounds to zero — easily reached with small
+    // amounts, since fee rounding always rounds a nonzero fee up to at least 1
+    // unit — silently returning here would leave those tokens un-credited to
+    // pool_amount forever, even though the order-level min_output_amount check
+    // (or an intermediate hop with no such check at all) would not catch it.
+    // Revert instead so no on-chain transfer executes with unaccounted-for input.
     if amount_out == 0 {
-        return (token_out.clone(), 0);
+        soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(4u32));
     }
 
     // 3. Apply swap impact to impact pool (denominated in token_out)

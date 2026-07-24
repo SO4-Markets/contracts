@@ -2704,6 +2704,31 @@ mod tests {
         );
     }
 
+    /// Issue #375: a swap hop whose amount_out rounds to zero must revert
+    /// instead of silently succeeding — otherwise the input tokens, already
+    /// physically transferred into the market, would be stranded with no
+    /// pool_amount credit and no way to sweep them back out.
+    #[test]
+    #[should_panic]
+    fn limit_swap_zero_output_hop_reverts_instead_of_stranding_funds() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        seed_pool(&w);
+
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+
+        set_prices(&w, 2000 * fp);
+        // A single smallest-unit of short_tk (worth $1) converted at a
+        // long_tk price of $2000 rounds down to 0 long_tk out, before fees
+        // even apply. min_output_amount=0 ("no slippage floor") must not
+        // let this silently succeed with amount_out == 0.
+        let key = create_limit_swap_order(&w, &user, 1i128, &w.short_tk, 0, 0);
+
+        set_prices(&w, 2000 * fp);
+        OrderHandlerClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
+    }
+
     // ── Issue #59/#60: configured max swap path length enforced ───────────────
 
     #[test]
