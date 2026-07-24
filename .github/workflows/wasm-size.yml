@@ -98,9 +98,16 @@ jobs:
           size_dir = "/tmp/wasm-sizes"
           files = set()
 
+          # Keep in sync with TEST_CONTRACTS in scripts/gen_baseline.py: these
+          # crates are test fixtures, not production contracts, and are exempt
+          # from the size budget.
+          TEST_CONTRACTS = {"test_faucet", "test_token"}
+
           for fname in os.listdir(size_dir):
               if fname.startswith("pr_"):
-                  files.add(fname[3:])   # strip "pr_" prefix to get contract name
+                  name = fname[3:]   # strip "pr_" prefix to get contract name
+                  if name not in TEST_CONTRACTS:
+                      files.add(name)
 
           WARN_THRESHOLD  = 0.05   # 5%
           BLOCK_THRESHOLD = 0.10   # 10%
