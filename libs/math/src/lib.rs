@@ -559,4 +559,74 @@ mod tests {
         assert_eq!(mul_div_wide_up(&env, 12345, FLOAT_PRECISION, 0), 0);
         assert_eq!(mul_div(12345, FLOAT_PRECISION, 0), 0);
     }
+
+    /// mul_div_wide saturates to i128::MAX when the true result exceeds i128 range.
+    /// This tests the previously untested overflow fallback behavior (issue #384).
+    #[test]
+    fn mul_div_wide_overflow_saturates_to_max() {
+        let env = Env::default();
+        // Large positive values: i128::MAX * i128::MAX / 1 would overflow.
+        // Result should saturate to i128::MAX rather than panic or wrap.
+        let result = mul_div_wide(&env, i128::MAX, i128::MAX, 1);
+        assert_eq!(
+            result, i128::MAX,
+            "mul_div_wide with overflow should saturate to i128::MAX"
+        );
+    }
+
+    /// mul_div_wide saturates to i128::MIN when the true result is sufficiently negative.
+    /// This tests the previously untested overflow fallback behavior (issue #384).
+    #[test]
+    fn mul_div_wide_negative_overflow_saturates_to_min() {
+        let env = Env::default();
+        // Large negative × positive: i128::MIN * i128::MAX / 1 would overflow.
+        // Result should saturate to i128::MIN rather than panic or wrap.
+        let result = mul_div_wide(&env, i128::MIN, i128::MAX, 1);
+        assert_eq!(
+            result, i128::MIN,
+            "mul_div_wide with negative overflow should saturate to i128::MIN"
+        );
+    }
+
+    /// mul_div_wide_up saturates when result exceeds i128 range.
+    /// Verifies ceiling-division saturation behavior (issue #384).
+    #[test]
+    fn mul_div_wide_up_overflow_saturates_to_max() {
+        let env = Env::default();
+        // Large positive values that would overflow: i128::MAX * i128::MAX / 1.
+        // Ceiling division should also saturate to i128::MAX.
+        let result = mul_div_wide_up(&env, i128::MAX, i128::MAX, 1);
+        assert_eq!(
+            result, i128::MAX,
+            "mul_div_wide_up with overflow should saturate to i128::MAX"
+        );
+    }
+
+    /// mul_div_wide_up saturates to i128::MIN for negative overflow cases.
+    /// Verifies ceiling-division saturation behavior (issue #384).
+    #[test]
+    fn mul_div_wide_up_negative_overflow_saturates_to_min() {
+        let env = Env::default();
+        // Negative overflow: i128::MIN * i128::MAX / 1.
+        // Should saturate to i128::MIN despite ceiling-division logic.
+        let result = mul_div_wide_up(&env, i128::MIN, i128::MAX, 1);
+        assert_eq!(
+            result, i128::MIN,
+            "mul_div_wide_up with negative overflow should saturate to i128::MIN"
+        );
+    }
+
+    /// mul_div_wide correctly handles large but non-overflowing cases.
+    /// Ensures overflow detection doesn't break normal large-value arithmetic.
+    #[test]
+    fn mul_div_wide_large_but_safe_values() {
+        let env = Env::default();
+        // FLOAT_PRECISION * FLOAT_PRECISION / FLOAT_PRECISION = FLOAT_PRECISION.
+        // This is large but fits safely in i128 and i256.
+        let result = mul_div_wide(&env, FLOAT_PRECISION, FLOAT_PRECISION, FLOAT_PRECISION);
+        assert_eq!(
+            result, FLOAT_PRECISION,
+            "mul_div_wide must correctly compute (FP * FP) / FP = FP"
+        );
+    }
 }
