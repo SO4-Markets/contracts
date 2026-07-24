@@ -6,6 +6,7 @@
 //! and `cover_shortfall` before charging the pool.
 #![no_std]
 
+use gmx_keys::roles;
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
     Address, Bytes, BytesN, Env,
@@ -21,6 +22,7 @@ pub enum Error {
     MissingInsuranceFund = 2,
     MissingMarketPool = 3,
     MissingTreasury = 4,
+    Unauthorized = 5,
 }
 
 #[allow(dead_code)]
@@ -30,6 +32,19 @@ trait IDataStore {
     fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
     fn set_address(env: Env, caller: Address, key: BytesN<32>, value: Address) -> Address;
+}
+
+#[allow(dead_code)]
+#[soroban_sdk::contractclient(name = "RoleStoreClient")]
+trait IRoleStore {
+    fn has_role(env: Env, account: Address, role: BytesN<32>) -> bool;
+}
+
+fn require_controller(env: &Env, role_store: &Address, caller: &Address) {
+    caller.require_auth();
+    if !RoleStoreClient::new(env, role_store).has_role(caller, &roles::controller(env)) {
+        panic_with_error!(env, Error::Unauthorized);
+    }
 }
 
 #[contractevent(topics = ["if_cfg"])]
@@ -151,12 +166,13 @@ impl InsuranceFundRouter {
     pub fn route_liquidation_penalty(
         env: Env,
         data_store: Address,
+        role_store: Address,
         market: Address,
         token: Address,
         source: Address,
         liquidation_penalty: u128,
     ) -> PenaltySplit {
-        source.require_auth();
+        require_controller(&env, &role_store, &source);
         let ds = DataStoreClient::new(&env, &data_store);
         let allocation_bps = ds.get_u128(&insurance_fund_allocation_bps_key(&env, &market));
         let insurance_share = liquidation_penalty.saturating_mul(allocation_bps) / BPS_DIVISOR;
@@ -193,10 +209,13 @@ impl InsuranceFundRouter {
     pub fn cover_shortfall(
         env: Env,
         data_store: Address,
+        role_store: Address,
+        caller: Address,
         market: Address,
         token: Address,
         shortfall_amount: u128,
     ) -> ShortfallCoverage {
+        require_controller(&env, &role_store, &caller);
         let ds = DataStoreClient::new(&env, &data_store);
         let fund = ds
             .get_address(&insurance_fund_address_key(&env, &market))
@@ -288,6 +307,7 @@ mod tests {
     struct World {
         env: Env,
         admin: Address,
+        rs: Address,
         ds: Address,
         router: Address,
         token: Address,
@@ -315,6 +335,7 @@ mod tests {
         World {
             env,
             admin,
+            rs,
             ds,
             router,
             token,
@@ -358,8 +379,10 @@ mod tests {
 
         StellarAssetClient::new(&w.env, &w.token).mint(&source, &1_000i128);
         client.configure_treasury(&w.ds, &w.admin, &treasury);
+        RsClient::new(&w.env, &w.rs).grant_role(&w.admin, &source, &roles::controller(&w.env));
 
-        let split = client.route_liquidation_penalty(&w.ds, &market, &w.token, &source, &1_000u128);
+        let split =
+            client.route_liquidation_penalty(&w.ds, &w.rs, &market, &w.token, &source, &1_000u128);
 
         assert_eq!(split.treasury_share, 1_000);
         let token_client = token::TokenClient::new(&w.env, &w.token);
@@ -376,7 +399,22 @@ mod tests {
         let source = Address::generate(&w.env);
 
         StellarAssetClient::new(&w.env, &w.token).mint(&source, &1_000i128);
-        client.route_liquidation_penalty(&w.ds, &market, &w.token, &source, &1_000u128);
+        RsClient::new(&w.env, &w.rs).grant_role(&w.admin, &source, &roles::controller(&w.env));
+        client.route_liquidation_penalty(&w.ds, &w.rs, &market, &w.token, &source, &1_000u128);
+    }
+
+    #[test]
+    #[should_panic]
+    fn route_liquidation_penalty_panics_without_controller_role() {
+        let w = setup();
+        let client = InsuranceFundRouterClient::new(&w.env, &w.router);
+        let market = Address::generate(&w.env);
+        let source = Address::generate(&w.env);
+        let treasury = Address::generate(&w.env);
+
+        StellarAssetClient::new(&w.env, &w.token).mint(&source, &1_000i128);
+        client.configure_treasury(&w.ds, &w.admin, &treasury);
+        client.route_liquidation_penalty(&w.ds, &w.rs, &market, &w.token, &source, &1_000u128);
     }
 
     #[test]
@@ -391,7 +429,8 @@ mod tests {
         client.configure_insurance_fund(&w.ds, &w.admin, &market, &fund, &5_000u32);
         client.configure_market_pool(&w.ds, &w.admin, &market, &pool);
 
-        let coverage = client.cover_shortfall(&w.ds, &market, &w.token, &600u128);
+        let coverage =
+            client.cover_shortfall(&w.ds, &w.rs, &w.admin, &market, &w.token, &600u128);
 
         assert_eq!(coverage.covered_by_fund, 600);
         assert_eq!(coverage.pool_remainder, 0);
@@ -410,6 +449,22 @@ mod tests {
 
         StellarAssetClient::new(&w.env, &w.token).mint(&fund, &1_000i128);
         client.configure_insurance_fund(&w.ds, &w.admin, &market, &fund, &5_000u32);
-        client.cover_shortfall(&w.ds, &market, &w.token, &600u128);
+        client.cover_shortfall(&w.ds, &w.rs, &w.admin, &market, &w.token, &600u128);
+    }
+
+    #[test]
+    #[should_panic]
+    fn cover_shortfall_panics_without_controller_role() {
+        let w = setup();
+        let client = InsuranceFundRouterClient::new(&w.env, &w.router);
+        let market = Address::generate(&w.env);
+        let fund = Address::generate(&w.env);
+        let pool = Address::generate(&w.env);
+        let stranger = Address::generate(&w.env);
+
+        StellarAssetClient::new(&w.env, &w.token).mint(&fund, &1_000i128);
+        client.configure_insurance_fund(&w.ds, &w.admin, &market, &fund, &5_000u32);
+        client.configure_market_pool(&w.ds, &w.admin, &market, &pool);
+        client.cover_shortfall(&w.ds, &w.rs, &stranger, &market, &w.token, &600u128);
     }
 }
