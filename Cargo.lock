@@ -1279,6 +1279,9 @@ checksum = "8e04e2fd2b8188ea827b32ef11de88377086d690286ab35747ef7f9bf3ccb590"
 name = "insurance-fund-router"
 version = "0.1.0"
 dependencies = [
+ "data-store",
+ "gmx-keys",
+ "role-store",
  "soroban-sdk",
 ]
 
@@ -1798,6 +1801,7 @@ dependencies = [
  "gmx-position-utils",
  "gmx-pricing-utils",
  "gmx-types",
+ "market-token",
  "oracle",
  "order-handler",
  "order-vault",

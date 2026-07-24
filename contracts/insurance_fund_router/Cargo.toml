@@ -12,3 +12,6 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+gmx-keys    = { path = "../../libs/keys" }
+role-store  = { path = "../role_store" }
+data-store  = { path = "../data_store" }
