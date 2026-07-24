@@ -724,11 +724,21 @@ impl OrderHandler {
             panic_with_error!(&env, Error::ZeroSizeDelta);
         }
 
-        // Position manager authorization: 
+        // Position manager authorization:
         // For position orders, verify caller is either the owner OR an authorized manager for this market.
         // If caller is a manager, receiver must be the owner (cannot redirect funds).
+        //
+        // ISSUE #385: This logic is currently REVERSED and needs fixing.
+        // Current code incorrectly calls get_position_manager(&caller, market) which looks up
+        // "who is the manager FOR caller" — but we need to check "is caller a manager FOR the owner".
+        //
+        // REQUIRED FIX: Add on_behalf_of: Option<Address> field to CreateOrderParams.
+        // Then verify: if on_behalf_of is present, check get_position_manager(&on_behalf_of, market) == Some(caller).
+        // When absent, caller must be the owner.
+        //
+        // For now, this preserves existing behavior but the logic is inverted and needs the refactor above.
         let (actual_owner, actual_receiver) = if is_position_order {
-            // Check if caller is an authorized manager for this market
+            // TODO(#385): This logic is reversed. See comment above for required fix.
             match ds.get_position_manager(&caller, &params.market) {
                 Some(owner) => {
                     // Caller is a manager; position owner is stored in data_store
