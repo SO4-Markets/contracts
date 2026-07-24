@@ -278,6 +278,7 @@ impl Oracle {
     }
 
     /// Returns pinned stable price from data_store, or None if not configured.
+    /// Validates that the price is positive and fits in i128 before returning.
     pub fn get_stable_price(env: Env, token: Address) -> Option<i128> {
         let data_store: Address = env
             .storage()
@@ -285,15 +286,19 @@ impl Oracle {
             .get(&InstanceKey::DataStore)
             .unwrap();
         let key = stable_price_key(&env, &token);
-        let price = DataStoreClient::new(&env, &data_store).get_u128(&key) as i128;
-        if price == 0 {
+        let price_u128 = DataStoreClient::new(&env, &data_store).get_u128(&key);
+
+        // Reject if zero or if the value would cast to a negative i128
+        // (i128::MAX = 2^127 - 1 = 9223372036854775807)
+        if price_u128 == 0 || price_u128 > i128::MAX as u128 {
             None
         } else {
-            Some(price)
+            Some(price_u128 as i128)
         }
     }
 
     /// Convenience: returns stable price if available, otherwise primary price.
+    /// Validates that any stable price is positive and fits in i128 before using it.
     pub fn get_price_with_stable_fallback(env: Env, token: Address) -> PriceProps {
         let data_store: Address = env
             .storage()
@@ -301,13 +306,19 @@ impl Oracle {
             .get(&InstanceKey::DataStore)
             .unwrap();
         let key = stable_price_key(&env, &token);
-        let stable = DataStoreClient::new(&env, &data_store).get_u128(&key) as i128;
-        if stable > 0 {
+        let stable_u128 = DataStoreClient::new(&env, &data_store).get_u128(&key);
+
+        // Use stable price only if it's positive and fits in i128
+        // (i128::MAX = 2^127 - 1 = 9223372036854775807)
+        if stable_u128 > 0 && stable_u128 <= i128::MAX as u128 {
+            let stable = stable_u128 as i128;
             return PriceProps {
                 min: stable,
                 max: stable,
             };
         }
+
+        // Fall back to primary price from temporary storage
         let stored: StoredPrice = env
             .storage()
             .temporary()
