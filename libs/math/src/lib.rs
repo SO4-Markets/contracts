@@ -559,4 +559,44 @@ mod tests {
         assert_eq!(mul_div_wide_up(&env, 12345, FLOAT_PRECISION, 0), 0);
         assert_eq!(mul_div(12345, FLOAT_PRECISION, 0), 0);
     }
+
+    /// mul_div_wide saturates to i128::MAX when result exceeds i128 range (issue #384).
+    #[test]
+    fn mul_div_wide_overflow_saturates_to_max() {
+        let env = Env::default();
+        let result = mul_div_wide(&env, i128::MAX, i128::MAX, 1);
+        assert_eq!(result, i128::MAX, "mul_div_wide overflow should saturate to i128::MAX");
+    }
+
+    /// mul_div_wide saturates to i128::MIN for negative overflow (issue #384).
+    #[test]
+    fn mul_div_wide_negative_overflow_saturates_to_min() {
+        let env = Env::default();
+        let result = mul_div_wide(&env, i128::MIN, i128::MAX, 1);
+        assert_eq!(result, i128::MIN, "mul_div_wide negative overflow should saturate to i128::MIN");
+    }
+
+    /// mul_div_wide_up saturates when result exceeds i128 range (issue #384).
+    #[test]
+    fn mul_div_wide_up_overflow_saturates_to_max() {
+        let env = Env::default();
+        let result = mul_div_wide_up(&env, i128::MAX, i128::MAX, 1);
+        assert_eq!(result, i128::MAX, "mul_div_wide_up overflow should saturate to i128::MAX");
+    }
+
+    /// mul_div_wide_up saturates to i128::MIN for negative overflow (issue #384).
+    #[test]
+    fn mul_div_wide_up_negative_overflow_saturates_to_min() {
+        let env = Env::default();
+        let result = mul_div_wide_up(&env, i128::MIN, i128::MAX, 1);
+        assert_eq!(result, i128::MIN, "mul_div_wide_up negative overflow should saturate to i128::MIN");
+    }
+
+    /// mul_div_wide handles large but safe values correctly (issue #384).
+    #[test]
+    fn mul_div_wide_large_but_safe_values() {
+        let env = Env::default();
+        let result = mul_div_wide(&env, FLOAT_PRECISION, FLOAT_PRECISION, FLOAT_PRECISION);
+        assert_eq!(result, FLOAT_PRECISION, "mul_div_wide(FP*FP)/FP must equal FP");
+    }
 }
