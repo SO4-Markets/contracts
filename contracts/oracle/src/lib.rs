@@ -375,7 +375,11 @@ impl Oracle {
 
         let key = keeper_pubkey_storage_key(&env, keeper_index);
         let old_pubkey = DataStoreClient::new(&env, &data_store).get_bytes32(&key);
-        DataStoreClient::new(&env, &data_store).set_bytes32(&caller, &key, &new_pubkey);
+        DataStoreClient::new(&env, &data_store).set_bytes32(
+            &env.current_contract_address(),
+            &key,
+            &new_pubkey,
+        );
 
         env.events().publish(
             (symbol_short!("sig_rot"),),

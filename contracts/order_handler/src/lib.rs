@@ -898,9 +898,12 @@ impl OrderHandler {
                     &account_order_list_key(&env, &order.account),
                     &key,
                 );
+                // Match the 4-field payload published by cleanup_expired_order so
+                // subscribers to this topic can rely on one stable schema; there is
+                // no permissionless caller or incentive on this auto-cancel path.
                 env.events().publish(
                     (symbol_short!("ord_exp"),),
-                    (key.clone(), order.account.clone()),
+                    (key.clone(), order.account.clone(), keeper.clone(), 0i128),
                 );
                 panic_with_error!(&env, Error::OrderExpired);
             }
