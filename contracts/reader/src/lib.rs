@@ -750,7 +750,6 @@ impl Reader {
         position_key: BytesN<32>,
     ) -> Option<PositionInfo> {
         OrderHandlerClient::new(&env, &order_handler).bump_position_ttl(&env.current_contract_address(), &position_key);
-        OrderHandlerClient::new(&env, &order_handler).bump_position_ttl(&env.current_contract_address(), &position_key);
         let position: PositionProps =
             match OrderHandlerClient::new(&env, &order_handler).get_position(&position_key) {
                 Some(p) => p,
