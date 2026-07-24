@@ -160,8 +160,18 @@ impl AdlHandler {
             return false;
         }
 
-        // Maximize trader PnL (worst case for pool)
-        let pnl = get_pnl(&env, &data_store, &market_props, index_price, is_long, true);
+        // Maximize trader PnL (worst case for pool): get_pnl takes a single
+        // already-resolved price, so resolve the maximize-appropriate bound
+        // here via pick_price_for_pnl before calling (issue #377).
+        let pnl_index_price = index_price_props.pick_price_for_pnl(is_long, true);
+        let pnl = get_pnl(
+            &env,
+            &data_store,
+            &market_props,
+            pnl_index_price,
+            is_long,
+            true,
+        );
         if pnl <= 0 {
             return false;
         }
@@ -641,6 +651,89 @@ mod tests {
             &w.long_tk,
             &true,
             &(500 * fp),
+        );
+    }
+
+    // ── Issue #377: get_pnl's maximize parameter must actually bound the price ─
+
+    /// index_tk with a min/max spread: long_tk/short_tk (which drive pool
+    /// value) stay pegged, so only the index-price bound fed into the PnL
+    /// calculation changes between calls.
+    fn set_index_spread(w: &World, pool_price: i128, index_min: i128, index_max: i128) {
+        let fp = FLOAT_PRECISION;
+        OClient::new(&w.env, &w.oracle).set_prices_simple(
+            &w.keeper,
+            &Vec::from_array(
+                &w.env,
+                [
+                    TokenPrice {
+                        token: w.long_tk.clone(),
+                        min: pool_price,
+                        max: pool_price,
+                    },
+                    TokenPrice {
+                        token: w.short_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: w.index_tk.clone(),
+                        min: index_min,
+                        max: index_max,
+                    },
+                ],
+            ),
+        );
+    }
+
+    /// Before the fix, get_pnl ignored `maximize` and always used a single
+    /// resolved price, so a wide index-price spread had no effect on the
+    /// reported PnL ratio. After the fix, adl_handler resolves the index
+    /// price via `pick_price_for_pnl(is_long, true)` before calling get_pnl,
+    /// so widening the spread (raising `max` while holding pool value's
+    /// mid-priced inputs fixed) must raise the long PnL factor and can push
+    /// `is_adl_required` from false to true.
+    #[test]
+    fn is_adl_required_reflects_index_price_max_bound_for_long_pnl() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let trader = Address::generate(&w.env);
+
+        let entry_price = 1_000 * fp;
+        set_prices(&w, entry_price);
+        seed_pool(&w, ONE_TOKEN * 200);
+        set_prices(&w, entry_price);
+
+        open_long(&w, &trader, 5 * ONE_TOKEN, 10_000 * fp);
+
+        // A threshold that a narrow (mid=2000) spread will not exceed, but
+        // that widening `max` alone (still mid=2000) does exceed.
+        let threshold = fp / 20; // 5%
+        DsClient::new(&w.env, &w.ds).set_u128(
+            &w.admin,
+            &max_pnl_factor_for_adl_key(&w.env, &w.market_tk, true),
+            &(threshold as u128),
+        );
+
+        // Narrow spread: min = max = 2000 → mid = 2000.
+        set_index_spread(&w, 2_000 * fp, 2_000 * fp, 2_000 * fp);
+        let required_narrow =
+            AdlHandlerClient::new(&w.env, &w.adl_handler).is_adl_required(&w.market_tk, &true);
+
+        // Wide spread: min = 1000, max = 3000 → mid is still 2000, but the
+        // maximize=true long PnL bound is now 3000.
+        set_index_spread(&w, 2_000 * fp, 1_000 * fp, 3_000 * fp);
+        let required_wide =
+            AdlHandlerClient::new(&w.env, &w.adl_handler).is_adl_required(&w.market_tk, &true);
+
+        assert!(
+            !required_narrow,
+            "narrow spread (mid=2000) must not exceed the 5% threshold"
+        );
+        assert!(
+            required_wide,
+            "widening the index-price max bound must raise the long PnL factor past the threshold, \
+             proving `maximize` now actually selects the max price instead of being ignored"
         );
     }
 

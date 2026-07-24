@@ -96,6 +96,7 @@ pub enum Error {
     InvalidCodeCharacters = 10,
     EmptyCode = 11,
     InvalidTierConfig = 12,
+    SelfReferralNotAllowed = 13,
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -173,22 +174,22 @@ impl ReferralStorage {
     pub fn set_trader_referral_code(env: Env, trader: Address, code: Bytes) {
         trader.require_auth();
         // Validate code exists
-        if !env
-            .storage()
-            .persistent()
-            .has(&ReferralKey::CodeOwner(code.clone()))
-        {
-            panic_with_error!(&env, Error::CodeNotFound);
+        let owner_key = ReferralKey::CodeOwner(code.clone());
+        let owner: Address = match env.storage().persistent().get(&owner_key) {
+            Some(owner) => owner,
+            None => panic_with_error!(&env, Error::CodeNotFound),
+        };
+        // Reject self-referral: a trader may not link to a code they own,
+        // which would let them collect both the trader-side discount and
+        // the referrer-side rebate on their own volume.
+        if owner == trader {
+            panic_with_error!(&env, Error::SelfReferralNotAllowed);
         }
         let trader_key = ReferralKey::TraderCode(trader.clone());
         env.storage().persistent().set(&trader_key, &code);
         env.storage().persistent().extend_ttl(&trader_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         // Also keep the code-owner entry alive while a trader references it.
-        let owner_key = ReferralKey::CodeOwner(code.clone());
         env.storage().persistent().extend_ttl(&owner_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
-        env.storage()
-            .persistent()
-            .set(&ReferralKey::TraderCode(trader.clone()), &code);
         env.events().publish_event(&TraderCodeSet { trader, code });
     }
 
@@ -847,6 +848,37 @@ mod tests {
                 Error::InvalidCodeCharacters as u32
             )))
         );
+    }
+
+    // ─── Issue #378: self-referral guard ─────────────────────────────────────
+
+    /// A trader linking to a code they own themselves must revert with
+    /// SelfReferralNotAllowed, preventing self-referral fee/rebate stacking.
+    #[test]
+    fn set_trader_referral_code_self_referral_reverts() {
+        let w = setup();
+        let trader = Address::generate(&w.env);
+        let code = make_code(&w.env, 1);
+        client(&w).register_code(&trader, &code);
+        let result = client(&w).try_set_trader_referral_code(&trader, &code);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::SelfReferralNotAllowed as u32
+            )))
+        );
+    }
+
+    /// A trader linking to a code owned by someone else must still succeed.
+    #[test]
+    fn set_trader_referral_code_third_party_succeeds() {
+        let w = setup();
+        let trader = Address::generate(&w.env);
+        let referrer = Address::generate(&w.env);
+        let code = make_code(&w.env, 2);
+        client(&w).register_code(&referrer, &code);
+        client(&w).set_trader_referral_code(&trader, &code);
+        assert_eq!(client(&w).get_trader_referrer(&trader), Some(referrer));
     }
 
     /// Code of exactly MAX_REFERRAL_CODE_LENGTH characters must succeed.

@@ -288,15 +288,26 @@ pub fn get_execution_price(
     index_price: i128,
     size_delta_usd: i128,
     price_impact_usd: i128,
-    _is_long: bool,
-    _is_increase: bool,
+    is_long: bool,
+    is_increase: bool,
 ) -> i128 {
     if size_delta_usd == 0 || index_price == 0 {
         return index_price;
     }
 
+    // A cost (negative) price impact must raise the execution price on a "buy"
+    // (long-increase or short-decrease) but lower it on a "sell" (long-decrease
+    // or short-increase). Flip the sign on the sell side before folding the
+    // impact into size_delta_usd so the two scenarios move in opposite directions.
+    let is_buy = is_long == is_increase;
+    let signed_impact_usd = if is_buy {
+        price_impact_usd
+    } else {
+        -price_impact_usd
+    };
+
     // Adjusted size after price impact
-    let adjusted_size = size_delta_usd + price_impact_usd;
+    let adjusted_size = size_delta_usd + signed_impact_usd;
     if adjusted_size <= 0 {
         return index_price;
     }
@@ -820,6 +831,64 @@ mod tests {
         assert!(
             exec_price > index_price,
             "negative impact must raise execution price for long: exec={exec_price}, index={index_price}"
+        );
+    }
+
+    // ── Issue #376: buy/sell sign flip for get_execution_price ────────────────
+
+    /// Long-decrease (a "sell") with a cost (negative) price impact must LOWER
+    /// the execution price below index_price — the opposite of a long-increase
+    /// ("buy"), so the acceptable_price floor a trader configured for a close
+    /// actually protects them.
+    #[test]
+    fn property_negative_impact_lowers_execution_price_for_long_decrease() {
+        let env = Env::default();
+        let index_price = 2_000 * FLOAT_PRECISION;
+        let size_delta_usd = 10_000 * FLOAT_PRECISION;
+        let neg_impact = -(100 * FLOAT_PRECISION);
+
+        // is_long = true, is_increase = false → sell scenario
+        let exec_price =
+            get_execution_price(&env, index_price, size_delta_usd, neg_impact, true, false);
+        assert!(
+            exec_price < index_price,
+            "negative impact must lower execution price for long decrease: exec={exec_price}, index={index_price}"
+        );
+    }
+
+    /// Short-increase (also a "sell") with a cost price impact must likewise
+    /// lower the execution price below index_price.
+    #[test]
+    fn property_negative_impact_lowers_execution_price_for_short_increase() {
+        let env = Env::default();
+        let index_price = 2_000 * FLOAT_PRECISION;
+        let size_delta_usd = 10_000 * FLOAT_PRECISION;
+        let neg_impact = -(100 * FLOAT_PRECISION);
+
+        // is_long = false, is_increase = true → sell scenario
+        let exec_price =
+            get_execution_price(&env, index_price, size_delta_usd, neg_impact, false, true);
+        assert!(
+            exec_price < index_price,
+            "negative impact must lower execution price for short increase: exec={exec_price}, index={index_price}"
+        );
+    }
+
+    /// Short-decrease (a "buy", mirroring long-increase) with a cost price
+    /// impact must RAISE the execution price above index_price.
+    #[test]
+    fn property_negative_impact_raises_execution_price_for_short_decrease() {
+        let env = Env::default();
+        let index_price = 2_000 * FLOAT_PRECISION;
+        let size_delta_usd = 10_000 * FLOAT_PRECISION;
+        let neg_impact = -(100 * FLOAT_PRECISION);
+
+        // is_long = false, is_increase = false → buy scenario
+        let exec_price =
+            get_execution_price(&env, index_price, size_delta_usd, neg_impact, false, false);
+        assert!(
+            exec_price > index_price,
+            "negative impact must raise execution price for short decrease: exec={exec_price}, index={index_price}"
         );
     }
 

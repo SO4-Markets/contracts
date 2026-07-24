@@ -151,13 +151,14 @@ pub fn get_pnl(
     is_long: bool,
     maximize: bool,
 ) -> i128 {
-    // Choose min or max price for the index token
-    let price = if is_long == maximize {
-        // long+maximize or short+minimize → use max price
-        index_token_price
-    } else {
-        index_token_price
-    };
+    // `index_token_price` is a single already-resolved price (not a min/max
+    // pair), so there is nothing for `maximize` to select between here.
+    // Callers wanting a conservative (worst-case-for-the-pool) valuation must
+    // resolve `index_token_price` themselves via
+    // `PriceProps::pick_price_for_pnl(is_long, maximize)` before calling this
+    // function. See issue #377.
+    let _ = maximize; // reserved: see doc comment above
+    let price = index_token_price;
 
     // Sum OI over both collateral tokens
     let oi_usd = (get_open_interest_for_side(env, ds, market, is_long)) as i128;
