@@ -30,7 +30,7 @@ If `min_collateral_factor` is unset (0, the fallback case only), the check inste
 uses `net_collateral_usd + pnl_usd < 0` — unrealised PnL only enters the
 liquidation check in this fallback branch, never in the primary comparison above.
 
-The `is_liquidatable` helper in `libs/position_utils` encodes this check and is the sole gate called by `LiquidationHandler::check_liquidatable`. If the check passes (position is healthy) the liquidation reverts with `PositionNotLiquidatable`.
+The `is_liquidatable` helper in `libs/position_utils` encodes this check and is the sole gate called by `LiquidationHandler::check_liquidatable`. If the check passes (position is healthy) the liquidation reverts with `NotLiquidatable`.
 
 ### Why the factor matters
 

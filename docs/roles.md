@@ -8,13 +8,15 @@ SO4.market uses a role-based access control system managed by the `role_store` c
 
 | Role constant | Key seed | Grantor | Typical holder | Permitted actions |
 |---|---|---|---|---|
-| `ADMIN` | `"ADMIN"` | Self (bootstrap) | Protocol multisig / deployer | Grant and revoke any role; upgrade contracts |
-| `CONTROLLER` | `"CONTROLLER"` | ADMIN | Core contracts (oracle, order_handler, etc.) | Write to `data_store` — prices, OI, pool amounts, flags |
-| `MARKET_KEEPER` | `"MARKET_KEEPER"` | ADMIN | Market creation bot | Create and configure new markets in `data_store` |
-| `ORDER_KEEPER` | `"ORDER_KEEPER"` | ADMIN | Execution keeper bots | Submit prices via `oracle.set_prices`; execute pending orders |
-| `LIQUIDATION_KEEPER` | `"LIQUIDATION_KEEPER"` | ADMIN | Liquidation bots | Call `liquidation_handler.liquidate_position` |
-| `ADL_KEEPER` | `"ADL_KEEPER"` | ADMIN | ADL bots | Call `adl_handler.execute_adl` |
-| `FEE_KEEPER` | `"FEE_KEEPER"` | ADMIN | Fee distribution account | Claim and distribute protocol fees |
+| `ROLE_ADMIN` | `"ROLE_ADMIN"` | Self (bootstrap) | Protocol multisig / deployer | Grant and revoke any role in `role_store` |
+| `CONTROLLER` | `"CONTROLLER"` | `ROLE_ADMIN` | Core contracts (oracle, order_handler, etc.) | Write to `data_store` — prices, OI, pool amounts, flags |
+| `MARKET_KEEPER` | `"MARKET_KEEPER"` | `ROLE_ADMIN` | Market creation bot | Create and configure new markets in `data_store` |
+| `ORDER_KEEPER` | `"ORDER_KEEPER"` | `ROLE_ADMIN` | Execution keeper bots | Submit prices via `oracle.set_prices`; execute pending orders |
+| `LIQUIDATION_KEEPER` | `"LIQUIDATION_KEEPER"` | `ROLE_ADMIN` | Liquidation bots | Call `liquidation_handler.liquidate_position` |
+| `ADL_KEEPER` | `"ADL_KEEPER"` | `ROLE_ADMIN` | ADL bots | Call `adl_handler.execute_adl` |
+| `FEE_KEEPER` | `"FEE_KEEPER"` | `ROLE_ADMIN` | Fee distribution account | Claim and distribute protocol fees |
+
+> **Note on contract upgrades:** `ROLE_ADMIN` only gates `grant_role` and `revoke_role` inside `role_store`. Contract upgrades (`fn upgrade`) are **not** routed through `role_store` at all — each upgradeable contract stores its own admin address in its own instance storage and calls `admin.require_auth()` directly. Revoking or rotating a `role_store` role has no effect on any contract's upgrade authority.
 
 > The `BytesN<32>` key stored in `role_store` is `sha256(role_name_utf8_bytes)`. Use `scripts/compute_key.py role <ROLE_NAME>` to derive the hex key for any role name.
 
@@ -47,7 +49,7 @@ RoleStoreClient::new(env, &role_store).has_role(&account, &role_key)
 
 ## Granting a Role
 
-Requires the caller to hold `ADMIN`. Granting a role emits a `RoleGranted` event.
+Requires the caller to hold `ROLE_ADMIN`. Granting a role emits a `RoleGranted` event.
 
 ```bash
 stellar contract invoke \
@@ -66,7 +68,7 @@ Replace `ORDER_KEEPER` with any role name from the table above.
 
 ## Revoking a Role
 
-Requires the caller to hold `ADMIN`. Revoking a role emits a `RoleRevoked` event.
+Requires the caller to hold `ROLE_ADMIN`. Revoking a role emits a `RoleRevoked` event.
 
 ```bash
 stellar contract invoke \
@@ -103,6 +105,6 @@ On a fresh deployment, initialise roles in this order:
 5. **Grant `ORDER_KEEPER`** to keeper bot accounts.
 6. **Grant `LIQUIDATION_KEEPER`** and **`ADL_KEEPER`** to their respective bots.
 7. **Grant `FEE_KEEPER`** to the fee distribution account.
-8. **Optionally transfer ADMIN** to a multisig after all roles are configured.
+8. **Optionally transfer `ROLE_ADMIN`** to a multisig after all roles are configured.
 
-Keeping the `ADMIN` key in a hardware wallet or multisig is strongly recommended — all other roles are derived from it.
+Keeping the `ROLE_ADMIN` key in a hardware wallet or multisig is strongly recommended — all other roles are granted through it.
