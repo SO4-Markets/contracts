@@ -9,9 +9,9 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
+gmx-keys    = { path = "../../libs/keys" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-gmx-keys    = { path = "../../libs/keys" }
 role-store  = { path = "../role_store" }
 data-store  = { path = "../data_store" }

@@ -222,6 +222,18 @@ trait IOrderVault {
 }
 
 #[allow(dead_code)]
+#[soroban_sdk::contractclient(name = "MarketTokenClient")]
+trait IMarketToken {
+    fn withdraw_from_pool(
+        env: Env,
+        caller: Address,
+        pool_token: Address,
+        receiver: Address,
+        amount: i128,
+    );
+}
+
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "ReferralStorageClient")]
 trait IReferralStorage {
     fn get_trader_referrer(env: Env, trader: Address) -> Option<Address>;
@@ -1474,8 +1486,6 @@ impl OrderHandler {
             .instance()
             .get(&InstanceKey::Oracle)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        let order_vault: Address = env.storage().instance().get(&InstanceKey::OrderVault)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
 
         let market_props = load_market_props(&env, &data_store, &market);
@@ -1520,7 +1530,11 @@ impl OrderHandler {
             };
 
             if fee_to_transfer > 0 {
-                OrderVaultClient::new(&env, &order_vault).transfer_out(
+                // Issue #411: by liquidation time the position's collateral lives in the
+                // market pool, not order_vault (which only holds collateral in flight
+                // during order creation/execution) — pay the keeper via the same
+                // custodian withdrawal path decrease_position uses for its output.
+                MarketTokenClient::new(&env, &market_props.market_token).withdraw_from_pool(
                     &handler,
                     &collateral_token,
                     &keeper,
@@ -3162,6 +3176,41 @@ mod tests {
             &w.long_tk,
             &true,
         );
+    }
+
+    /// Issue #411: with a nonzero liquidation execution fee configured, the keeper
+    /// fee must be paid out of the market pool (via market_token's custodian
+    /// withdrawal), not out of order_vault, which holds ~0 of an open position's
+    /// collateral by the time it's liquidated.
+    #[test]
+    fn liquidate_position_pays_keeper_fee_from_market_pool() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+
+        let keeper_fee = 1_000i128;
+        DsClient::new(&w.env, &w.ds).set_u128(
+            &w.admin,
+            &gmx_keys::liquidation_execution_fee_key(&w.env, &w.market_tk),
+            &(keeper_fee as u128),
+        );
+
+        // Crash price so the position is liquidatable.
+        set_prices(&w, 100 * fp);
+
+        let keeper_balance_before =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.keeper);
+
+        hc.liquidate_position(&w.keeper, &w.user, &w.market_tk, &w.long_tk, &true);
+
+        let keeper_balance_after =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.keeper);
+        assert_eq!(keeper_balance_after - keeper_balance_before, keeper_fee);
     }
 
     /// execute_adl must reject a caller that does not hold ADL_KEEPER.
