@@ -319,6 +319,28 @@ Currently upgradeable contracts are `oracle`, `market_factory`,
 token do not expose `upgrade`; redeploying one of those requires a planned
 migration and rewiring its dependants.
 
+## 7. Periphery contracts (deployed out-of-band)
+
+`market_util_reader`, `fee_batch_sweeper`, `insurance_fund_router`, and
+`order_cleanup` are stateless utility contracts that sit alongside the core
+protocol graph rather than inside it: none of them has an `initialize`
+entrypoint, and every dependency they need (`data_store`, `oracle`,
+`fee_handler`, `order_handler`) is passed in as a call argument instead of
+being stored at deploy time. They are intentionally **not** part of
+`scripts/deploy.sh`'s dependency-ordered sequence in section 3 above — deploy
+each standalone, whenever it's needed, with:
+
+```sh
+make deploy-contract CONTRACT=market_util_reader   NETWORK="$NETWORK" SOURCE="$SOURCE"
+make deploy-contract CONTRACT=fee_batch_sweeper     NETWORK="$NETWORK" SOURCE="$SOURCE"
+make deploy-contract CONTRACT=insurance_fund_router NETWORK="$NETWORK" SOURCE="$SOURCE"
+make deploy-contract CONTRACT=order_cleanup         NETWORK="$NETWORK" SOURCE="$SOURCE"
+```
+
+No `initialize` invocation is needed after deploy — callers (frontend, keeper
+scripts) supply `$DATA_STORE`, `$ORACLE`, `$FEE_HANDLER`, and `$ORDER_HANDLER`
+from `.deployed/<NETWORK>.env` directly on each call.
+
 ## Troubleshooting
 
 - `MissingValue` or `NotInitialized`: check that every explicit `initialize`

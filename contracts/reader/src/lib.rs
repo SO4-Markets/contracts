@@ -263,6 +263,7 @@ impl Reader {
         data_store: Address,
         market_token: Address,
     ) -> FundingRateInfo {
+        let market = Self::get_market(env.clone(), data_store.clone(), market_token.clone());
         let ds = DataStoreClient::new(&env, &data_store);
         const LEDGERS_PER_HOUR: i128 = 720;
 
@@ -272,16 +273,20 @@ impl Reader {
         let long_funding_rate_per_hour = funding_factor_per_second.saturating_mul(LEDGERS_PER_HOUR);
         let short_funding_rate_per_hour = long_funding_rate_per_hour.saturating_neg();
 
-        let long_fnd_key = funding_amount_per_size_key(&env, &market_token, &market_token, true);
-        let short_fnd_key = funding_amount_per_size_key(&env, &market_token, &market_token, false);
+        // Long side tracks funding in long_token collateral; short in short_token
+        // (issue #397 — these must match get_funding_info's key derivation).
+        let long_fnd_key =
+            funding_amount_per_size_key(&env, &market_token, &market.long_token, true);
+        let short_fnd_key =
+            funding_amount_per_size_key(&env, &market_token, &market.short_token, false);
         let long_funding_amount_per_size = ds.get_i128(&long_fnd_key);
         let short_funding_amount_per_size = ds.get_i128(&short_fnd_key);
 
         let updated_at_key = funding_updated_at_key(&env, &market_token);
         let funding_updated_at_ledger = ds.get_u128(&updated_at_key) as u64;
 
-        let long_oi_key = open_interest_key(&env, &market_token, &market_token, true);
-        let short_oi_key = open_interest_key(&env, &market_token, &market_token, false);
+        let long_oi_key = open_interest_key(&env, &market_token, &market.long_token, true);
+        let short_oi_key = open_interest_key(&env, &market_token, &market.short_token, false);
         let long_open_interest_usd = ds.get_u128(&long_oi_key);
         let short_open_interest_usd = ds.get_u128(&short_oi_key);
 
@@ -1661,6 +1666,89 @@ mod tests {
         assert_eq!(stats.market_count, 1);
         assert_eq!(stats.total_pool_value_usd, 0);
         assert_eq!(stats.total_accumulated_fees_usd, 0);
+    }
+
+    // ── Issue #397: get_funding_rate_info key derivation ─────────────────────
+
+    /// Both `get_funding_info` and `get_funding_rate_info` must read the same
+    /// long/short funding + OI storage slots — keyed by (market, long_token) and
+    /// (market, short_token), never by (market, market_token).
+    #[test]
+    fn funding_rate_info_matches_funding_info_keys() {
+        let w = setup();
+        let env = &w.env;
+        let ds_c = DsClient::new(env, &w.ds);
+
+        let market_tk = Address::generate(env);
+        let long_tk = Address::generate(env);
+        let short_tk = Address::generate(env);
+        let index_tk = Address::generate(env);
+
+        ds_c.set_address(&w.admin, &market_index_token_key(env, &market_tk), &index_tk);
+        ds_c.set_address(&w.admin, &market_long_token_key(env, &market_tk), &long_tk);
+        ds_c.set_address(&w.admin, &market_short_token_key(env, &market_tk), &short_tk);
+
+        ds_c.set_i128(
+            &w.admin,
+            &saved_funding_factor_per_second_key(env, &market_tk),
+            &1_000i128,
+        );
+        ds_c.set_i128(
+            &w.admin,
+            &funding_amount_per_size_key(env, &market_tk, &long_tk, true),
+            &111i128,
+        );
+        ds_c.set_i128(
+            &w.admin,
+            &funding_amount_per_size_key(env, &market_tk, &short_tk, false),
+            &222i128,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &open_interest_key(env, &market_tk, &long_tk, true),
+            &5_000u128,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &open_interest_key(env, &market_tk, &short_tk, false),
+            &6_000u128,
+        );
+
+        let reader = ReaderClient::new(env, &w.reader);
+        let info = reader.get_funding_info(&w.ds, &market_tk);
+        assert_eq!(info.long_funding_amount_per_size, 111);
+        assert_eq!(info.short_funding_amount_per_size, 222);
+
+        let rate_info = reader.get_funding_rate_info(&w.ds, &market_tk);
+        assert_eq!(rate_info.long_funding_amount_per_size, 111);
+        assert_eq!(rate_info.short_funding_amount_per_size, 222);
+        assert_eq!(rate_info.long_open_interest_usd, 5_000);
+        assert_eq!(rate_info.short_open_interest_usd, 6_000);
+        assert_eq!(rate_info.long_funding_rate_per_hour, 1_000 * 720);
+        assert_eq!(rate_info.short_funding_rate_per_hour, -1_000 * 720);
+    }
+
+    /// A market with no funding/OI data written yet reads zeros, not a panic —
+    /// (market, market_token) slots (the pre-fix bug) are simply never touched.
+    #[test]
+    fn funding_rate_info_zero_when_unset() {
+        let w = setup();
+        let env = &w.env;
+        let ds_c = DsClient::new(env, &w.ds);
+
+        let market_tk = Address::generate(env);
+        let long_tk = Address::generate(env);
+        let short_tk = Address::generate(env);
+        let index_tk = Address::generate(env);
+        ds_c.set_address(&w.admin, &market_index_token_key(env, &market_tk), &index_tk);
+        ds_c.set_address(&w.admin, &market_long_token_key(env, &market_tk), &long_tk);
+        ds_c.set_address(&w.admin, &market_short_token_key(env, &market_tk), &short_tk);
+
+        let rate_info = ReaderClient::new(env, &w.reader).get_funding_rate_info(&w.ds, &market_tk);
+        assert_eq!(rate_info.long_funding_amount_per_size, 0);
+        assert_eq!(rate_info.short_funding_amount_per_size, 0);
+        assert_eq!(rate_info.long_open_interest_usd, 0);
+        assert_eq!(rate_info.short_open_interest_usd, 0);
     }
 
     /// More than MAX_STATS_MARKETS markets must revert with TooManyMarkets.
