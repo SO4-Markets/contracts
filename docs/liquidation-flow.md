@@ -60,11 +60,22 @@ The contract executes the following steps:
 1. Verifies `keeper` holds the `LIQUIDATION_KEEPER` role (via `role_store.has_role`).
 2. Fetches current prices from the oracle and calls `is_liquidatable` — reverts if the position is still healthy.
 3. Delegates to `order_handler.liquidate_position` to execute the close and distribute remaining collateral.
-4. Emits a `liq_done` event carrying the position key and keeper address.
+4. Emits a `liq_done` event carrying the keeper, account, market, side, execution price, keeper execution fee, and realised PnL (issue #437).
 
 ---
 
 ## 3. Collateral Split
+
+> **Not yet implemented (tracked in issue #213).** The percentage-based split
+> described below — `liquidation_fee_factor_key`, `max_liquidation_fee_factor_key`,
+> `liquidation_keeper_fee_factor_key`, and the insurance fund address — does not
+> exist in `order_handler::liquidate_position` today. The only fee actually
+> charged is the flat `liquidation_execution_fee_key` amount (issue #416),
+> deducted from the position's collateral and paid entirely to the keeper; the
+> full remainder goes to the position owner. A separate `insurance_fund_router`
+> contract exists with the primitives this split would need
+> (`route_liquidation_penalty`, `cover_shortfall`), but its own `INTEGRATION.md`
+> documents wiring it into liquidation as distinct future work, not yet done.
 
 After the position is closed, remaining gross collateral is distributed in priority order:
 

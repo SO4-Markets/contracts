@@ -166,6 +166,7 @@ pub struct CreateWithdrawalParams {
 
 /// User-supplied parameters for creating an order. Mirrors GMX BaseOrderUtils.CreateOrderParams.
 #[contracttype]
+#[derive(Clone)]
 pub struct CreateOrderParams {
     pub receiver: Address,
     pub market: Address,
@@ -341,6 +342,7 @@ pub struct PositionInfo {
 /// ADL-eligible position candidate for auto-deleveraging.
 /// Returned by reader::get_adl_eligible_positions.
 #[contracttype]
+#[derive(Clone)]
 pub struct AdlCandidate {
     pub key: BytesN<32>,                  // position key for order_handler::get_position
     pub owner: Address,                   // position owner

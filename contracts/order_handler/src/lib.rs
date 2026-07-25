@@ -109,6 +109,17 @@ pub enum Error {
     /// same collateral token (issue #454) — record_transfer_in's shared per-token
     /// balance delta can only unambiguously attribute one leg per token per batch.
     DuplicateCollateralTokenInBatch = 21,
+    /// execute_adl called while the market/side's PnL-to-pool-value ratio does
+    /// not exceed the configured ADL threshold (issue #417). Re-validated here,
+    /// not just in the adl_handler wrapper, so the real mutating entry point
+    /// can't be forced by a caller who bypasses adl_handler entirely.
+    AdlRequirementNotMet = 22,
+    /// execute_adl called against a position that is not currently profitable
+    /// (issue #417) — ADL may only partially close profitable positions.
+    AdlPositionNotProfitable = 23,
+    /// Position increase would push the market/side's open interest above the
+    /// configured `max_open_interest` cap (issue #450).
+    MaxOpenInterestExceeded = 24,
 }
 
 
@@ -162,6 +173,22 @@ pub struct PositionLiquidatedEvent {
     pub market: Address,
     pub execution_price: i128,
     pub remaining_collateral: i128,
+    /// Collateral paid to the liquidation keeper as its execution fee (issue #437).
+    pub keeper_execution_fee: i128,
+    /// Realised PnL of the closed position (issue #437).
+    pub pnl_usd: i128,
+}
+
+/// Result of `liquidate_position` returned to `liquidation_handler` (issue #437).
+/// A named struct (ScMap-encoded, keyed by field name) rather than a positional
+/// tuple, so a future reorder of the fields on either side fails to decode
+/// instead of silently swapping values across the two independently-deployed
+/// contracts.
+#[contracttype]
+pub struct LiquidatePositionResult {
+    pub execution_price: i128,
+    pub keeper_execution_fee: i128,
+    pub pnl_usd: i128,
 }
 
 // ─── Funding rate snapshot event (issue #286) ─────────────────────────────────
@@ -1085,6 +1112,18 @@ impl OrderHandler {
                     }
                 }
 
+                // Issue #450: enforce the market/side open-interest cap. increase_position
+                // itself only applies the OI delta — it never validates against the
+                // configured cap — so the real mutating entry point must check it here,
+                // after the delta has been applied, using the same aggregation
+                // (open_interest_for_side sums both collateral-token buckets) the cap
+                // is defined against.
+                if gmx_market_utils::validate_open_interest(&env, &data_store, &market, order.is_long)
+                    .is_err()
+                {
+                    panic_with_error!(&env, Error::MaxOpenInterestExceeded);
+                }
+
                 // Issue #205: emit position event
                 let avg_price = if updated.size_in_tokens > 0 {
                     mul_div_wide(&env, updated.size_in_usd, 1, updated.size_in_tokens)
@@ -1478,6 +1517,10 @@ impl OrderHandler {
     /// Force-liquidate a position. Called by the liquidation_handler after role/health checks.
     ///
     /// Positions live in order_handler storage, so liquidation must run here.
+    ///
+    /// Returns a `LiquidatePositionResult` so liquidation_handler can include the
+    /// price, fee, and PnL in its own confirmation event (issue #437) without
+    /// re-deriving them or correlating a separate transfer event.
     pub fn liquidate_position(
         env: Env,
         keeper: Address, // must have LIQUIDATION_KEEPER role
@@ -1485,7 +1528,7 @@ impl OrderHandler {
         market: Address,
         collateral_token: Address,
         is_long: bool,
-    ) {
+    ) -> LiquidatePositionResult {
         keeper.require_auth();
         require_liquidation_keeper(&env, &keeper);
 
@@ -1534,9 +1577,10 @@ impl OrderHandler {
         let keeper_fee_key = liquidation_execution_fee_key(&env, &market);
         let keeper_execution_fee = ds.get_u128(&keeper_fee_key);
 
+        let mut fee_to_transfer: i128 = 0;
         if keeper_execution_fee > 0 {
             let keeper_fee_i128 = keeper_execution_fee as i128;
-            let fee_to_transfer = if keeper_fee_i128 <= position.collateral_amount {
+            fee_to_transfer = if keeper_fee_i128 <= position.collateral_amount {
                 keeper_fee_i128
             } else {
                 position.collateral_amount
@@ -1577,7 +1621,9 @@ impl OrderHandler {
             },
         );
 
-        // Issue #205: structured liquidation event
+        // Issue #205 / #437: structured liquidation event, including the keeper's
+        // execution fee and the realised PnL so indexers don't need to replay
+        // storage state or correlate a separate transfer event.
         env.events().publish(
             (symbol_short!("pos_liq"),),
             PositionLiquidatedEvent {
@@ -1586,11 +1632,25 @@ impl OrderHandler {
                 market: market.clone(),
                 execution_price: result.execution_price,
                 remaining_collateral: result.remaining_collateral,
+                keeper_execution_fee: fee_to_transfer,
+                pnl_usd: result.pnl_usd,
             },
         );
+
+        LiquidatePositionResult {
+            execution_price: result.execution_price,
+            keeper_execution_fee: fee_to_transfer,
+            pnl_usd: result.pnl_usd,
+        }
     }
 
     /// Partially close a profitable position for ADL. Called by adl_handler after checks.
+    ///
+    /// Issue #417: adl_handler performs these same checks before calling here, but
+    /// this contract grants the ADL_KEEPER role check directly and is independently
+    /// callable — so the real mutating entry point must re-validate its own
+    /// preconditions rather than trust the wrapper, exactly as `liquidate_position`
+    /// re-checks `is_liquidatable` instead of trusting `liquidation_handler`.
     pub fn execute_adl(
         env: Env,
         keeper: Address, // must have ADL_KEEPER role
@@ -1621,6 +1681,41 @@ impl OrderHandler {
         let collateral_price = oracle_client
             .get_primary_price(&collateral_token)
             .mid_price();
+
+        // Issue #417: ADL is only required when the pool's PnL ratio for this
+        // market/side exceeds the configured threshold.
+        let long_price = oracle_client
+            .get_primary_price(&market_props.long_token)
+            .mid_price();
+        let short_price = oracle_client
+            .get_primary_price(&market_props.short_token)
+            .mid_price();
+        if !gmx_market_utils::is_adl_required(
+            &env,
+            &data_store,
+            &market_props,
+            long_price,
+            short_price,
+            index_price.mid_price(),
+            index_price.pick_price_for_pnl(is_long, true),
+            is_long,
+        ) {
+            panic_with_error!(&env, Error::AdlRequirementNotMet);
+        }
+
+        // Issue #417: ADL may only partially close a position that is currently
+        // profitable.
+        let adl_pos_key = position_key(&env, &account, &market, &collateral_token, is_long);
+        let position: PositionProps = env
+            .storage()
+            .persistent()
+            .get(&PositionStorageKey::Position(adl_pos_key))
+            .unwrap_or_else(|| panic_with_error!(&env, Error::OrderNotFound));
+        let (adl_pnl_usd, _) =
+            gmx_position_utils::get_position_pnl_usd(&env, &position, &index_price, size_delta_usd);
+        if adl_pnl_usd <= 0 {
+            panic_with_error!(&env, Error::AdlPositionNotProfitable);
+        }
 
         let result = decrease_position(
             &env,

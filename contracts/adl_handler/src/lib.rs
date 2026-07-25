@@ -10,8 +10,6 @@ use gmx_keys::{
     market_index_token_key, market_long_token_key, market_short_token_key,
     max_pnl_factor_for_adl_key, position_key, roles,
 };
-use gmx_market_utils::{get_pnl, get_pool_value};
-use gmx_math::{mul_div_wide, FLOAT_PRECISION};
 use gmx_position_utils::get_position_pnl_usd;
 use gmx_types::{MarketProps, PositionProps, PriceProps};
 use soroban_sdk::{
@@ -146,47 +144,22 @@ impl AdlHandler {
             .mid_price();
         let index_price = index_price_props.mid_price();
 
-        // Minimize pool value (conservative: harder to trigger ADL)
-        let pool_info = get_pool_value(
+        // Issue #377: get_pnl takes a single already-resolved price, so resolve
+        // the maximize-appropriate bound here via pick_price_for_pnl before
+        // calling. Issue #417: the threshold/pool-value/pnl computation itself
+        // lives in gmx_market_utils::is_adl_required so order_handler can
+        // re-run the identical check at its own mutating entry point.
+        let pnl_index_price = index_price_props.pick_price_for_pnl(is_long, true);
+        gmx_market_utils::is_adl_required(
             &env,
             &data_store,
             &market_props,
             long_price,
             short_price,
             index_price,
-            false,
-        );
-        if pool_info.pool_value <= 0 {
-            return false;
-        }
-
-        // Maximize trader PnL (worst case for pool): get_pnl takes a single
-        // already-resolved price, so resolve the maximize-appropriate bound
-        // here via pick_price_for_pnl before calling (issue #377).
-        let pnl_index_price = index_price_props.pick_price_for_pnl(is_long, true);
-        let pnl = get_pnl(
-            &env,
-            &data_store,
-            &market_props,
             pnl_index_price,
             is_long,
-            true,
-        );
-        if pnl <= 0 {
-            return false;
-        }
-
-        let pnl_factor = mul_div_wide(&env, pnl, FLOAT_PRECISION, pool_info.pool_value);
-
-        // A zero value means no threshold is configured; ADL is disabled for this market/side.
-        let max_pnl_factor = DataStoreClient::new(&env, &data_store)
-            .get_u128(&max_pnl_factor_for_adl_key(&env, &market, is_long))
-            as i128;
-
-        if max_pnl_factor == 0 {
-            return false;
-        }
-        pnl_factor > max_pnl_factor
+        )
     }
 
     /// Execute ADL on a specific profitable position.

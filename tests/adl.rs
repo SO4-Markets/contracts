@@ -29,6 +29,13 @@
 //!
 //!   6. `adl_requires_adl_keeper_role`
 //!      Non-ADL-keeper address → `execute_adl` panics with `Unauthorized`.
+//!
+//!   7. `order_handler_execute_adl_direct_call_reverts_when_adl_not_required` (issue #417)
+//!      A real ADL_KEEPER calling `order_handler.execute_adl` directly (bypassing
+//!      adl_handler) must still be rejected when ADL is not required.
+//!
+//!   8. `order_handler_execute_adl_direct_call_reverts_on_unprofitable_position` (issue #417)
+//!      Same direct-call bypass attempt against an unprofitable position must revert.
 
 #![cfg(test)]
 
@@ -267,6 +274,7 @@ fn open_long(w: &TestWorld, trader: &Address, collateral: i128, size_usd: i128) 
             min_output_amount: 0,
             order_type: OrderType::MarketIncrease,
             is_long: true,
+            expiry_ledger: None,
         },
     );
     OHClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
@@ -501,6 +509,87 @@ fn adl_requires_adl_keeper_role() {
     let impostor = Address::generate(&w.env);
     AdlHandlerClient::new(&w.env, &w.adl_handler).execute_adl(
         &impostor,
+        &trader,
+        &w.market_tk,
+        &w.long_tk,
+        &true,
+        &(1_000 * ONE_USD),
+    );
+}
+
+// ─── Test 7 (issue #417) ───────────────────────────────────────────────────────
+
+/// order_handler grants the ADL_KEEPER role check directly and is independently
+/// callable, so a real ADL_KEEPER holder must not be able to force-decrease a
+/// position by calling `order_handler.execute_adl` directly, bypassing
+/// `adl_handler`'s `is_adl_required`/profitability checks. This must revert
+/// exactly like going through `adl_handler` would.
+#[test]
+#[should_panic]
+fn order_handler_execute_adl_direct_call_reverts_when_adl_not_required() {
+    let w = setup();
+    let entry_price = 1_000i128;
+
+    set_prices(&w, entry_price);
+    seed_pool(&w, 200 * ONE_TOKEN);
+    set_prices(&w, entry_price);
+
+    let trader = Address::generate(&w.env);
+    open_long(&w, &trader, 5 * ONE_TOKEN, 5_000 * ONE_USD);
+
+    // Modest rally, high threshold → ADL is not required (same setup as Test 4).
+    let modest_rally = 1_100i128;
+    set_prices(&w, modest_rally);
+    let high_threshold: u128 = FLOAT_PRECISION as u128;
+    DsClient::new(&w.env, &w.ds).set_u128(
+        &w.admin,
+        &max_pnl_factor_for_adl_key(&w.env, &w.market_tk, true),
+        &high_threshold,
+    );
+
+    // A real ADL_KEEPER, calling order_handler directly (not through
+    // adl_handler), must still be rejected.
+    OHClient::new(&w.env, &w.ord_handler).execute_adl(
+        &w.adl_keeper,
+        &trader,
+        &w.market_tk,
+        &w.long_tk,
+        &true,
+        &(500 * ONE_USD),
+    );
+}
+
+// ─── Test 8 (issue #417) ───────────────────────────────────────────────────────
+
+/// Same direct-call bypass attempt, but against an unprofitable position — the
+/// real mutating entry point must independently re-validate profitability.
+#[test]
+#[should_panic]
+fn order_handler_execute_adl_direct_call_reverts_on_unprofitable_position() {
+    let w = setup();
+    let entry_price = 2_000i128;
+
+    set_prices(&w, entry_price);
+    seed_pool(&w, 200 * ONE_TOKEN);
+    set_prices(&w, entry_price);
+
+    let trader = Address::generate(&w.env);
+    open_long(&w, &trader, 5 * ONE_TOKEN, 10_000 * ONE_USD);
+
+    // Price crashes → the position is at a loss.
+    let crash_price = 500i128;
+    set_prices(&w, crash_price);
+
+    // Strictest possible threshold configured, so only the profitability
+    // check is what must stop this call.
+    DsClient::new(&w.env, &w.ds).set_u128(
+        &w.admin,
+        &max_pnl_factor_for_adl_key(&w.env, &w.market_tk, true),
+        &1u128,
+    );
+
+    OHClient::new(&w.env, &w.ord_handler).execute_adl(
+        &w.adl_keeper,
         &trader,
         &w.market_tk,
         &w.long_tk,
