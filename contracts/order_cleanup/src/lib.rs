@@ -27,7 +27,7 @@ trait IDataStore {
 #[soroban_sdk::contractclient(name = "OrderHandlerClient")]
 trait IOrderHandler {
     fn get_order(env: Env, key: BytesN<32>) -> Option<OrderProps>;
-    fn cancel_order(env: Env, caller: Address, key: BytesN<32>);
+    fn cleanup_expired_order(env: Env, caller: Address, key: BytesN<32>);
 }
 
 #[contractevent(topics = ["ord_exp"])]
@@ -93,7 +93,7 @@ impl OrderCleanup {
         }
 
         let cleanup_fee = cleanup_fee_from_execution_fee(order.execution_fee);
-        order_client.cancel_order(&helper, &key);
+        order_client.cleanup_expired_order(&helper, &key);
 
         env.events().publish_event(&ExpiredOrderCancelled {
             key,

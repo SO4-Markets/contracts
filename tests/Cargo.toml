@@ -94,3 +94,7 @@ path = "multi_market_funding_isolation.rs"
 [[test]]
 name = "funding_conservation_e2e"
 path = "funding_conservation_e2e.rs"
+
+[[test]]
+name = "order_cleanup"
+path = "order_cleanup.rs"
