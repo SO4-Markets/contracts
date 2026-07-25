@@ -820,4 +820,199 @@ mod tests {
             "claimable funding must be positive after partial close with owed funding"
         );
     }
+
+    // ── #382: acceptable_price slippage gate ──────────────────────────────────
+
+    /// Store a short position so tests can call decrease_position with is_long=false.
+    fn plant_short_position(w: &World, size_usd: i128, collateral: i128, index_price: i128) {
+        let size_in_tokens = gmx_math::mul_div_wide(&w.env, size_usd, TOKEN_PRECISION, index_price);
+        let position = PositionProps {
+            account: w.user.clone(),
+            market: w.market_tk.clone(),
+            collateral_token: w.short_tk.clone(),
+            size_in_usd: size_usd,
+            size_in_tokens,
+            collateral_amount: collateral,
+            pending_impact_amount: 0,
+            borrowing_factor: 0,
+            funding_fee_amount_per_size: 0,
+            long_claim_fnd_per_size: 0,
+            short_claim_fnd_per_size: 0,
+            increased_at_time: 1_000,
+            decreased_at_time: 0,
+            is_long: false,
+        };
+        let pos_key = gmx_keys::position_key(&w.env, &w.user, &w.market_tk, &w.short_tk, false);
+        w.env.as_contract(&w.caller, || {
+            w.env
+                .storage()
+                .persistent()
+                .set(&PositionKey::Position(pos_key), &position);
+        });
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::open_interest_key(&w.env, &w.market_tk, &w.short_tk, false),
+            &(size_usd as u128),
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::open_interest_in_tokens_key(&w.env, &w.market_tk, &w.short_tk, false),
+            &(size_in_tokens as u128),
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::collateral_sum_key(&w.env, &w.market_tk, &w.short_tk, false),
+            &(collateral as u128),
+        );
+        StellarAssetClient::new(&w.env, &w.short_tk)
+            .mint(&w.market_tk, &(collateral + 5 * ONE_TOKEN));
+    }
+
+    /// Long close: acceptable_price just below execution_price — should succeed.
+    #[test]
+    fn long_close_acceptable_price_below_execution_succeeds() {
+        let w = setup();
+        let index_price = 2_000 * FP;
+        configure_market(&w, 10);
+        let size_usd = 1_000 * FP;
+        let collateral = ONE_TOKEN * 10;
+        plant_position(&w, size_usd, collateral, index_price);
+        let market = make_market(&w);
+        let price = PriceProps { min: index_price, max: index_price };
+        // For a long close (is_long=true, is_increase=false) with zero price impact,
+        // execution_price == index_price. Setting acceptable_price just below means
+        // the gate (execution_price >= acceptable_price) passes.
+        let result = w.env.as_contract(&w.caller, || {
+            decrease_position(
+                &w.env,
+                &DecreasePositionParams {
+                    data_store: &w.ds,
+                    caller: &w.caller,
+                    account: &w.user,
+                    receiver: &w.user,
+                    market: &market,
+                    collateral_token: &w.long_tk,
+                    size_delta_usd: size_usd,
+                    acceptable_price: index_price - 1,  // just below execution_price
+                    is_long: true,
+                    index_token_price: &price,
+                    collateral_price: index_price,
+                    current_time: 2_000,
+                    swap_path: Vec::new(&w.env),
+                    oracle: &w.admin,
+                },
+            )
+        });
+        assert!(result.output_amount >= 0, "should succeed with acceptable_price below exec");
+    }
+
+    /// Long close: acceptable_price above execution_price — slippage gate rejects (#382).
+    #[test]
+    #[should_panic]
+    fn long_close_acceptable_price_above_execution_panics() {
+        let w = setup();
+        let index_price = 2_000 * FP;
+        configure_market(&w, 10);
+        let size_usd = 1_000 * FP;
+        let collateral = ONE_TOKEN * 10;
+        plant_position(&w, size_usd, collateral, index_price);
+        let market = make_market(&w);
+        let price = PriceProps { min: index_price, max: index_price };
+        // execution_price == index_price; setting acceptable_price above it must panic.
+        w.env.as_contract(&w.caller, || {
+            decrease_position(
+                &w.env,
+                &DecreasePositionParams {
+                    data_store: &w.ds,
+                    caller: &w.caller,
+                    account: &w.user,
+                    receiver: &w.user,
+                    market: &market,
+                    collateral_token: &w.long_tk,
+                    size_delta_usd: size_usd,
+                    acceptable_price: index_price + 1,  // above execution_price → reject
+                    is_long: true,
+                    index_token_price: &price,
+                    collateral_price: index_price,
+                    current_time: 2_000,
+                    swap_path: Vec::new(&w.env),
+                    oracle: &w.admin,
+                },
+            )
+        });
+    }
+
+    /// Short close: acceptable_price above execution_price — should succeed (#382).
+    #[test]
+    fn short_close_acceptable_price_above_execution_succeeds() {
+        let w = setup();
+        let index_price = 2_000 * FP;
+        configure_market(&w, 10);
+        let size_usd = 1_000 * FP;
+        let collateral = ONE_TOKEN * 10;
+        plant_short_position(&w, size_usd, collateral, index_price);
+        let market = make_market(&w);
+        let price = PriceProps { min: index_price, max: index_price };
+        // For a short close (is_long=false), the gate checks execution_price <= acceptable_price.
+        // Setting acceptable_price above execution_price should pass.
+        let result = w.env.as_contract(&w.caller, || {
+            decrease_position(
+                &w.env,
+                &DecreasePositionParams {
+                    data_store: &w.ds,
+                    caller: &w.caller,
+                    account: &w.user,
+                    receiver: &w.user,
+                    market: &market,
+                    collateral_token: &w.short_tk,
+                    size_delta_usd: size_usd,
+                    acceptable_price: index_price + 1,  // above execution_price → accept
+                    is_long: false,
+                    index_token_price: &price,
+                    collateral_price: index_price,
+                    current_time: 2_000,
+                    swap_path: Vec::new(&w.env),
+                    oracle: &w.admin,
+                },
+            )
+        });
+        assert!(result.output_amount >= 0, "short close should succeed");
+    }
+
+    /// Short close: acceptable_price below execution_price — slippage gate rejects (#382).
+    #[test]
+    #[should_panic]
+    fn short_close_acceptable_price_below_execution_panics() {
+        let w = setup();
+        let index_price = 2_000 * FP;
+        configure_market(&w, 10);
+        let size_usd = 1_000 * FP;
+        let collateral = ONE_TOKEN * 10;
+        plant_short_position(&w, size_usd, collateral, index_price);
+        let market = make_market(&w);
+        let price = PriceProps { min: index_price, max: index_price };
+        // execution_price == index_price; acceptable_price below it must panic for shorts.
+        w.env.as_contract(&w.caller, || {
+            decrease_position(
+                &w.env,
+                &DecreasePositionParams {
+                    data_store: &w.ds,
+                    caller: &w.caller,
+                    account: &w.user,
+                    receiver: &w.user,
+                    market: &market,
+                    collateral_token: &w.short_tk,
+                    size_delta_usd: size_usd,
+                    acceptable_price: index_price - 1,  // below execution_price → reject
+                    is_long: false,
+                    index_token_price: &price,
+                    collateral_price: index_price,
+                    current_time: 2_000,
+                    swap_path: Vec::new(&w.env),
+                    oracle: &w.admin,
+                },
+            )
+        });
+    }
 }

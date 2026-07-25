@@ -27,6 +27,7 @@ use soroban_sdk::{Address, BytesN, Env};
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
+    fn get_u128_batch(env: Env, keys: soroban_sdk::Vec<BytesN<32>>) -> soroban_sdk::Vec<u128>;
     fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
     fn apply_delta_to_u128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> u128;
 }
@@ -118,9 +119,17 @@ pub fn get_swap_price_impact(
     let next_out_usd = pool_out_usd - amount_in_usd;
     let next_diff = (next_in_usd - next_out_usd).abs();
 
-    let pos_factor = ds.get_u128(&swap_impact_factor_key(env, &market.market_token, true)) as i128;
-    let neg_factor = ds.get_u128(&swap_impact_factor_key(env, &market.market_token, false)) as i128;
-    let exponent = ds.get_u128(&swap_impact_exponent_factor_key(env, &market.market_token)) as i128;
+    // #381: batch the three impact-factor reads into a single cross-contract call.
+    let impact_keys = soroban_sdk::vec![
+        env,
+        swap_impact_factor_key(env, &market.market_token, true),
+        swap_impact_factor_key(env, &market.market_token, false),
+        swap_impact_exponent_factor_key(env, &market.market_token),
+    ];
+    let impact_batch = ds.get_u128_batch(&impact_keys);
+    let pos_factor = impact_batch.get(0).unwrap_or(0) as i128;
+    let neg_factor = impact_batch.get(1).unwrap_or(0) as i128;
+    let exponent = impact_batch.get(2).unwrap_or(0) as i128;
 
     // Impact pool cap (in USD of token_out)
     let pool_tokens = get_swap_impact_pool_amount(env, data_store, market, token_out) as i128;
@@ -238,17 +247,17 @@ pub fn get_position_price_impact(
     };
     let next_diff = (next_long - next_short).abs();
 
-    let pos_factor =
-        ds.get_u128(&position_impact_factor_key(env, &market.market_token, true)) as i128;
-    let neg_factor = ds.get_u128(&position_impact_factor_key(
+    // #381: batch the three impact-factor reads into a single cross-contract call.
+    let impact_keys = soroban_sdk::vec![
         env,
-        &market.market_token,
-        false,
-    )) as i128;
-    let exponent = ds.get_u128(&position_impact_exponent_factor_key(
-        env,
-        &market.market_token,
-    )) as i128;
+        position_impact_factor_key(env, &market.market_token, true),
+        position_impact_factor_key(env, &market.market_token, false),
+        position_impact_exponent_factor_key(env, &market.market_token),
+    ];
+    let impact_batch = ds.get_u128_batch(&impact_keys);
+    let pos_factor = impact_batch.get(0).unwrap_or(0) as i128;
+    let neg_factor = impact_batch.get(1).unwrap_or(0) as i128;
+    let exponent = impact_batch.get(2).unwrap_or(0) as i128;
 
     // Impact pool cap (in USD of index token)
     let pool_tokens = get_position_impact_pool_amount(env, data_store, market) as i128;
