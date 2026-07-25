@@ -44,6 +44,8 @@ pub enum Error {
     InsufficientVaultBalance = 7,
     /// Issue #279: deposit's USD value is below the market's configured minimum.
     BelowMinimumDeposit = 8,
+    /// Issue #370: execution_fee is below the configured global minimum.
+    InsufficientExecutionFee = 9,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -87,6 +89,7 @@ trait IDataStore {
     fn remove_bytes32_from_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
     fn contains_bytes32(env: Env, set_key: BytesN<32>, value: BytesN<32>) -> bool;
     fn increment_nonce(env: Env, caller: Address) -> u64;
+    fn get_min_execution_fee(env: Env) -> u128;
 }
 
 #[allow(dead_code)]
@@ -230,6 +233,18 @@ impl DepositHandler {
             }
         }
 
+        // Issue #370: validate execution_fee against the global minimum before
+        // any tokens move. execution_fee is collected in the long token; 0 means
+        // no fee required.
+        let exec_fee = params.execution_fee;
+        if exec_fee < 0 {
+            panic_with_error!(&env, Error::InsufficientExecutionFee);
+        }
+        let min_fee = ds.get_min_execution_fee();
+        if min_fee > 0 && (exec_fee as u128) < min_fee {
+            panic_with_error!(&env, Error::InsufficientExecutionFee);
+        }
+
         // Pull tokens from caller → deposit_vault
         let vault_client = DepositVaultClient::new(&env, &deposit_vault);
         if params.long_token_amount > 0 {
@@ -249,6 +264,16 @@ impl DepositHandler {
                 &params.short_token_amount,
             );
             vault_client.record_transfer_in(&params.initial_short_token);
+        }
+
+        // Issue #370: collect execution_fee in the long token.
+        if exec_fee > 0 {
+            token::Client::new(&env, &params.initial_long_token).transfer(
+                &caller,
+                &deposit_vault,
+                &exec_fee,
+            );
+            vault_client.record_transfer_in(&params.initial_long_token);
         }
 
         // Allocate deposit key from nonce
@@ -433,6 +458,21 @@ impl DepositHandler {
             &mint_amount,
         );
 
+        // Issue #370: pay keeper incentive from execution_fee.
+        // Incentive = 10% of execution_fee (or execution_fee if < 10%).
+        // Paid in the long token from the deposit_vault.
+        if deposit.execution_fee > 0 {
+            let incentive = deposit.execution_fee / 10;
+            if incentive > 0 {
+                DepositVaultClient::new(&env, &deposit_vault).transfer_out(
+                    &handler,
+                    &deposit.initial_long_token,
+                    &keeper,
+                    &incentive,
+                );
+            }
+        }
+
         // NOTE: funding/borrowing state updates are intentionally omitted here to stay within
         // Soroban's 40 ledger-entry-read budget. These are no-ops when open interest is zero
         // (i.e., no positions exist), and position open/close operations update them as needed.
@@ -500,6 +540,18 @@ impl DepositHandler {
                 &deposit.initial_short_token,
                 &deposit.account,
                 &deposit.short_token_amount,
+            );
+        }
+
+        // Issue #370: refund execution_fee to the user on cancellation.
+        // The keeper earns execution_fee only when it actually attempts execution;
+        // a cancelled deposit did no keeper work, so the full fee is refunded.
+        if deposit.execution_fee > 0 {
+            vault_client.transfer_out(
+                &handler,
+                &deposit.initial_long_token,
+                &deposit.account,
+                &deposit.execution_fee,
             );
         }
 
