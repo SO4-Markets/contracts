@@ -285,6 +285,32 @@ impl ReferralStorage {
             .publish_event(&CodeOwnershipTransferred { code, from, to });
     }
 
+    /// Self-service keep-alive for a registered code (issue #445).
+    ///
+    /// `register_code` only sets the `CodeOwner` entry's initial TTL, and that
+    /// TTL is otherwise only bumped as a side effect of a trader interacting
+    /// with the code. A code nobody is actively trading with can therefore run
+    /// out its TTL; once archived, `register_code`'s existence check reads as
+    /// "unregistered" and a different address can claim the same code string,
+    /// silently taking over any trader still linked to it. Calling this lets
+    /// the current owner extend the TTL at will, independent of trader
+    /// activity. Only the current owner may call it.
+    pub fn renew_code(env: Env, caller: Address, code: Bytes) {
+        caller.require_auth();
+        let key = ReferralKey::CodeOwner(code);
+        let owner: Address = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::CodeNotFound));
+        if owner != caller {
+            panic_with_error!(&env, Error::NotCodeOwner);
+        }
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+    }
+
     /// Return the owner address for a given referral code, or None if unregistered.
     pub fn get_code_owner(env: Env, code: Bytes) -> Option<Address> {
         env.storage()
@@ -373,6 +399,32 @@ impl ReferralStorage {
             .persistent()
             .get(&ReferralKey::ReferrerVolume(referrer))
             .unwrap_or(0u128)
+    }
+
+    /// Admin-only override for a referrer's stored lifetime volume (issue #444).
+    ///
+    /// `increment_referrer_volume`'s auto-upgrade re-evaluates tier thresholds
+    /// purely from this value, which otherwise only ever grows. A manual
+    /// `set_referrer_tier` downgrade is therefore not durable on its own: the
+    /// very next trade reads the unchanged, still-large cumulative volume and
+    /// silently re-upgrades the referrer right back to (or above) the tier an
+    /// admin just removed. Call this alongside a manual tier change to make
+    /// the downgrade (or any other volume correction) stick.
+    pub fn set_referrer_volume(env: Env, admin: Address, referrer: Address, volume_usd: u128) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if admin != stored_admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        let vol_key = ReferralKey::ReferrerVolume(referrer);
+        env.storage().persistent().set(&vol_key, &volume_usd);
+        env.storage()
+            .persistent()
+            .extend_ttl(&vol_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
     }
 
     /// Called by the authorized order_handler after each trade settlement.
@@ -801,6 +853,53 @@ mod tests {
         assert_eq!(discount, 500);
     }
 
+    // ─── Issue #445: self-service code renewal ───────────────────────────────
+
+    /// The current owner can renew their own code without reverting.
+    #[test]
+    fn renew_code_owner_succeeds() {
+        let w = setup();
+        let alice = Address::generate(&w.env);
+        let code = make_code(&w.env, 0x10);
+        client(&w).register_code(&alice, &code);
+        client(&w).renew_code(&alice, &code);
+        assert_eq!(client(&w).get_code_owner(&code), Some(alice));
+    }
+
+    /// A non-owner attempting to renew someone else's code must revert with NotCodeOwner.
+    #[test]
+    fn renew_code_non_owner_rejected() {
+        let w = setup();
+        let alice = Address::generate(&w.env);
+        let mallory = Address::generate(&w.env);
+        let code = make_code(&w.env, 0x11);
+        client(&w).register_code(&alice, &code);
+
+        let result = client(&w).try_renew_code(&mallory, &code);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::NotCodeOwner as u32
+            )))
+        );
+    }
+
+    /// Renewing a code that was never registered must revert with CodeNotFound.
+    #[test]
+    fn renew_code_unregistered_rejected() {
+        let w = setup();
+        let alice = Address::generate(&w.env);
+        let code = make_code(&w.env, 0x12);
+
+        let result = client(&w).try_renew_code(&alice, &code);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::CodeNotFound as u32
+            )))
+        );
+    }
+
     // ─── Issue #236: referral code length and character set validation ────────
 
     /// Empty code must revert with EmptyCode.
@@ -971,5 +1070,89 @@ mod tests {
         // Another increment below threshold — tier stays at 1 (not reset)
         client(&w).increment_referrer_volume(&order_handler, &referrer, &1u128);
         assert_eq!(client(&w).get_referrer_cumulative_volume(&referrer), 2_001u128);
+    }
+
+    // ─── Issue #444: manual tier downgrade must be durable ───────────────────
+
+    /// Without a volume reset, the very next trade after a manual admin
+    /// downgrade silently re-upgrades the referrer — this is the bug being
+    /// fixed, captured so a regression is caught if the auto-upgrade path
+    /// changes.
+    #[test]
+    fn manual_downgrade_alone_is_reverted_by_next_trade() {
+        let w = setup();
+        let referrer = Address::generate(&w.env);
+        let order_handler = Address::generate(&w.env);
+
+        client(&w).set_order_handler(&w.admin, &order_handler);
+        client(&w).set_tier_upgrade_threshold(&w.admin, &1u32, &1_000u128);
+
+        client(&w).increment_referrer_volume(&order_handler, &referrer, &1_000u128);
+        client(&w).set_referrer_tier(&w.admin, &referrer, &0u32);
+
+        // Cumulative volume (1_000) still clears the tier-1 threshold, so an
+        // ordinary trade re-upgrades the referrer even though admin just
+        // downgraded them.
+        client(&w).increment_referrer_volume(&order_handler, &referrer, &1u128);
+        let code = Bytes::from_slice(&w.env, b"REFCODE2");
+        let trader = Address::generate(&w.env);
+        client(&w).register_code(&referrer, &code);
+        client(&w).set_tier_config(
+            &w.admin,
+            &1u32,
+            &TierConfig { total_rebate_bps: 2_000, discount_share_bps: 5_000 },
+        );
+        client(&w).set_trader_referral_code(&trader, &code);
+        assert_eq!(
+            client(&w).get_trader_discount_bps(&trader),
+            1_000,
+            "tier 1 discount must be back in effect: downgrade was reverted by the next trade"
+        );
+    }
+
+    /// Pairing the admin downgrade with `set_referrer_volume` makes it stick:
+    /// the next trade no longer re-crosses the threshold, so the referrer
+    /// stays at the admin-assigned tier.
+    #[test]
+    fn manual_downgrade_with_volume_reset_is_durable() {
+        let w = setup();
+        let referrer = Address::generate(&w.env);
+        let order_handler = Address::generate(&w.env);
+
+        client(&w).set_order_handler(&w.admin, &order_handler);
+        client(&w).set_tier_upgrade_threshold(&w.admin, &1u32, &1_000u128);
+
+        client(&w).increment_referrer_volume(&order_handler, &referrer, &1_000u128);
+        client(&w).set_referrer_tier(&w.admin, &referrer, &0u32);
+        client(&w).set_referrer_volume(&w.admin, &referrer, &0u128);
+
+        client(&w).increment_referrer_volume(&order_handler, &referrer, &1u128);
+        let code = Bytes::from_slice(&w.env, b"REFCODE3");
+        let trader = Address::generate(&w.env);
+        client(&w).register_code(&referrer, &code);
+        client(&w).set_tier_config(
+            &w.admin,
+            &1u32,
+            &TierConfig { total_rebate_bps: 2_000, discount_share_bps: 5_000 },
+        );
+        client(&w).set_trader_referral_code(&trader, &code);
+        assert_eq!(
+            client(&w).get_trader_discount_bps(&trader),
+            0,
+            "tier 0 must hold: volume reset stops the auto-upgrade from re-crossing the threshold"
+        );
+        assert_eq!(client(&w).get_referrer_cumulative_volume(&referrer), 1u128);
+    }
+
+    /// A non-admin caller must not be able to override a referrer's stored volume.
+    #[test]
+    #[should_panic]
+    fn set_referrer_volume_non_admin_reverts() {
+        let w = setup();
+        let referrer = Address::generate(&w.env);
+        let impostor = Address::generate(&w.env);
+        ReferralStorageClient::new(&w.env, &w.handler).set_referrer_volume(
+            &impostor, &referrer, &0u128,
+        );
     }
 }
