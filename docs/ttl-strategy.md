@@ -5,12 +5,19 @@ sequences. Rent is paid when entries are created, enlarged, or extended. This
 document describes the policy implemented by the current code, not an intended
 future policy.
 
-> **Current-state warning:** the protocol does not yet renew instance storage or
-> long-lived persistent entries. There are no `MIN_POSITION_TTL`,
+> **Current-state warning:** the protocol does not yet renew instance storage,
+> and most long-lived persistent entries still receive only the network's
+> default TTL at write time. There are no `MIN_POSITION_TTL`,
 > `MAX_POSITION_TTL`, `bump_core_ttl`, or `bump_persistent_ttl` definitions in
-> the Soroban workspace. Only oracle prices and token allowances explicitly
-> extend TTL. Operators must monitor the remaining TTL of contract instances and
-> critical persistent entries until a renewal policy is implemented.
+> the Soroban workspace, and no repository-wide renewal policy. Beyond oracle
+> prices and token allowances, `order_handler`, `data_store`, and
+> `referral_storage` each define their own local
+> `PERSISTENT_BUMP_TARGET`/`MIN_BUMP_THRESHOLD` pair and call `extend_ttl` on
+> specific keys — see "Persistent storage" below for exactly which ones, and
+> which related keys in those same contracts are still uncovered. Operators
+> must monitor the remaining TTL of contract instances and every persistent
+> entry without a documented bump until a repository-wide renewal policy
+> exists.
 
 ## Storage tiers used by the protocol
 
@@ -22,7 +29,7 @@ a protocol upgrade. Do not hard-code them in keepers.
 | Tier | Current uses | Cost/lifetime characteristics | Current bump policy |
 |---|---|---|---|
 | Instance | Initialization flag, admin, role store, data store, oracle and vault/handler addresses; market-token metadata; test-token pause state; selected `data_store` configuration values | One contract-instance ledger entry backs all instance keys. Efficient for small, frequently read shared configuration, but growing it increases the size/rent of the shared entry. Its TTL is tied to the contract instance. | **None.** No production entrypoint calls `env.storage().instance().extend_ttl(...)`. |
-| Persistent | Positions and orders in `order_handler`; pending deposits and withdrawals; `data_store` pool amounts, OI, factors, market metadata and index sets; roles, referrals, balances and token supply | Each key has an independent TTL and can be archived. Appropriate for durable protocol/user state, but every key must be monitored and renewed independently. | **None.** The current contracts do not call `persistent().extend_ttl(...)`. Reads and writes must not be assumed to renew entries automatically. |
+| Persistent | Positions and orders in `order_handler`; pending deposits and withdrawals; `data_store` pool amounts, OI, factors, market metadata and index sets; roles, referrals, balances and token supply | Each key has an independent TTL and can be archived. Appropriate for durable protocol/user state, but every key must be monitored and renewed independently. | **Partial.** `order_handler` calls `extend_ttl` on `Order`, `OrderExpiry`, and `OrderFrozen`. `data_store`'s bytes32-set helpers (`add_bytes32_to_set`, `remove_bytes32_from_set`, and the bytes32-set getters) call it on the set entry itself, which covers the `order_list_key`/`account_order_list_key` and `position_list_key`/`account_position_list_key` enumeration indexes. `referral_storage` calls it on `CodeOwner`, `TraderCode`, `ReferrerTier`, `TierConfig`, `ReferrerVolume`, and `TierUpgradeThreshold`. Positions themselves, deposits, withdrawals, roles, token balances, `data_store`'s scalar/address-set accounting (pool amounts, OI, factors, prices), and a few specific paths noted under "Persistent storage" below are **not** covered. Reads and writes must not be assumed to renew an entry unless the exact code path calls `extend_ttl`. |
 | Temporary | Signed oracle prices; SEP-41 allowances in `market_token` and `test_token` | Lowest intended lifetime. Expired temporary entries are permanently removed and cannot be restored, which is desirable for stale prices and allowances. | Oracle prices are extended to 120 ledgers. Allowances are extended to their caller-supplied expiration ledger. |
 
 The unused `libs/storage_ttl` crate is not part of the root Cargo workspace and
@@ -43,8 +50,13 @@ cadence. Ledger close time varies, so ledgers—not minutes—are authoritative.
 
 `MIN_POSITION_TTL` and `MAX_POSITION_TTL` are **not defined**. Positions receive
 the network's minimum persistent TTL when first written and are not explicitly
-extended afterward. The same is true for orders, deposits, withdrawals,
-balances, roles, and most `data_store` values.
+extended afterward — `order_handler`'s only position-TTL entrypoint,
+`bump_position_ttl`, rewrites the stored value with a plain `set()` but never
+calls `extend_ttl`. The same is true for deposits, withdrawals, balances,
+roles, and most `data_store` values. Orders and referral records are the
+exception: see "Persistent storage" below for the specific keys `order_handler`
+and `referral_storage` do extend, and which related keys in those same
+contracts they don't.
 
 The effective wall-clock time for a network value is approximately:
 
@@ -80,8 +92,52 @@ share one ledger entry and one lifetime.
 
 ### Persistent storage
 
-There is currently no bump for durable keys. A future helper must accept the
-exact typed storage key and extend the same entry that was read or written:
+Most durable keys still have no bump — see "Current gaps" below — but three
+contracts already extend specific keys inline, each with its own local
+`PERSISTENT_BUMP_TARGET` (~30 days) / `MIN_BUMP_THRESHOLD` (~15 days) pair
+rather than a shared helper:
+
+- `order_handler` extends `OrderStorageKey::Order` on `create_order` and
+  `update_order`, `OrderStorageKey::OrderExpiry` on `create_order` when the
+  caller supplies an expiry, and `OrderStorageKey::OrderFrozen` on
+  `freeze_order`. `PositionStorageKey::Position` is **not** extended this way:
+  the only position-TTL entrypoint, `bump_position_ttl`, rewrites the value
+  with a plain `set()` rather than calling `extend_ttl`, and the read-only
+  `get_order`/`get_position` getters don't renew anything either.
+- `data_store`'s `DataKey::B32Set` helpers (`add_bytes32_to_set`,
+  `remove_bytes32_from_set`, `get_bytes32_set_count`, `get_bytes32_set_at`,
+  `contains_bytes32`) extend the set entry itself on every call. Every caller
+  that adds/removes an order or position to/from an enumeration index goes
+  through these — `order_handler`'s `order_list_key`/`account_order_list_key`
+  and `increase_position_utils`/`decrease_position_utils`'s
+  `position_list_key`/`account_position_list_key` are all covered this way.
+  The equivalent `DataKey::AddrSet` helpers (`add_address_to_set`,
+  `remove_address_from_set`) do **not** call `extend_ttl`, nor do any of
+  `data_store`'s scalar getters/setters (`get_u128`/`set_u128`,
+  `apply_delta_to_u128`, `get_address`/`set_address`, etc.) — pool amounts,
+  OI, factors, and other `data_store` accounting values have no bump.
+- `referral_storage` extends `CodeOwner`, `TraderCode`, `ReferrerTier`,
+  `TierConfig`, and `ReferrerVolume` on their write paths and again on read
+  paths that touch them (`get_trader_referrer`, `get_trader_discount_bps`,
+  `renew_code`), and extends `TierUpgradeThreshold` for every tier the
+  auto-upgrade scan in `increment_referrer_volume` reads. It does **not**
+  extend `CodeOwner`'s TTL inside `transfer_code_ownership`, so a code that
+  changes hands but is never subsequently read or renewed keeps whatever TTL
+  it already had; the plain `get_trader_referral_code`/`get_code_owner`
+  getters likewise don't renew anything.
+
+Example of the pattern used by all three contracts:
+
+```rust,ignore
+env.storage().persistent().extend_ttl(
+    &OrderStorageKey::Order(key),
+    MIN_BUMP_THRESHOLD,
+    PERSISTENT_BUMP_TARGET,
+);
+```
+
+A future repository-wide helper must still accept the exact typed storage key
+and extend the same entry that was read or written:
 
 ```rust,ignore
 env.storage().persistent().extend_ttl(
@@ -92,10 +148,13 @@ env.storage().persistent().extend_ttl(
 ```
 
 It must be called for every durable entry touched by a successful operation,
-including both the primary object and its enumeration/index keys. Extending a
-position does not extend its account-position index in `data_store`, and vice
-versa. This is why a generic helper cannot infer the full set of entries to
-renew.
+including both the primary object and its enumeration/index keys — they are
+independent entries with independent TTLs. Today a position open/close does
+extend the `data_store` account-position index (via `add_bytes32_to_set`/
+`remove_bytes32_from_set`), but that same operation does **not** extend the
+position's own `PositionStorageKey::Position` entry, and nothing about the
+index write implies the primary object is covered too. This is why a generic
+helper cannot infer the full set of entries to renew from any single key.
 
 ### Temporary storage
 
@@ -227,10 +286,22 @@ The documentation exposes, but does not silently fix, these implementation
 gaps:
 
 1. No automatic instance-storage renewal.
-2. No persistent TTL renewal for positions or their indexes.
-3. No persistent TTL renewal for orders, deposits, withdrawals, roles, token
-   balances, or `data_store` accounting.
-4. No repository-wide minimum/maximum TTL policy constants.
+2. No persistent TTL renewal for positions themselves
+   (`PositionStorageKey::Position`). The `data_store` account-position and
+   position-list indexes that reference them **are** renewed, as a side
+   effect of `add_bytes32_to_set`/`remove_bytes32_from_set` on every position
+   open/close — but the primary position entry is not, so the index can
+   outlive the object it points to.
+3. No persistent TTL renewal for deposits, withdrawals, roles, token
+   balances, or most `data_store` accounting (pool amounts, OI, factors,
+   prices) and its `AddrSet` helpers. Orders, `data_store`'s `B32Set`
+   enumeration indexes, and referral-code/tier/volume records are a partial
+   exception — see "Persistent storage" above for exactly which keys
+   `order_handler`, `data_store`, and `referral_storage` cover, and which
+   related keys in those same contracts they don't.
+4. No repository-wide minimum/maximum TTL policy constants — `order_handler`,
+   `data_store`, and `referral_storage` each hard-code their own, identical
+   `PERSISTENT_BUMP_TARGET`/`MIN_BUMP_THRESHOLD` pair rather than sharing one.
 5. No on-chain TTL query/maintenance entrypoint or bundled off-chain monitor.
 
 Adding those mechanisms changes runtime behavior and rent costs and should be a

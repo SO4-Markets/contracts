@@ -76,6 +76,21 @@ fn compute_impact_usd(
     }
 }
 
+// ─── USD → token conversion for signed price impact ──────────────────────────
+
+/// Convert a signed USD price impact to token units, rounding correctly for
+/// the sign: a positive impact (payout to the trader) floors, while a
+/// negative impact (a charge) takes the ceiling of its magnitude before
+/// re-applying the sign — mirroring how fee amounts always round up so the
+/// protocol never under-collects.
+fn convert_impact_usd_to_tokens(env: &Env, impact_usd: i128, token_price: i128) -> i128 {
+    if impact_usd >= 0 {
+        mul_div_wide(env, impact_usd, TOKEN_PRECISION, token_price)
+    } else {
+        -mul_div_wide_up(env, -impact_usd, TOKEN_PRECISION, token_price)
+    }
+}
+
 // ─── Swap price impact ────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -139,7 +154,7 @@ pub fn apply_swap_impact_value(
         return 0;
     }
     // Convert USD impact to token amount
-    let impact_amount = mul_div_wide(env, impact_usd, TOKEN_PRECISION, token_price);
+    let impact_amount = convert_impact_usd_to_tokens(env, impact_usd, token_price);
 
     // Positive impact → paid from pool (reduce pool); negative → paid into pool (increase pool)
     let delta = -impact_amount;
@@ -186,7 +201,7 @@ pub fn get_swap_output_amount(
         env, data_store, market, token_in, token_out, amount_in, price_in, price_out,
     );
     let impact_amount = if price_out > 0 {
-        mul_div_wide(env, impact_usd, TOKEN_PRECISION, price_out)
+        convert_impact_usd_to_tokens(env, impact_usd, price_out)
     } else {
         0
     };
@@ -268,7 +283,7 @@ pub fn apply_position_impact_value(
     if impact_usd == 0 || index_token_price == 0 {
         return 0;
     }
-    let impact_amount = mul_div_wide(env, impact_usd, TOKEN_PRECISION, index_token_price);
+    let impact_amount = convert_impact_usd_to_tokens(env, impact_usd, index_token_price);
     let delta = -impact_amount; // positive impact → pool shrinks; negative → pool grows
     DataStoreClient::new(env, data_store).apply_delta_to_u128(
         caller,
