@@ -1427,9 +1427,16 @@ dependencies = [
 name = "market-util-reader"
 version = "0.1.0"
 dependencies = [
+ "data-store",
+ "deposit-handler",
+ "deposit-vault",
  "gmx-keys",
  "gmx-market-utils",
+ "gmx-math",
  "gmx-types",
+ "market-token",
+ "oracle",
+ "role-store",
  "soroban-sdk",
 ]
 

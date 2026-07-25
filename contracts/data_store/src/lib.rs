@@ -978,4 +978,28 @@ mod tests {
 
         assert_eq!(client.get_u128_cached(&key), 70);
     }
+
+    // ── Issue #351: InstanceU128 / InstanceI128 discriminant separation ──────
+
+    /// Instance-tier u128 and i128 values stored under the *same* underlying
+    /// BytesN<32> key must not collide. The DataKey enum wraps each raw key in
+    /// a type-specific discriminant precisely so InstanceU128(key) and
+    /// InstanceI128(key) address distinct storage slots; if the two variants
+    /// were ever merged back into one discriminant (as happened when
+    /// `InstanceU128` was accidentally declared twice, which shadowed the
+    /// distinct instance-tier slot `InstanceI128` was meant to occupy), one
+    /// write would silently clobber the other instead of the crate failing to
+    /// build.
+    #[test]
+    fn instance_u128_and_i128_do_not_collide_on_same_key() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xB0u8; 32]);
+
+        client.set_u128_instance(&admin, &key, &777u128);
+        client.set_i128_instance(&admin, &key, &-42i128);
+
+        assert_eq!(client.get_u128_instance(&key), 777);
+        assert_eq!(client.get_i128_instance(&key), -42);
+    }
 }
