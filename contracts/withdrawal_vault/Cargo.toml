@@ -15,3 +15,4 @@ role-store  = { path = "../role_store" }
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 role-store  = { path = "../role_store" }
+test-token  = { path = "../test_token" }
