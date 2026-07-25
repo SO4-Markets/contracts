@@ -36,7 +36,11 @@ CONTRACTS := \
 	fee_handler \
 	referral_storage \
 	reader \
-	exchange_router
+	exchange_router \
+	market_util_reader \
+	fee_batch_sweeper \
+	insurance_fund_router \
+	order_cleanup
 
 .PHONY: preflight print-config help-mx
 

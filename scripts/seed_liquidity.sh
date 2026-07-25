@@ -70,7 +70,9 @@ TETH="$MARKET_TOKEN_TETH_TUSDC_LONG"
 TXLM="$MARKET_TOKEN_TXLM_TUSDC_LONG"
 TUSDC="$MARKET_TOKEN_TWBTC_TUSDC_SHORT"  # same for all markets
 
-# claim_many has a Soroban auth-reuse bug — claim each token individually
+# claim_many's repeated per-token require_auth() was fixed in the faucet
+# contract (issue #399), but claim individually here for compatibility with
+# faucets already deployed from an older build.
 for _TOKEN in "$TWBTC" "$TETH" "$TXLM" "$TUSDC"; do
     stellar contract invoke \
         --id "$FAUCET" \

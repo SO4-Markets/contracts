@@ -8,8 +8,15 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Env, String,
+    BytesN, Env, String,
 };
+
+/// `network_id` (SHA-256 of the network passphrase) for the Stellar public
+/// network. Test tokens must never be initialized here (issue #400).
+const MAINNET_NETWORK_ID: [u8; 32] = [
+    0x7a, 0xc3, 0x39, 0x97, 0x54, 0x4e, 0x31, 0x75, 0xd2, 0x66, 0xbd, 0x02, 0x24, 0x39, 0xb2, 0x2c,
+    0xdb, 0x16, 0x50, 0x8c, 0x01, 0x16, 0x3f, 0x26, 0xe5, 0xcb, 0x2a, 0x3e, 0x10, 0x45, 0xa9, 0x79,
+];
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -23,6 +30,7 @@ pub enum Error {
     NegativeAmount = 6,
     AllowanceExpired = 7,
     Paused = 8,
+    MainnetNotAllowed = 9,
 }
 
 #[contracttype]
@@ -53,6 +61,7 @@ pub struct TestToken;
 #[contractimpl]
 impl TestToken {
     pub fn initialize(env: Env, owner: Address, decimal: u32, name: String, symbol: String) {
+        require_not_mainnet(&env);
         if env.storage().instance().has(&InstanceKey::Owner) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
@@ -241,6 +250,12 @@ impl TestToken {
     }
 }
 
+fn require_not_mainnet(env: &Env) {
+    if env.ledger().network_id() == BytesN::from_array(env, &MAINNET_NETWORK_ID) {
+        panic_with_error!(env, Error::MainnetNotAllowed);
+    }
+}
+
 fn get_owner(env: &Env) -> Address {
     env.storage()
         .instance()
@@ -349,7 +364,10 @@ fn spend_allowance(env: &Env, from: &Address, spender: &Address, amount: i128) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        Env,
+    };
 
     fn setup() -> (Env, Address, TestTokenClient<'static>) {
         let env = Env::default();
@@ -402,5 +420,23 @@ mod tests {
         client.unpause(&owner);
         client.mint(&owner, &alice, &1);
         assert_eq!(client.balance(&alice), 1);
+    }
+
+    /// Issue #400: initializing against the mainnet `network_id` must panic —
+    /// test tokens must never come up live on mainnet.
+    #[test]
+    #[should_panic]
+    fn initialize_rejects_mainnet_network_id() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_network_id(MAINNET_NETWORK_ID);
+        let owner = Address::generate(&env);
+        let id = env.register(TestToken, ());
+        TestTokenClient::new(&env, &id).initialize(
+            &owner,
+            &7,
+            &String::from_str(&env, "Test Wrapped Bitcoin"),
+            &String::from_str(&env, "TWBTC"),
+        );
     }
 }
