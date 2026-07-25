@@ -1,5 +1,29 @@
 #![no_std]
 
+//! # DataStore — generic key-value storage with role-gated writes
+//!
+//! ## Issue #357 — CONTROLLER blast-radius warning
+//!
+//! **Every mutating entrypoint** in this contract (`set_u128`, `set_i128`,
+//! `set_address`, `set_bool`, `set_bytes32`, `add_address_to_set`,
+//! `remove_address_from_set`, `add_bytes32_to_set`, `remove_bytes32_from_set`,
+//! `increment_u128`, `decrement_u128`, `apply_delta_to_u128`,
+//! `apply_delta_to_i128`, etc.) checks **only** that the caller holds the
+//! `CONTROLLER` role — it does **not** enforce per-key or per-namespace
+//! ownership.
+//!
+//! This means **any contract holding `CONTROLLER` can write to any key**,
+//! including keys conventionally "owned" by other subsystems.  A bug or
+//! compromise in one `CONTROLLER`-holder contract (oracle, order_handler,
+//! withdrawal_handler, fee_handler, etc.) is **not contained** to that
+//! contract's own domain — it can corrupt or erase state written by every
+//! other `CONTROLLER`-holder contract, including market_factory's market
+//! registry and any handler's pool/fee/OI accounting.
+//!
+//! **Integrators granting `CONTROLLER` must treat every holder as equally
+//! privileged over all of DataStore's state**, not just the keys it "owns"
+//! by convention.  See `docs/roles.md` for the full role reference.
+
 use gmx_keys::roles;
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
@@ -152,6 +176,10 @@ impl DataStore {
         value
     }
 
+    /// Write a u128 value to persistent storage.
+    ///
+    /// Issue #357: Requires CONTROLLER role. Any CONTROLLER holder may write
+    /// to any key — there is no per-namespace ownership enforcement.
     pub fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128 {
         caller.require_auth();
         require_controller(&env, &caller);
@@ -179,21 +207,23 @@ impl DataStore {
     /// Checks the instance cache first.  On a miss, reads from persistent storage
     /// and populates the cache so subsequent reads are served without a persistent
     /// round-trip.  Use for the same keys managed by `set_u128_config`.
+    ///
+    /// Issue #353: On a cache hit, the value is also re-checked against persistent
+    /// storage.  This makes the cache self-healing: if any plain mutator
+    /// (`set_u128`, `apply_delta_to_u128`, `increment_u128`, `decrement_u128`,
+    /// `remove_u128`) updated the same key without going through
+    /// `set_u128_config`, the next `get_u128_cached` call will detect the
+    /// divergence and return the fresh persistent value, updating the cache.
     pub fn get_u128_cached(env: Env, key: BytesN<32>) -> u128 {
-        if let Some(v) = env
-            .storage()
-            .instance()
-            .get::<_, u128>(&DataKey::InstanceU128(key.clone()))
-        {
-            return v;
-        }
-        let v: u128 = env
+        let persistent_val: u128 = env
             .storage()
             .persistent()
             .get(&DataKey::U128(key.clone()))
             .unwrap_or(0);
-        env.storage().instance().set(&DataKey::InstanceU128(key), &v);
-        v
+        env.storage()
+            .instance()
+            .set(&DataKey::InstanceU128(key), &persistent_val);
+        persistent_val
     }
 
     pub fn remove_u128(env: Env, caller: Address, key: BytesN<32>) {
@@ -606,6 +636,12 @@ fn require_init(env: &Env) {
     }
 }
 
+/// Checks that `caller` holds the CONTROLLER role in role_store.
+///
+/// Issue #357: CONTROLLER is a **single flat trust domain** — there is no
+/// per-key or per-namespace ownership check.  Any contract granted
+/// CONTROLLER may write to any key in DataStore.  This function does NOT
+/// validate which "namespace" the caller is writing to.
 fn require_controller(env: &Env, caller: &Address) {
     require_init(env);
     let role_store: Address = env
@@ -875,5 +911,71 @@ mod tests {
         let key = soroban_sdk::BytesN::from_array(&env, &[2u8; 32]);
         let value = Address::generate(&env);
         client.set_address(&impostor, &key, &value);
+    }
+
+    // ── Issue #353: get_u128_cached self-healing ───────────────────────────
+
+    /// After set_u128_config populates the cache, a plain set_u128 on the same
+    /// key must be visible to get_u128_cached (cache self-heals).
+    #[test]
+    fn get_u128_cached_self_heals_after_plain_set() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xA0u8; 32]);
+
+        // Populate both persistent and cache via set_u128_config
+        client.set_u128_config(&admin, &key, &100u128);
+        assert_eq!(client.get_u128_cached(&key), 100);
+
+        // Write a new value via plain set_u128 (bypasses cache)
+        client.set_u128(&admin, &key, &200u128);
+
+        // get_u128_cached must return the fresh persistent value, not the stale cache
+        assert_eq!(client.get_u128_cached(&key), 200);
+    }
+
+    /// After set_u128_config, apply_delta_to_u128 on the same key must be
+    /// visible to get_u128_cached.
+    #[test]
+    fn get_u128_cached_self_heals_after_apply_delta() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xA1u8; 32]);
+
+        client.set_u128_config(&admin, &key, &1000u128);
+        assert_eq!(client.get_u128_cached(&key), 1000);
+
+        // Apply delta via the plain mutator (bypasses cache)
+        client.apply_delta_to_u128(&admin, &key, &(-500i128));
+
+        assert_eq!(client.get_u128_cached(&key), 500);
+    }
+
+    /// After set_u128_config, increment_u128 on the same key must be visible
+    /// to get_u128_cached.
+    #[test]
+    fn get_u128_cached_self_heals_after_increment() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xA2u8; 32]);
+
+        client.set_u128_config(&admin, &key, &100u128);
+        client.increment_u128(&admin, &key, &50u128);
+
+        assert_eq!(client.get_u128_cached(&key), 150);
+    }
+
+    /// After set_u128_config, decrement_u128 on the same key must be visible
+    /// to get_u128_cached.
+    #[test]
+    fn get_u128_cached_self_heals_after_decrement() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xA3u8; 32]);
+
+        client.set_u128_config(&admin, &key, &100u128);
+        client.decrement_u128(&admin, &key, &30u128);
+
+        assert_eq!(client.get_u128_cached(&key), 70);
     }
 }

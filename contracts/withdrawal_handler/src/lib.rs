@@ -42,6 +42,8 @@ pub enum Error {
     ZeroWithdrawal = 7,
     InvalidMarket = 8,
     InvalidReceiver = 9,
+    /// Issue #370: execution_fee is below the configured global minimum.
+    InsufficientExecutionFee = 10,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -87,6 +89,7 @@ trait IDataStore {
     fn remove_bytes32_from_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
     fn contains_bytes32(env: Env, set_key: BytesN<32>, value: BytesN<32>) -> bool;
     fn increment_nonce(env: Env, caller: Address) -> u64;
+    fn get_min_execution_fee(env: Env) -> u128;
 }
 
 #[allow(dead_code)]
@@ -216,6 +219,18 @@ impl WithdrawalHandler {
             panic_with_error!(&env, Error::InvalidMarket);
         }
 
+        // Issue #370: validate execution_fee against the global minimum before
+        // any tokens move. execution_fee is collected in the market (LP) token; 0
+        // means no fee required.
+        let exec_fee = params.execution_fee;
+        if exec_fee < 0 {
+            panic_with_error!(&env, Error::InsufficientExecutionFee);
+        }
+        let min_fee = ds.get_min_execution_fee();
+        if min_fee > 0 && (exec_fee as u128) < min_fee {
+            panic_with_error!(&env, Error::InsufficientExecutionFee);
+        }
+
         // Pull LP tokens from caller → withdrawal_vault
         let market_addr = params.market.clone();
         token::Client::new(&env, &params.market).transfer(
@@ -223,6 +238,15 @@ impl WithdrawalHandler {
             &withdrawal_vault,
             &params.market_token_amount,
         );
+
+        // Issue #370: collect execution_fee in the market (LP) token.
+        if exec_fee > 0 {
+            token::Client::new(&env, &params.market).transfer(
+                &caller,
+                &withdrawal_vault,
+                &exec_fee,
+            );
+        }
 
         // Allocate withdrawal key from nonce
         let nonce = ds.increment_nonce(&handler);
@@ -394,6 +418,18 @@ impl WithdrawalHandler {
             &withdrawal.account,
             &withdrawal.market_token_amount,
         );
+
+        // Issue #370: refund execution_fee to the user on cancellation.
+        // The keeper earns execution_fee only when it actually attempts execution;
+        // a cancelled withdrawal did no keeper work, so the full fee is refunded.
+        if withdrawal.execution_fee > 0 {
+            WithdrawalVaultClient::new(&env, &withdrawal_vault).transfer_out(
+                &handler,
+                &withdrawal.market,
+                &withdrawal.account,
+                &withdrawal.execution_fee,
+            );
+        }
 
         remove_withdrawal(&env, &data_store, &handler, &key, &withdrawal.account);
 
