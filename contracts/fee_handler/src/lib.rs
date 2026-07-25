@@ -5,7 +5,7 @@
 
 use gmx_keys::{
     auto_compound_fees_key, claimable_fee_amount_key, claimable_funding_amount_key,
-    claimable_ui_fee_amount_key, roles, ui_fee_factor_key,
+    claimable_ui_fee_amount_key, pool_amount_key, roles, ui_fee_factor_key,
 };
 use gmx_math::FLOAT_PRECISION;
 use soroban_sdk::{
@@ -34,6 +34,10 @@ pub enum Error {
     Unauthorized = 3,
     NothingToClaim = 4,
     InvalidAmount = 5,
+    /// Issue #254: the pool's tracked `pool_amount` is less than the stored
+    /// claimable amount — a rounding-accumulation discrepancy — so the claim
+    /// is rejected rather than allowed to overdraft the pool's accounting.
+    InsufficientPoolBalance = 6,
 }
 
 // ─── External clients ─────────────────────────────────────────────────────────
@@ -173,10 +177,13 @@ impl FeeHandler {
 
     /// Sweep accumulated protocol fees for a market/token to `receiver`. FEE_KEEPER only.
     ///
-    /// Before withdrawing, the actual pool token balance is read and the transfer
-    /// is capped at `min(claimable, pool_balance)` (issue #254). In practice the
-    /// two values are equal because fees are accrued with ceiling rounding, so the
-    /// pool always holds at least as many tokens as are recorded as claimable.
+    /// Before withdrawing, the claimable amount is validated against the pool's
+    /// tracked `pool_amount` and rejected with `InsufficientPoolBalance` if it
+    /// would overdraft it (issue #254). The actual SEP-41 balance is then read as
+    /// a second guard and the transfer is capped at `min(claimable, pool_balance)`.
+    /// In practice all three values agree because fees are accrued with ceiling
+    /// rounding, so the pool always holds at least as many tokens as are recorded
+    /// as claimable. `pool_amount` is decremented by exactly what is transferred.
     pub fn claim_fees(
         env: Env,
         keeper: Address,
@@ -216,9 +223,22 @@ impl FeeHandler {
             return 0;
         }
 
-        // Balance-before-transfer guard (issue #254): cap the withdrawal at the
-        // pool's actual token balance to prevent any rounding-accumulated excess
-        // from draining tokens not backed by real fee deposits.
+        // Issue #254: assert the pool's tracked accounting actually backs the
+        // claimable amount before any transfer executes. Fee accrual always adds
+        // to `pool_amount` in lockstep with `claimable_fee_amount` (see
+        // decrease_position_utils/swap_utils/increase_position_utils), so in
+        // normal operation this can never fail; it exists to reject a claim
+        // outright if a rounding-accumulation bug ever lets claimable outrun it,
+        // instead of silently overdrafting the pool's accounting.
+        let pool_key = pool_amount_key(&env, &market, &token);
+        let pool_amt = ds.get_u128(&pool_key);
+        if amount > pool_amt {
+            panic_with_error!(&env, Error::InsufficientPoolBalance);
+        }
+
+        // Balance-before-transfer guard: cap the withdrawal at the pool's actual
+        // token balance too, in case the real SEP-41 balance ever falls short of
+        // the (now-validated) pool accounting.
         let transfer_amount = safe_transfer_amount(&env, &token, &market, amount);
         // Store the portion we could not yet claim (normally zero).
         ds.set_u128(&handler, &key, &amount.saturating_sub(transfer_amount));
@@ -233,6 +253,10 @@ impl FeeHandler {
             &receiver,
             &(transfer_amount as i128),
         );
+
+        // Pool amount is decremented by exactly the claimed amount (issue #254):
+        // these tokens have left the pool, so its accounting must reflect that.
+        ds.apply_delta_to_u128(&handler, &pool_key, &-(transfer_amount as i128));
 
         env.events().publish_event(&FeeClaimed {
             market,
@@ -570,9 +594,13 @@ mod tests {
         let w = setup();
         let fee_amount: u128 = ONE_TOKEN as u128 * 3; // 3 tokens
 
-        // Seed claimable fee amount in DataStore
+        // Seed claimable fee amount and the matching pool_amount accounting in
+        // DataStore, mirroring how fee accrual increments both together.
         let fee_key = gmx_keys::claimable_fee_amount_key(&w.env, &w.market_tk, &w.long_tk);
-        DsClient::new(&w.env, &w.ds).set_u128(&w.admin, &fee_key, &fee_amount);
+        let pool_key = gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk);
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(&w.admin, &fee_key, &fee_amount);
+        ds_c.set_u128(&w.admin, &pool_key, &fee_amount);
 
         // Mint tokens into the market pool so withdraw_from_pool can transfer
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(fee_amount as i128));
@@ -592,6 +620,11 @@ mod tests {
             (bal_after - bal_before) as u128,
             fee_amount,
             "receiver must get exactly the claimable fee amount"
+        );
+        assert_eq!(
+            ds_c.get_u128(&pool_key),
+            0,
+            "pool_amount must be decremented by exactly the claimed amount"
         );
 
         // DataStore entry must be zeroed after claim
@@ -640,17 +673,21 @@ mod tests {
         );
     }
 
-    /// claim_fees balance guard: when the pool holds fewer tokens than the stored
-    /// claimable amount, the transfer is capped at the pool balance and the
-    /// remainder stays in DataStore for future claiming.
+    /// claim_fees real-balance guard: pool_amount accounting backs the full
+    /// claimable amount, but the actual SEP-41 balance is short — the transfer
+    /// is capped at the real balance and the remainder stays claimable.
     #[test]
-    fn claim_fees_balance_guard_caps_at_pool_amount() {
+    fn claim_fees_balance_guard_caps_at_real_token_balance() {
         let w = setup();
         let claimable: u128 = ONE_TOKEN as u128 * 5; // DataStore says 5 tokens are owed
-        let pool_held: i128 = ONE_TOKEN * 3; // but the pool only holds 3
+        let pool_held: i128 = ONE_TOKEN * 3; // but the real token balance only holds 3
 
         let fee_key = gmx_keys::claimable_fee_amount_key(&w.env, &w.market_tk, &w.long_tk);
-        DsClient::new(&w.env, &w.ds).set_u128(&w.admin, &fee_key, &claimable);
+        let pool_key = gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk);
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(&w.admin, &fee_key, &claimable);
+        // pool_amount accounting matches claimable — only the real balance is short.
+        ds_c.set_u128(&w.admin, &pool_key, &claimable);
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &pool_held);
 
         let receiver = Address::generate(&w.env);
@@ -669,16 +706,105 @@ mod tests {
         );
 
         // The unclaimed remainder stays in DataStore
-        let remaining = DsClient::new(&w.env, &w.ds).get_u128(&fee_key);
+        let remaining = ds_c.get_u128(&fee_key);
         assert_eq!(
             remaining,
             claimable - pool_held as u128,
             "DataStore must retain the unclaimed portion"
         );
 
+        // pool_amount is decremented by exactly what was transferred, not the full claimable
+        assert_eq!(
+            ds_c.get_u128(&pool_key),
+            claimable - pool_held as u128,
+            "pool_amount must be decremented by exactly the transferred amount"
+        );
+
         // Receiver's token balance reflects only what was actually transferred
         let recv_bal = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&receiver);
         assert_eq!(recv_bal, pool_held, "receiver gets only the pool-backed amount");
+    }
+
+    /// claim_fees must revert with InsufficientPoolBalance when the stored
+    /// claimable amount outruns the pool's own accounting (issue #254 repro:
+    /// a rounding-accumulation bug leaves claimable > pool_amount).
+    #[test]
+    #[should_panic]
+    fn claim_fees_reverts_when_claimable_exceeds_pool_amount() {
+        let w = setup();
+        let claimable: u128 = ONE_TOKEN as u128 * 5;
+        let pool_amount: u128 = ONE_TOKEN as u128 * 3; // accounting says only 3 are backed
+
+        let fee_key = gmx_keys::claimable_fee_amount_key(&w.env, &w.market_tk, &w.long_tk);
+        let pool_key = gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk);
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(&w.admin, &fee_key, &claimable);
+        ds_c.set_u128(&w.admin, &pool_key, &pool_amount);
+        // Even if the real token balance could cover it, the accounting check must
+        // reject the claim before any transfer is attempted.
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(claimable as i128));
+
+        let receiver = Address::generate(&w.env);
+        FeeHandlerClient::new(&w.env, &w.handler).claim_fees(
+            &w.keeper,
+            &w.market_tk,
+            &w.long_tk,
+            &receiver,
+        );
+    }
+
+    /// Fuzz test (issue #254 AC): claim across many random (claimable, pool_amount)
+    /// pairs and assert pool_amount in DataStore never goes negative — the
+    /// underlying u128 storage would panic on underflow, so this also proves
+    /// claim_fees never attempts to decrement past zero.
+    #[test]
+    fn fuzz_claim_fees_pool_amount_never_underflows() {
+        let w = setup();
+        w.env.cost_estimate().budget().reset_unlimited();
+
+        let fee_key = gmx_keys::claimable_fee_amount_key(&w.env, &w.market_tk, &w.long_tk);
+        let pool_key = gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk);
+        let ds_c = DsClient::new(&w.env, &w.ds);
+
+        // Mint a large fixed real balance once so only the pool_amount guard (not
+        // the real-balance cap) is ever the limiting factor across all iterations.
+        let max_per_iter = ONE_TOKEN * 10;
+        StellarAssetClient::new(&w.env, &w.long_tk)
+            .mint(&w.market_tk, &(max_per_iter * 2_000));
+
+        // Linear-congruential generator — deterministic, good period, no std needed.
+        let mut state: u64 = 0x1234_5678_9abc_def0_u64;
+
+        for _ in 0u32..2_000 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let claimable = ((state >> 20) % max_per_iter as u64) as u128;
+
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let pool_amount = ((state >> 20) % max_per_iter as u64) as u128;
+
+            ds_c.set_u128(&w.admin, &fee_key, &claimable);
+            ds_c.set_u128(&w.admin, &pool_key, &pool_amount);
+
+            let receiver = Address::generate(&w.env);
+            if claimable > pool_amount {
+                let result = FeeHandlerClient::new(&w.env, &w.handler)
+                    .try_claim_fees(&w.keeper, &w.market_tk, &w.long_tk, &receiver);
+                assert!(result.is_err(), "must revert when claimable > pool_amount");
+                // A reverted call must leave pool_amount unchanged, never underflowed.
+                assert_eq!(ds_c.get_u128(&pool_key), pool_amount);
+            } else {
+                FeeHandlerClient::new(&w.env, &w.handler)
+                    .claim_fees(&w.keeper, &w.market_tk, &w.long_tk, &receiver);
+                assert!(
+                    ds_c.get_u128(&pool_key) <= pool_amount,
+                    "pool_amount must never increase or underflow past its prior value"
+                );
+            }
+        }
     }
 
     /// claim_funding_fees transfers the claimable amount to the account and zeroes the entry.
@@ -994,9 +1120,12 @@ mod tests {
         let w = setup();
         let fee_amount: u128 = ONE_TOKEN as u128 * 5;
 
-        // Seed claimable fees in DataStore.
+        // Seed claimable fees and matching pool_amount accounting in DataStore.
         let claim_key = gmx_keys::claimable_fee_amount_key(&w.env, &w.market_tk, &w.long_tk);
-        DsClient::new(&w.env, &w.ds).set_u128(&w.handler, &claim_key, &fee_amount);
+        let pool_key = gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk);
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(&w.handler, &claim_key, &fee_amount);
+        ds_c.set_u128(&w.handler, &pool_key, &fee_amount);
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(fee_amount as i128));
 
         FeeHandlerClient::new(&w.env, &w.handler).upgrade(&BytesN::from_array(&w.env, &[0u8; 32]));
