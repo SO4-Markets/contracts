@@ -776,7 +776,7 @@ pub fn fee_tier_volume_threshold_key(env: &Env, market: &Address, tier: u32) -> 
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "FEE_TIER_VOL_THRESH");
     push_addr(&mut b, env, market);
-    b.push_back((tier & 0xff) as u8);
+    b.append(&Bytes::from_slice(env, &tier.to_be_bytes()));
     sha256(env, &b)
 }
 
@@ -785,7 +785,7 @@ pub fn fee_tier_position_fee_factor_key(env: &Env, market: &Address, tier: u32) 
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "FEE_TIER_POS_FEE");
     push_addr(&mut b, env, market);
-    b.push_back((tier & 0xff) as u8);
+    b.append(&Bytes::from_slice(env, &tier.to_be_bytes()));
     sha256(env, &b)
 }
 
