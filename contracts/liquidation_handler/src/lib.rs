@@ -65,6 +65,19 @@ trait IOracle {
     fn require_price_fresh(env: Env, token: Address, expected_ledger_seq: u32) -> PriceProps;
 }
 
+/// Mirrors `order_handler::LiquidatePositionResult` field-for-field (issue #437).
+/// liquidation_handler intentionally has no crate dependency on order_handler
+/// (only this locally-declared contractclient interface), so this struct must
+/// be kept in sync by hand; a named, ScMap-encoded struct at least fails to
+/// decode on drift instead of silently reordering values the way a positional
+/// tuple return would.
+#[contracttype]
+pub struct LiquidatePositionResult {
+    pub execution_price: i128,
+    pub keeper_execution_fee: i128,
+    pub pnl_usd: i128,
+}
+
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "OrderHandlerClient")]
 trait IOrderHandler {
@@ -75,7 +88,7 @@ trait IOrderHandler {
         market: Address,
         collateral_token: Address,
         is_long: bool,
-    );
+    ) -> LiquidatePositionResult;
     fn get_position(env: Env, key: BytesN<32>) -> Option<PositionProps>;
 }
 
@@ -244,7 +257,7 @@ impl LiquidationHandler {
 
         // Delegate execution to order_handler (positions live there).
         // order_handler emits the structured pos_liq event with result details.
-        OrderHandlerClient::new(&env, &order_handler).liquidate_position(
+        let result = OrderHandlerClient::new(&env, &order_handler).liquidate_position(
             &keeper,
             &account,
             &market,
@@ -252,9 +265,22 @@ impl LiquidationHandler {
             &is_long,
         );
 
-        // Emit keeper-level confirmation (separate from the position event in order_handler)
-        env.events()
-            .publish((symbol_short!("liq_done"),), (keeper, account, market, is_long));
+        // Issue #437: carry price, fee, and PnL on the outer confirmation event too
+        // (separate from the position event in order_handler) so this event alone
+        // is enough to reconstruct what a liquidation cost/paid without replaying
+        // storage state.
+        env.events().publish(
+            (symbol_short!("liq_done"),),
+            (
+                keeper,
+                account,
+                market,
+                is_long,
+                result.execution_price,
+                result.keeper_execution_fee,
+                result.pnl_usd,
+            ),
+        );
     }
 }
 
@@ -615,6 +641,98 @@ mod tests {
                 .get_position(&pos_key)
                 .is_none(),
             "position key must be removed after liquidation"
+        );
+    }
+
+    // ── Issue #416: liquidation keeper execution fee ──────────────────────────
+
+    /// Liquidating a position with a configured nonzero keeper execution fee
+    /// must pay the keeper that exact fee out of the position's collateral,
+    /// without reverting.
+    #[test]
+    fn liquidate_with_nonzero_execution_fee_pays_keeper() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let entry_price = 2_000 * fp;
+        set_prices(&w, entry_price);
+
+        let collateral = ONE_TOKEN;
+        let size_usd = 20_000 * fp;
+        open_long_position(&w, collateral, size_usd);
+
+        // Configure a nonzero keeper execution fee for this market.
+        let fee_amount = ONE_TOKEN / 100; // 0.01 long_tk
+        DsClient::new(&w.env, &w.ds).set_u128(
+            &w.admin,
+            &gmx_keys::liquidation_execution_fee_key(&w.env, &w.market_tk),
+            &(fee_amount as u128),
+        );
+
+        let crash_price = 100 * fp;
+        set_prices(&w, crash_price);
+
+        let keeper_balance_before =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.liq_keeper);
+
+        LiquidationHandlerClient::new(&w.env, &w.liq_handler).liquidate_position(
+            &w.liq_keeper,
+            &w.user,
+            &w.market_tk,
+            &w.long_tk,
+            &true,
+        );
+
+        let keeper_balance_after =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.liq_keeper);
+        assert_eq!(
+            keeper_balance_after - keeper_balance_before,
+            fee_amount,
+            "keeper must receive the configured execution fee"
+        );
+    }
+
+    /// The keeper execution fee is capped at the position's available
+    /// collateral — liquidation must not revert even when the configured fee
+    /// exceeds what the position can pay.
+    #[test]
+    fn liquidate_with_execution_fee_exceeding_collateral_caps_at_collateral() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let entry_price = 2_000 * fp;
+        set_prices(&w, entry_price);
+
+        let collateral = ONE_TOKEN; // 1 token = $2000 at entry
+        let size_usd = 20_000 * fp;
+        open_long_position(&w, collateral, size_usd);
+
+        // Configure a fee far larger than the position's collateral could ever pay.
+        let fee_amount = ONE_TOKEN * 1_000;
+        DsClient::new(&w.env, &w.ds).set_u128(
+            &w.admin,
+            &gmx_keys::liquidation_execution_fee_key(&w.env, &w.market_tk),
+            &(fee_amount as u128),
+        );
+
+        let crash_price = 100 * fp;
+        set_prices(&w, crash_price);
+
+        let keeper_balance_before =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.liq_keeper);
+
+        LiquidationHandlerClient::new(&w.env, &w.liq_handler).liquidate_position(
+            &w.liq_keeper,
+            &w.user,
+            &w.market_tk,
+            &w.long_tk,
+            &true,
+        );
+
+        let keeper_balance_after =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.liq_keeper);
+        assert_eq!(
+            keeper_balance_after - keeper_balance_before,
+            collateral,
+            "fee must be capped at the position's collateral, not the full configured fee"
         );
     }
 

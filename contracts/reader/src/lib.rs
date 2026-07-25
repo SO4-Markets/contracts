@@ -1295,9 +1295,9 @@ impl Reader {
         // Bubble-sort descending by pnl_to_size_ratio_bps.
         let candidates_len = candidates.len();
         if candidates_len > 1 {
-            let mut k = 0usize;
+            let mut k = 0u32;
             while k < candidates_len {
-                let mut m = 0usize;
+                let mut m = 0u32;
                 while m + 1 < candidates_len - k {
                     let cand_m = candidates.get(m).unwrap();
                     let cand_m_next = candidates.get(m + 1).unwrap();
@@ -1313,12 +1313,12 @@ impl Reader {
         }
 
         let mut result: Vec<AdlCandidate> = Vec::new(&env);
-        let take = if candidates_len > (limit as usize) {
-            limit as usize
+        let take = if candidates_len > limit {
+            limit
         } else {
             candidates_len
         };
-        let mut idx = 0usize;
+        let mut idx = 0u32;
         while idx < take {
             result.push_back(candidates.get(idx).unwrap());
             idx += 1;

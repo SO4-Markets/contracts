@@ -6,10 +6,10 @@ use gmx_keys::{
     cumulative_borrowing_factor_updated_at_key, funding_amount_per_size_key,
     funding_decrease_factor_per_second_key, funding_exponent_factor_key, funding_factor_key,
     funding_increase_factor_per_second_key, funding_updated_at_key,
-    max_funding_factor_per_second_key, max_open_interest_key, max_pool_amount_key,
-    min_funding_factor_per_second_key, open_interest_in_tokens_key, open_interest_key,
-    pool_amount_key, position_impact_pool_amount_key, saved_funding_factor_per_second_key,
-    swap_impact_pool_amount_key,
+    max_funding_factor_per_second_key, max_open_interest_key, max_pnl_factor_for_adl_key,
+    max_pool_amount_key, min_funding_factor_per_second_key, open_interest_in_tokens_key,
+    open_interest_key, pool_amount_key, position_impact_pool_amount_key,
+    saved_funding_factor_per_second_key, swap_impact_pool_amount_key,
 };
 use gmx_math::{mul_div_wide, pow_factor, FLOAT_PRECISION, TOKEN_PRECISION};
 use gmx_types::{MarketProps, PoolValueInfo};
@@ -180,6 +180,54 @@ pub fn get_pnl(
     } else {
         oi_usd - position_value
     }
+}
+
+// ─── ADL (Auto-Deleveraging) ───────────────────────────────────────────────────
+
+/// True when total trader PnL / pool_value exceeds the configured ADL threshold
+/// for this market/side (`max_pnl_factor_for_adl_key`). A threshold of 0 means
+/// ADL is disabled for that market/side.
+///
+/// Shared by `adl_handler::is_adl_required` (view-only check) and
+/// `order_handler::execute_adl` (issue #417: the real mutating entry point must
+/// re-validate this itself rather than trust the wrapper contract's check —
+/// the same pattern `validate_open_interest` follows as the single source of
+/// truth for the OI cap).
+///
+/// `index_price` is the mid-market price used for pool valuation; `pnl_price`
+/// is the maximize-resolved price (`PriceProps::pick_price_for_pnl`) used for
+/// the PnL calculation itself (issue #377).
+pub fn is_adl_required(
+    env: &Env,
+    ds: &Address,
+    market: &MarketProps,
+    long_price: i128,
+    short_price: i128,
+    index_price: i128,
+    pnl_price: i128,
+    is_long: bool,
+) -> bool {
+    let max_pnl_factor = DataStoreClient::new(env, ds)
+        .get_u128(&max_pnl_factor_for_adl_key(env, &market.market_token, is_long))
+        as i128;
+    if max_pnl_factor == 0 {
+        return false;
+    }
+
+    // Minimize pool value (conservative: harder to trigger ADL)
+    let pool_info = get_pool_value(env, ds, market, long_price, short_price, index_price, false);
+    if pool_info.pool_value <= 0 {
+        return false;
+    }
+
+    // Maximize trader PnL (worst case for pool)
+    let pnl = get_pnl(env, ds, market, pnl_price, is_long, true);
+    if pnl <= 0 {
+        return false;
+    }
+
+    let pnl_factor = mul_div_wide(env, pnl, FLOAT_PRECISION, pool_info.pool_value);
+    pnl_factor > max_pnl_factor
 }
 
 // ─── Borrowing fees ───────────────────────────────────────────────────────────
