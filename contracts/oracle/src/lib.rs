@@ -3,7 +3,10 @@
 //! Mirrors GMX's Oracle.sol model:
 //!   - Authorized keepers submit signed `(token, min_price, max_price, timestamp)` bundles
 //!     before each execution call.
-//!   - Prices live in **temporary** storage and auto-expire after one ledger.
+//!   - Prices are validated at submission time (300s / 60-ledger window) and kept in temporary
+//!     storage for up to PRICE_TTL_LEDGERS (120 ledgers). `get_primary_price` enforces an
+//!     additional read-time staleness check (PRICE_FRESHNESS_LEDGERS = 60) to match the
+//!     submission window — prices older than that are rejected with `StalePrice` (#379).
 //!   - Consumers call `get_primary_price(token)` to read the current price.
 //!   - Stablecoin prices can be pinned in `data_store` (stable_price_key) and
 //!     returned via `get_stable_price`.
@@ -57,14 +60,12 @@ enum TempKey {
 }
 
 /// Ledgers to keep a submitted price readable in temporary storage.
-///
-/// `set_prices` and `execute_*` run in **separate** transactions, and a keeper
-/// may drain a batch of pending orders one-by-one after a single price set.
-/// Bumping the temp TTL keeps prices readable across that window so later
-/// executions in the batch don't revert with `PriceNotFound`. Kept short so
-/// prices remain ephemeral (≈10 min at ~5s/ledger), in line with the 300s /
-/// 60-ledger freshness window enforced at submission time.
 const PRICE_TTL_LEDGERS: u32 = 120;
+
+/// Maximum age of a stored price at read time. Matches the submission-time
+/// 60-ledger window so `get_primary_price` rejects prices that were valid at
+/// submission but have since drifted past the documented freshness window (#379).
+const PRICE_FRESHNESS_LEDGERS: u32 = 60;
 
 // ─── Signed price submitted by keeper ────────────────────────────────────────
 
@@ -109,6 +110,7 @@ trait IDataStore {
     fn get_address_set_at(env: Env, set_key: BytesN<32>, start: u32, end: u32) -> Vec<Address>;
     fn set_bool(env: Env, caller: Address, key: BytesN<32>, value: bool) -> bool;
     fn set_bytes32(env: Env, caller: Address, key: BytesN<32>, value: BytesN<32>);
+    fn add_address_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: Address);
 }
 
 #[contracttype]
@@ -256,25 +258,34 @@ impl Oracle {
 
     // ── Price reads ───────────────────────────────────────────────────────────
 
-    /// Returns the current price for a token. Panics if not set this execution.
+    /// Returns the current price for a token. Panics if not set or stale (#379).
     pub fn get_primary_price(env: Env, token: Address) -> PriceProps {
         let stored: StoredPrice = env
             .storage()
             .temporary()
             .get::<TempKey, StoredPrice>(&TempKey::Price(token))
             .unwrap_or_else(|| panic_with_error!(&env, Error::PriceNotFound));
+        if price_is_stale(env.ledger().sequence(), stored.ledger_seq) {
+            panic_with_error!(&env, Error::StalePrice);
+        }
         PriceProps {
             min: stored.min,
             max: stored.max,
         }
     }
 
-    /// Returns the price for a token, or None if not set.
+    /// Returns the price for a token, or None if not set or stale (#379).
     pub fn try_get_price(env: Env, token: Address) -> Option<PriceProps> {
         env.storage()
             .temporary()
             .get::<TempKey, StoredPrice>(&TempKey::Price(token))
-            .map(|s| PriceProps { min: s.min, max: s.max })
+            .and_then(|s| {
+                if price_is_stale(env.ledger().sequence(), s.ledger_seq) {
+                    None
+                } else {
+                    Some(PriceProps { min: s.min, max: s.max })
+                }
+            })
     }
 
     /// Returns pinned stable price from data_store, or None if not configured.
@@ -324,6 +335,9 @@ impl Oracle {
             .temporary()
             .get::<TempKey, StoredPrice>(&TempKey::Price(token))
             .unwrap_or_else(|| panic_with_error!(&env, Error::PriceNotFound));
+        if price_is_stale(env.ledger().sequence(), stored.ledger_seq) {
+            panic_with_error!(&env, Error::StalePrice);
+        }
         PriceProps {
             min: stored.min,
             max: stored.max,
@@ -401,6 +415,29 @@ impl Oracle {
             },
         );
     }
+
+    /// Register a market in the circuit-breaker reverse index for a token (#380).
+    ///
+    /// After registration, `check_circuit_breaker` uses this index instead of
+    /// scanning every market. Call this once per (token, market) pair when a
+    /// market is deployed.
+    pub fn register_market_for_circuit_breaker(
+        env: Env,
+        caller: Address,
+        token: Address,
+        market: Address,
+    ) {
+        caller.require_auth();
+        require_admin(&env, &caller);
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let key = token_circuit_markets_key(&env, &token);
+        DataStoreClient::new(&env, &data_store)
+            .add_address_to_set(&env.current_contract_address(), &key, &market);
+    }
 }
 
 // ─── Test-only price submission ────────────────────────────────────────────────
@@ -472,6 +509,25 @@ fn require_order_keeper(env: &Env, caller: &Address) {
     if !RoleStoreClient::new(env, &role_store).has_role(caller, &role) {
         panic_with_error!(env, Error::Unauthorized);
     }
+}
+
+/// Returns true if the stored price is too old to act on (#379).
+/// Uses saturating_sub to handle the impossible case where stored_seq > current_seq.
+fn price_is_stale(current_seq: u32, stored_seq: u32) -> bool {
+    current_seq.saturating_sub(stored_seq) > PRICE_FRESHNESS_LEDGERS
+}
+
+/// sha256("CB_TOKEN_MARKETS" ‖ token) — reverse index key for #380.
+fn token_circuit_markets_key(env: &Env, token: &Address) -> BytesN<32> {
+    let mut buf = Bytes::new(env);
+    let prefix = Bytes::from_slice(env, b"CB_TOKEN_MARKETS");
+    buf.append(&prefix);
+    let s: soroban_sdk::String = token.to_string();
+    let str_len = s.len() as usize;
+    let mut raw = [0u8; 64];
+    s.copy_into_slice(&mut raw[..str_len]);
+    buf.append(&Bytes::from_slice(env, &raw[..str_len]));
+    env.crypto().sha256(&buf).into()
 }
 
 fn require_admin(env: &Env, caller: &Address) {
@@ -546,38 +602,49 @@ fn check_circuit_breaker(env: &Env, data_store: &Address, token: &Address, new_m
             let deviation_bps = ((deviation_val as u128) * 10000) / (last_price as u128);
 
             let ds = DataStoreClient::new(env, data_store);
-            let market_list_k = gmx_keys::market_list_key(env);
-            let market_count = ds.get_address_set_count(&market_list_k);
-            let markets = ds.get_address_set_at(&market_list_k, &0, &market_count);
+
+            // #380: Use the reverse index (token → markets) when populated to avoid
+            // scanning every registered market on every price submission.
+            let reverse_key = token_circuit_markets_key(env, token);
+            let indexed_count = ds.get_address_set_count(&reverse_key);
+            let markets = if indexed_count > 0 {
+                ds.get_address_set_at(&reverse_key, &0, &indexed_count)
+            } else {
+                // Fallback: full scan for markets not yet registered in the index.
+                let market_list_k = gmx_keys::market_list_key(env);
+                let market_count = ds.get_address_set_count(&market_list_k);
+                let all_markets = ds.get_address_set_at(&market_list_k, &0, &market_count);
+                let mut matched = Vec::new(env);
+                for i in 0..all_markets.len() {
+                    let m = all_markets.get(i).unwrap();
+                    let index_token = ds.get_address(&gmx_keys::market_index_token_key(env, &m));
+                    let long_token = ds.get_address(&gmx_keys::market_long_token_key(env, &m));
+                    let short_token = ds.get_address(&gmx_keys::market_short_token_key(env, &m));
+                    if (index_token.is_some() && index_token.unwrap() == *token)
+                        || (long_token.is_some() && long_token.unwrap() == *token)
+                        || (short_token.is_some() && short_token.unwrap() == *token)
+                    {
+                        matched.push_back(m);
+                    }
+                }
+                matched
+            };
 
             for i in 0..markets.len() {
                 let market = markets.get(i).unwrap();
-                let index_token = ds.get_address(&gmx_keys::market_index_token_key(env, &market));
-                let long_token = ds.get_address(&gmx_keys::market_long_token_key(env, &market));
-                let short_token = ds.get_address(&gmx_keys::market_short_token_key(env, &market));
-
-                let matches_market = (index_token.is_some() && index_token.unwrap() == *token)
-                    || (long_token.is_some() && long_token.unwrap() == *token)
-                    || (short_token.is_some() && short_token.unwrap() == *token);
-
-                if matches_market {
-                    let threshold = ds.get_u128(&gmx_keys::circuit_breaker_factor_key(env, &market));
-                    if threshold > 0 && deviation_bps > threshold {
-                        // Set market pause flag to true
-                        ds.set_bool(&env.current_contract_address(), &gmx_keys::is_market_paused_key(env, &market), &true);
-
-                        // Emit event
-                        env.events().publish(
-                            (soroban_sdk::symbol_short!("cb_trip"),),
-                            CircuitBreakerTripped {
-                                market: market.clone(),
-                                token: token.clone(),
-                                old_price: last_price,
-                                new_price,
-                                deviation_bps,
-                            }
-                        );
-                    }
+                let threshold = ds.get_u128(&gmx_keys::circuit_breaker_factor_key(env, &market));
+                if threshold > 0 && deviation_bps > threshold {
+                    ds.set_bool(&env.current_contract_address(), &gmx_keys::is_market_paused_key(env, &market), &true);
+                    env.events().publish(
+                        (soroban_sdk::symbol_short!("cb_trip"),),
+                        CircuitBreakerTripped {
+                            market: market.clone(),
+                            token: token.clone(),
+                            old_price: last_price,
+                            new_price,
+                            deviation_bps,
+                        }
+                    );
                 }
             }
         }
