@@ -16,3 +16,5 @@ issues_v2.md
 .issues-progress.json
 push_issues.py
 push-github-issues.sh
+issue.md
+pr.md

@@ -10,6 +10,20 @@ crate-type = ["cdylib", "lib"]
 [dependencies]
 soroban-sdk = { workspace = true }
 gmx-types   = { path = "../../libs/types" }
+gmx-keys    = { path = "../../libs/keys" }
 
 [dev-dependencies]
-soroban-sdk = { workspace = true, features = ["testutils"] }
+soroban-sdk         = { workspace = true, features = ["testutils"] }
+gmx-keys            = { path = "../../libs/keys" }
+gmx-math            = { path = "../../libs/math" }
+role-store          = { path = "../role_store" }
+data-store          = { path = "../data_store" }
+oracle              = { path = "../oracle", features = ["testutils"] }
+deposit-vault       = { path = "../deposit_vault" }
+withdrawal-vault    = { path = "../withdrawal_vault" }
+order-vault         = { path = "../order_vault" }
+deposit-handler     = { path = "../deposit_handler" }
+withdrawal-handler  = { path = "../withdrawal_handler" }
+order-handler       = { path = "../order_handler" }
+liquidation-handler = { path = "../liquidation_handler" }
+market-token        = { path = "../market_token" }

@@ -8,3 +8,6 @@ publish = false
 soroban-sdk = { workspace = true }
 
 [lib]
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

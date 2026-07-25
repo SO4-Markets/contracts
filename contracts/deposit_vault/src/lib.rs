@@ -9,8 +9,8 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, contracterror, panic_with_error,
-    Address, BytesN, Env, token,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, BytesN,
+    Env,
 };
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -20,8 +20,9 @@ use soroban_sdk::{
 #[repr(u32)]
 pub enum Error {
     AlreadyInitialized = 1,
-    NotInitialized     = 2,
-    Unauthorized       = 3,
+    NotInitialized = 2,
+    Unauthorized = 3,
+    InvalidAmount = 4,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -58,21 +59,28 @@ impl DepositVault {
         if env.storage().instance().has(&InstanceKey::Initialized) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
-        env.storage().instance().set(&InstanceKey::Initialized, &true);
-        env.storage().instance().set(&InstanceKey::RoleStore, &role_store);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Initialized, &true);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::RoleStore, &role_store);
     }
 
     /// Snapshot the balance of `token` in this vault.
     /// Returns the amount received since the last snapshot (delta).
     /// Called by deposit_handler right after the user's transfer lands.
     pub fn record_transfer_in(env: Env, token: Address) -> i128 {
-        let current = token::Client::new(&env, &token)
-            .balance(&env.current_contract_address());
-        let recorded: i128 = env.storage().persistent()
+        let current = token::Client::new(&env, &token).balance(&env.current_contract_address());
+        let recorded: i128 = env
+            .storage()
+            .persistent()
             .get(&DataKey::TokenBalance(token.clone()))
             .unwrap_or(0);
         let delta = current - recorded;
-        env.storage().persistent().set(&DataKey::TokenBalance(token), &current);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenBalance(token), &current);
         delta
     }
 
@@ -87,17 +95,27 @@ impl DepositVault {
     ) {
         caller.require_auth();
         require_controller(&env, &caller);
-        token::Client::new(&env, &token)
-            .transfer(&env.current_contract_address(), &receiver, &amount);
+
+        if amount <= 0 {
+            panic_with_error!(&env, Error::InvalidAmount);
+        }
+
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &receiver,
+            &amount,
+        );
         // Sync recorded balance
-        let new_bal = token::Client::new(&env, &token)
-            .balance(&env.current_contract_address());
-        env.storage().persistent().set(&DataKey::TokenBalance(token), &new_bal);
+        let new_bal = token::Client::new(&env, &token).balance(&env.current_contract_address());
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenBalance(token), &new_bal);
     }
 
     /// Read the last recorded balance for a token (for diagnostics).
     pub fn get_recorded_balance(env: Env, token: Address) -> i128 {
-        env.storage().persistent()
+        env.storage()
+            .persistent()
             .get(&DataKey::TokenBalance(token))
             .unwrap_or(0)
     }
@@ -106,7 +124,10 @@ impl DepositVault {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn require_controller(env: &Env, caller: &Address) {
-    let rs: Address = env.storage().instance().get(&InstanceKey::RoleStore)
+    let rs: Address = env
+        .storage()
+        .instance()
+        .get(&InstanceKey::RoleStore)
         .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
     if !RoleStoreClient::new(env, &rs).has_role(caller, &gmx_keys::roles::controller(env)) {
         panic_with_error!(env, Error::Unauthorized);
@@ -118,9 +139,10 @@ fn require_controller(env: &Env, caller: &Address) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
-    use role_store::{RoleStore, RoleStoreClient as RsClient};
     use gmx_keys::roles;
+    use role_store::{RoleStore, RoleStoreClient as RsClient};
+    use soroban_sdk::{testutils::Address as _, Env};
+    use test_token::{TestToken, TestTokenClient};
 
     fn setup(env: &Env) -> (Address, Address, Address) {
         let admin = Address::generate(env);
@@ -133,12 +155,23 @@ mod tests {
         (admin, rs, vault)
     }
 
+    fn register_token(env: &Env) -> (Address, Address) {
+        let token = env.register(TestToken, ());
+        let owner = Address::generate(env);
+        TestTokenClient::new(env, &token).initialize(
+            &owner,
+            &7u32,
+            &soroban_sdk::String::from_str(env, "Test Token"),
+            &soroban_sdk::String::from_str(env, "TST"),
+        );
+        (token, owner)
+    }
+
     #[test]
     fn initialize_works() {
         let env = Env::default();
         env.mock_all_auths();
         let (_, _, vault) = setup(&env);
-        // Just verifies no panic
         let _ = vault;
     }
 
@@ -148,9 +181,111 @@ mod tests {
         env.mock_all_auths();
         let (_, _, vault) = setup(&env);
         let token = Address::generate(&env);
-        // No real token contract — recorded balance starts at 0, current balance is 0
-        // Can't test without a real SEP-41 token; covered in handler integration tests
         let recorded = DepositVaultClient::new(&env, &vault).get_recorded_balance(&token);
         assert_eq!(recorded, 0);
+    }
+
+    #[test]
+    fn record_transfer_in_tracks_balance_delta() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, _, vault) = setup(&env);
+        let (token, token_owner) = register_token(&env);
+
+        let vault_client = DepositVaultClient::new(&env, &vault);
+        let token_client = TestTokenClient::new(&env, &token);
+
+        // Transfer tokens into the vault
+        token_client.mint(&token_owner, &vault, &1_000_0000i128);
+
+        // record_transfer_in should return the delta (1_000_0000)
+        let delta = vault_client.record_transfer_in(&token);
+        assert_eq!(delta, 1_000_0000);
+
+        // get_recorded_balance should now reflect the actual balance
+        let recorded = vault_client.get_recorded_balance(&token);
+        assert_eq!(recorded, 1_000_0000);
+
+        // Second transfer: delta should be only the new amount
+        token_client.mint(&token_owner, &vault, &500_0000i128);
+        let delta2 = vault_client.record_transfer_in(&token);
+        assert_eq!(delta2, 500_0000);
+
+        let recorded2 = vault_client.get_recorded_balance(&token);
+        assert_eq!(recorded2, 1_500_0000);
+    }
+
+    #[test]
+    fn transfer_out_by_non_controller_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, _, vault) = setup(&env);
+        let (token, token_owner) = register_token(&env);
+        let receiver = Address::generate(&env);
+
+        let vault_client = DepositVaultClient::new(&env, &vault);
+        let token_client = TestTokenClient::new(&env, &token);
+        token_client.mint(&token_owner, &vault, &1_000_0000i128);
+        vault_client.record_transfer_in(&token);
+
+        let non_controller = Address::generate(&env);
+        let result = vault_client.try_transfer_out(&non_controller, &token, &receiver, &1_000_0000);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn transfer_out_zero_amount_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, vault) = setup(&env);
+        let (token, token_owner) = register_token(&env);
+        let receiver = Address::generate(&env);
+
+        let vault_client = DepositVaultClient::new(&env, &vault);
+        let token_client = TestTokenClient::new(&env, &token);
+        token_client.mint(&token_owner, &vault, &1_000_0000i128);
+        vault_client.record_transfer_in(&token);
+
+        let result = vault_client.try_transfer_out(&admin, &token, &receiver, &0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn transfer_out_negative_amount_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, vault) = setup(&env);
+        let (token, token_owner) = register_token(&env);
+        let receiver = Address::generate(&env);
+
+        let vault_client = DepositVaultClient::new(&env, &vault);
+        let token_client = TestTokenClient::new(&env, &token);
+        token_client.mint(&token_owner, &vault, &1_000_0000i128);
+        vault_client.record_transfer_in(&token);
+
+        let result = vault_client.try_transfer_out(&admin, &token, &receiver, &(-1i128));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn transfer_out_controller_can_transfer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, vault) = setup(&env);
+        let (token, token_owner) = register_token(&env);
+        let receiver = Address::generate(&env);
+
+        let vault_client = DepositVaultClient::new(&env, &vault);
+        let token_client = TestTokenClient::new(&env, &token);
+        token_client.mint(&token_owner, &vault, &1_000_0000i128);
+        vault_client.record_transfer_in(&token);
+
+        vault_client.transfer_out(&admin, &token, &receiver, &400_0000);
+
+        assert_eq!(token_client.balance(&receiver), 400_0000);
+        assert_eq!(token_client.balance(&vault), 600_0000);
+
+        let recorded = vault_client.get_recorded_balance(&token);
+        assert_eq!(recorded, 600_0000);
     }
 }

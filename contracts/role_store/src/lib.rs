@@ -1,10 +1,10 @@
 #![no_std]
 
-use soroban_sdk::{
-    contract, contractevent, contractimpl, contracttype, contracterror, panic_with_error,
-    BytesN, Env, Address, Vec,
-};
 use gmx_keys::roles;
+use soroban_sdk::{
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
+    BytesN, Env, Vec,
+};
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -12,10 +12,10 @@ use gmx_keys::roles;
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    NotInitialized    = 1,
+    NotInitialized = 1,
     AlreadyInitialized = 2,
-    Unauthorized      = 3,
-    LastAdmin         = 4, // can't remove the last ROLE_ADMIN holder
+    Unauthorized = 3,
+    LastAdmin = 4, // can't remove the last ROLE_ADMIN holder
 }
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
@@ -39,7 +39,7 @@ enum RoleKey {
 #[contractevent(topics = ["init"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoleStoreInitialized {
-    pub admin:      Address,
+    pub admin: Address,
     pub admin_role: BytesN<32>,
 }
 
@@ -47,14 +47,14 @@ pub struct RoleStoreInitialized {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoleGranted {
     pub account: Address,
-    pub role:    BytesN<32>,
+    pub role: BytesN<32>,
 }
 
 #[contractevent(topics = ["revoke"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoleRevoked {
     pub account: Address,
-    pub role:    BytesN<32>,
+    pub role: BytesN<32>,
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -75,7 +75,8 @@ impl RoleStore {
         env.storage().instance().set(&RoleKey::Initialized, &true);
         let admin_role = roles::role_admin(&env);
         internal_grant_role(&env, &admin, &admin_role);
-        env.events().publish_event(&RoleStoreInitialized { admin, admin_role });
+        env.events()
+            .publish_event(&RoleStoreInitialized { admin, admin_role });
     }
 
     // ── Public write ─────────────────────────────────────────────────────────
@@ -191,7 +192,12 @@ fn require_admin(env: &Env, caller: &Address) {
 
 fn internal_grant_role(env: &Env, account: &Address, role: &BytesN<32>) {
     let has_key = RoleKey::HasRole(account.clone(), role.clone());
-    if env.storage().persistent().get::<_, bool>(&has_key).unwrap_or(false) {
+    if env
+        .storage()
+        .persistent()
+        .get::<_, bool>(&has_key)
+        .unwrap_or(false)
+    {
         return; // idempotent
     }
     env.storage().persistent().set(&has_key, &true);
@@ -203,7 +209,9 @@ fn internal_grant_role(env: &Env, account: &Address, role: &BytesN<32>) {
         .get(&RoleKey::RoleMembers(role.clone()))
         .unwrap_or(Vec::new(env));
     members.push_back(account.clone());
-    env.storage().persistent().set(&RoleKey::RoleMembers(role.clone()), &members);
+    env.storage()
+        .persistent()
+        .set(&RoleKey::RoleMembers(role.clone()), &members);
 
     // Add to account's role list
     let mut acct_roles: Vec<BytesN<32>> = env
@@ -212,7 +220,9 @@ fn internal_grant_role(env: &Env, account: &Address, role: &BytesN<32>) {
         .get(&RoleKey::AccountRoles(account.clone()))
         .unwrap_or(Vec::new(env));
     acct_roles.push_back(role.clone());
-    env.storage().persistent().set(&RoleKey::AccountRoles(account.clone()), &acct_roles);
+    env.storage()
+        .persistent()
+        .set(&RoleKey::AccountRoles(account.clone()), &acct_roles);
 
     // Track in all-roles list (deduplicated)
     let mut all: Vec<BytesN<32>> = env
@@ -228,7 +238,12 @@ fn internal_grant_role(env: &Env, account: &Address, role: &BytesN<32>) {
 
 fn internal_revoke_role(env: &Env, account: &Address, role: &BytesN<32>) {
     let has_key = RoleKey::HasRole(account.clone(), role.clone());
-    if !env.storage().persistent().get::<_, bool>(&has_key).unwrap_or(false) {
+    if !env
+        .storage()
+        .persistent()
+        .get::<_, bool>(&has_key)
+        .unwrap_or(false)
+    {
         return; // idempotent
     }
     env.storage().persistent().remove(&has_key);
@@ -240,7 +255,9 @@ fn internal_revoke_role(env: &Env, account: &Address, role: &BytesN<32>) {
         .get(&RoleKey::RoleMembers(role.clone()))
         .unwrap_or(Vec::new(env));
     vec_remove_addr(&mut members, account);
-    env.storage().persistent().set(&RoleKey::RoleMembers(role.clone()), &members);
+    env.storage()
+        .persistent()
+        .set(&RoleKey::RoleMembers(role.clone()), &members);
 
     // Remove from account's role list
     let mut acct_roles: Vec<BytesN<32>> = env
@@ -249,7 +266,9 @@ fn internal_revoke_role(env: &Env, account: &Address, role: &BytesN<32>) {
         .get(&RoleKey::AccountRoles(account.clone()))
         .unwrap_or(Vec::new(env));
     vec_remove_b32(&mut acct_roles, role);
-    env.storage().persistent().set(&RoleKey::AccountRoles(account.clone()), &acct_roles);
+    env.storage()
+        .persistent()
+        .set(&RoleKey::AccountRoles(account.clone()), &acct_roles);
 }
 
 // ─── Vec utilities (no_std) ───────────────────────────────────────────────────
@@ -379,5 +398,71 @@ mod tests {
         let keeper = Address::generate(&env);
         client.grant_role(&admin, &keeper, &ctrl);
         assert_eq!(client.get_role_count(), 2);
+    }
+
+    // ── Issue #109: authorization matrix tests ────────────────────────────────
+
+    /// A non-admin address must not be able to grant roles (ROLE_ADMIN check).
+    #[test]
+    #[should_panic]
+    fn grant_role_by_non_admin_panics() {
+        let (env, _admin, contract_id) = setup();
+        // mock_all_auths lets require_auth() pass; the role check itself must
+        // reject an address that does not hold ROLE_ADMIN.
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let impostor = Address::generate(&env);
+        let victim = Address::generate(&env);
+        let ctrl = roles::controller(&env);
+        // impostor has no role — grant_role must panic with Unauthorized.
+        client.grant_role(&impostor, &victim, &ctrl);
+    }
+
+    /// A non-admin address must not be able to revoke roles (ROLE_ADMIN check).
+    #[test]
+    #[should_panic]
+    fn revoke_role_by_non_admin_panics() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let holder = Address::generate(&env);
+        client.grant_role(&admin, &holder, &ctrl);
+
+        let impostor = Address::generate(&env);
+        // impostor does not hold ROLE_ADMIN — revoke must panic.
+        client.revoke_role(&impostor, &holder, &ctrl);
+    }
+
+    // ── Issue #233: CONTROLLER cannot self-grant ROLE_ADMIN ──────────────────
+
+    /// A CONTROLLER-only address cannot call grant_role to elevate itself to
+    /// ROLE_ADMIN. The require_admin guard inside grant_role is gated on
+    /// role_store's own storage — not on the CONTROLLER role in data_store.
+    #[test]
+    #[should_panic]
+    fn controller_cannot_grant_self_admin() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let admin_role = roles::role_admin(&env);
+        let controller_addr = Address::generate(&env);
+        // Grant CONTROLLER but NOT ROLE_ADMIN
+        client.grant_role(&admin, &controller_addr, &ctrl);
+        // CONTROLLER tries to elevate itself to ROLE_ADMIN — must panic Unauthorized
+        client.grant_role(&controller_addr, &controller_addr, &admin_role);
+    }
+
+    /// A CONTROLLER-only address cannot grant ROLE_ADMIN to any third party either.
+    #[test]
+    #[should_panic]
+    fn controller_cannot_call_grant_role_directly() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let admin_role = roles::role_admin(&env);
+        let controller_addr = Address::generate(&env);
+        let victim = Address::generate(&env);
+        client.grant_role(&admin, &controller_addr, &ctrl);
+        // CONTROLLER tries to grant ROLE_ADMIN to victim — must panic Unauthorized
+        client.grant_role(&controller_addr, &victim, &admin_role);
     }
 }

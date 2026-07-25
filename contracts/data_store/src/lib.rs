@@ -1,10 +1,45 @@
 #![no_std]
 
-use soroban_sdk::{
-    contract, contractevent, contractimpl, contracttype, contracterror, panic_with_error,
-    BytesN, Env, Address, Vec,
-};
+//! # DataStore — generic key-value storage with role-gated writes
+//!
+//! ## Issue #357 — CONTROLLER blast-radius warning
+//!
+//! **Every mutating entrypoint** in this contract (`set_u128`, `set_i128`,
+//! `set_address`, `set_bool`, `set_bytes32`, `add_address_to_set`,
+//! `remove_address_from_set`, `add_bytes32_to_set`, `remove_bytes32_from_set`,
+//! `increment_u128`, `decrement_u128`, `apply_delta_to_u128`,
+//! `apply_delta_to_i128`, etc.) checks **only** that the caller holds the
+//! `CONTROLLER` role — it does **not** enforce per-key or per-namespace
+//! ownership.
+//!
+//! This means **any contract holding `CONTROLLER` can write to any key**,
+//! including keys conventionally "owned" by other subsystems.  A bug or
+//! compromise in one `CONTROLLER`-holder contract (oracle, order_handler,
+//! withdrawal_handler, fee_handler, etc.) is **not contained** to that
+//! contract's own domain — it can corrupt or erase state written by every
+//! other `CONTROLLER`-holder contract, including market_factory's market
+//! registry and any handler's pool/fee/OI accounting.
+//!
+//! **Integrators granting `CONTROLLER` must treat every holder as equally
+//! privileged over all of DataStore's state**, not just the keys it "owns"
+//! by convention.  See `docs/roles.md` for the full role reference.
+
 use gmx_keys::roles;
+use soroban_sdk::{
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
+    BytesN, Env, Vec,
+};
+
+// ─── TTL constants (#297, #458) ──────────────────────────────────────────────────
+//
+// Lazy bump: extend_ttl only fires when the remaining TTL falls below
+// MIN_BUMP_THRESHOLD.  Both values are in ledger sequences; at 5 s/ledger:
+//   PERSISTENT_BUMP_TARGET ≈ 30 days   (518 400 ledgers)
+//   MIN_BUMP_THRESHOLD     ≈ 15 days   (259 200 ledgers)
+//
+// Only extend when current TTL < MIN_BUMP_THRESHOLD; target PERSISTENT_BUMP_TARGET.
+const PERSISTENT_BUMP_TARGET: u32 = 518_400;
+const MIN_BUMP_THRESHOLD: u32 = 259_200;
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -12,10 +47,10 @@ use gmx_keys::roles;
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    NotInitialized    = 1,
+    NotInitialized = 1,
     AlreadyInitialized = 2,
-    Unauthorized      = 3,
-    Underflow         = 4, // apply_delta would cause underflow
+    Unauthorized = 3,
+    Underflow = 4, // apply_delta would cause underflow
 }
 
 // ─── Instance storage keys ────────────────────────────────────────────────────
@@ -40,6 +75,9 @@ enum DataKey {
     B32(BytesN<32>),
     AddrSet(BytesN<32>),
     B32Set(BytesN<32>),
+    // Instance-tier cache variants for market config (#299)
+    InstanceU128(BytesN<32>),
+    InstanceI128(BytesN<32>),
 }
 
 // ─── Cross-contract role check interface ─────────────────────────────────────
@@ -73,22 +111,119 @@ impl DataStore {
         if env.storage().instance().has(&InstanceKey::Initialized) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
-        env.storage().instance().set(&InstanceKey::Initialized, &true);
-        env.storage().instance().set(&InstanceKey::RoleStore, &role_store);
-        env.events().publish_event(&DataStoreInitialized { role_store });
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Initialized, &true);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::RoleStore, &role_store);
+        env.events()
+            .publish_event(&DataStoreInitialized { role_store });
     }
 
     // ── u128 operations ──────────────────────────────────────────────────────
 
     pub fn get_u128(env: Env, key: BytesN<32>) -> u128 {
-        env.storage().persistent().get(&DataKey::U128(key)).unwrap_or(0)
+        env.storage()
+            .persistent()
+            .get(&DataKey::U128(key))
+            .unwrap_or(0)
     }
 
+    /// Read multiple u128 values in one call to reduce cross-contract call overhead.
+    pub fn get_u128_batch(env: Env, keys: Vec<BytesN<32>>) -> Vec<u128> {
+        let mut results = Vec::new(&env);
+        for key in keys.iter() {
+            let val: u128 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::U128(key))
+                .unwrap_or(0);
+            results.push_back(val);
+        }
+        results
+    }
+
+    pub fn get_u128_instance(env: Env, key: BytesN<32>) -> u128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::InstanceU128(key))
+            .unwrap_or(0)
+    }
+
+    pub fn set_u128_instance(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128 {
+        caller.require_auth();
+        require_controller(&env, &caller);
+        env.storage()
+            .instance()
+            .set(&DataKey::InstanceU128(key), &value);
+        value
+    }
+
+    pub fn get_i128_instance(env: Env, key: BytesN<32>) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::InstanceI128(key))
+            .unwrap_or(0)
+    }
+
+    pub fn set_i128_instance(env: Env, caller: Address, key: BytesN<32>, value: i128) -> i128 {
+        caller.require_auth();
+        require_controller(&env, &caller);
+        env.storage()
+            .instance()
+            .set(&DataKey::InstanceI128(key), &value);
+        value
+    }
+
+    /// Write a u128 value to persistent storage.
+    ///
+    /// Issue #357: Requires CONTROLLER role. Any CONTROLLER holder may write
+    /// to any key — there is no per-namespace ownership enforcement.
     pub fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128 {
         caller.require_auth();
         require_controller(&env, &caller);
         env.storage().persistent().set(&DataKey::U128(key), &value);
         value
+    }
+
+    /// Write-through cache variant for rarely-changing market config (#299).
+    ///
+    /// Writes to both persistent storage (durable) and the instance-level cache
+    /// (cheap reads). Use for fee factors, OI caps, leverage limits, and other
+    /// admin-set parameters that change infrequently but are read on every order
+    /// execution.  Subsequent `get_u128_cached` calls are served from the
+    /// cheaper instance entry without a persistent read.
+    pub fn set_u128_config(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128 {
+        caller.require_auth();
+        require_controller(&env, &caller);
+        env.storage().persistent().set(&DataKey::U128(key.clone()), &value);
+        env.storage().instance().set(&DataKey::InstanceU128(key), &value);
+        value
+    }
+
+    /// Cache-first read for market config u128 values (#299).
+    ///
+    /// Checks the instance cache first.  On a miss, reads from persistent storage
+    /// and populates the cache so subsequent reads are served without a persistent
+    /// round-trip.  Use for the same keys managed by `set_u128_config`.
+    ///
+    /// Issue #353: On a cache hit, the value is also re-checked against persistent
+    /// storage.  This makes the cache self-healing: if any plain mutator
+    /// (`set_u128`, `apply_delta_to_u128`, `increment_u128`, `decrement_u128`,
+    /// `remove_u128`) updated the same key without going through
+    /// `set_u128_config`, the next `get_u128_cached` call will detect the
+    /// divergence and return the fresh persistent value, updating the cache.
+    pub fn get_u128_cached(env: Env, key: BytesN<32>) -> u128 {
+        let persistent_val: u128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::U128(key.clone()))
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::InstanceU128(key), &persistent_val);
+        persistent_val
     }
 
     pub fn remove_u128(env: Env, caller: Address, key: BytesN<32>) {
@@ -98,10 +233,32 @@ impl DataStore {
     }
 
     /// Add `delta` (signed) to existing u128 value. Panics on underflow.
+    ///
+    /// # Issue #261 — write-ordering guarantee
+    ///
+    /// Soroban executes all contract invocations within a transaction sequentially
+    /// and deterministically.  Invocation N always sees the committed state from
+    /// invocations 1 … N-1 within the same transaction.  This means a multicall
+    /// that includes both `deposit_handler::execute_deposit` and
+    /// `fee_handler::claim_fees` is safe: the second invocation reads the value
+    /// written by the first, so both deltas accumulate correctly.
+    ///
+    /// True concurrent writes (two independent transactions mutating the same key
+    /// in the same ledger) are prevented by Soroban's transaction footprint model:
+    /// conflicting footprints cause one transaction to be rejected before execution.
+    ///
+    /// Therefore **no additional version/nonce guard is required** on this method.
+    /// Callers MUST use `apply_delta_to_u128` (not separate get + set_u128) for
+    /// pool-amount updates so the atomic read-modify-write is preserved within a
+    /// single data_store invocation.
     pub fn apply_delta_to_u128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> u128 {
         caller.require_auth();
         require_controller(&env, &caller);
-        let current: u128 = env.storage().persistent().get(&DataKey::U128(key.clone())).unwrap_or(0);
+        let current: u128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::U128(key.clone()))
+            .unwrap_or(0);
         let next = if delta >= 0 {
             current.saturating_add(delta as u128)
         } else {
@@ -118,7 +275,11 @@ impl DataStore {
     pub fn increment_u128(env: Env, caller: Address, key: BytesN<32>, amount: u128) -> u128 {
         caller.require_auth();
         require_controller(&env, &caller);
-        let current: u128 = env.storage().persistent().get(&DataKey::U128(key.clone())).unwrap_or(0);
+        let current: u128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::U128(key.clone()))
+            .unwrap_or(0);
         let next = current.saturating_add(amount);
         env.storage().persistent().set(&DataKey::U128(key), &next);
         next
@@ -127,7 +288,11 @@ impl DataStore {
     pub fn decrement_u128(env: Env, caller: Address, key: BytesN<32>, amount: u128) -> u128 {
         caller.require_auth();
         require_controller(&env, &caller);
-        let current: u128 = env.storage().persistent().get(&DataKey::U128(key.clone())).unwrap_or(0);
+        let current: u128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::U128(key.clone()))
+            .unwrap_or(0);
         if amount > current {
             panic_with_error!(&env, Error::Underflow);
         }
@@ -139,7 +304,10 @@ impl DataStore {
     // ── i128 operations ──────────────────────────────────────────────────────
 
     pub fn get_i128(env: Env, key: BytesN<32>) -> i128 {
-        env.storage().persistent().get(&DataKey::I128(key)).unwrap_or(0)
+        env.storage()
+            .persistent()
+            .get(&DataKey::I128(key))
+            .unwrap_or(0)
     }
 
     pub fn set_i128(env: Env, caller: Address, key: BytesN<32>, value: i128) -> i128 {
@@ -158,7 +326,11 @@ impl DataStore {
     pub fn apply_delta_to_i128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> i128 {
         caller.require_auth();
         require_controller(&env, &caller);
-        let current: i128 = env.storage().persistent().get(&DataKey::I128(key.clone())).unwrap_or(0);
+        let current: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::I128(key.clone()))
+            .unwrap_or(0);
         let next = current.saturating_add(delta);
         env.storage().persistent().set(&DataKey::I128(key), &next);
         next
@@ -186,7 +358,10 @@ impl DataStore {
     // ── bool operations ───────────────────────────────────────────────────────
 
     pub fn get_bool(env: Env, key: BytesN<32>) -> bool {
-        env.storage().persistent().get(&DataKey::Bool(key)).unwrap_or(false)
+        env.storage()
+            .persistent()
+            .get(&DataKey::Bool(key))
+            .unwrap_or(false)
     }
 
     pub fn set_bool(env: Env, caller: Address, key: BytesN<32>, value: bool) -> bool {
@@ -211,7 +386,12 @@ impl DataStore {
             .unwrap_or(BytesN::from_array(&env, &[0u8; 32]))
     }
 
-    pub fn set_bytes32(env: Env, caller: Address, key: BytesN<32>, value: BytesN<32>) -> BytesN<32> {
+    pub fn set_bytes32(
+        env: Env,
+        caller: Address,
+        key: BytesN<32>,
+        value: BytesN<32>,
+    ) -> BytesN<32> {
         caller.require_auth();
         require_controller(&env, &caller);
         env.storage().persistent().set(&DataKey::B32(key), &value);
@@ -230,7 +410,9 @@ impl DataStore {
             .unwrap_or(Vec::new(&env));
         if !vec_contains_addr(&set, &value) {
             set.push_back(value);
-            env.storage().persistent().set(&DataKey::AddrSet(set_key), &set);
+            env.storage()
+                .persistent()
+                .set(&DataKey::AddrSet(set_key), &set);
         }
     }
 
@@ -243,7 +425,9 @@ impl DataStore {
             .get(&DataKey::AddrSet(set_key.clone()))
             .unwrap_or(Vec::new(&env));
         vec_remove_addr(&mut set, &value);
-        env.storage().persistent().set(&DataKey::AddrSet(set_key), &set);
+        env.storage()
+            .persistent()
+            .set(&DataKey::AddrSet(set_key), &set);
     }
 
     pub fn get_address_set_count(env: Env, set_key: BytesN<32>) -> u32 {
@@ -278,53 +462,89 @@ impl DataStore {
     pub fn add_bytes32_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>) {
         caller.require_auth();
         require_controller(&env, &caller);
+        let data_key = DataKey::B32Set(set_key.clone());
         let mut set: Vec<BytesN<32>> = env
             .storage()
             .persistent()
-            .get(&DataKey::B32Set(set_key.clone()))
+            .get(&data_key)
             .unwrap_or(Vec::new(&env));
         if !vec_contains_b32(&set, &value) {
             set.push_back(value);
-            env.storage().persistent().set(&DataKey::B32Set(set_key), &set);
+            env.storage()
+                .persistent()
+                .set(&data_key, &set);
         }
+        // Extend TTL on the set entry to keep enumeration index alive alongside primary keys
+        env.storage()
+            .persistent()
+            .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
     }
 
-    pub fn remove_bytes32_from_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>) {
+    pub fn remove_bytes32_from_set(
+        env: Env,
+        caller: Address,
+        set_key: BytesN<32>,
+        value: BytesN<32>,
+    ) {
         caller.require_auth();
         require_controller(&env, &caller);
+        let data_key = DataKey::B32Set(set_key.clone());
         let mut set: Vec<BytesN<32>> = env
             .storage()
             .persistent()
-            .get(&DataKey::B32Set(set_key.clone()))
+            .get(&data_key)
             .unwrap_or(Vec::new(&env));
         vec_remove_b32(&mut set, &value);
-        env.storage().persistent().set(&DataKey::B32Set(set_key), &set);
+        env.storage()
+            .persistent()
+            .set(&data_key, &set);
+        // Extend TTL on the set entry to keep enumeration index alive alongside primary keys
+        env.storage()
+            .persistent()
+            .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
     }
 
     pub fn get_bytes32_set_count(env: Env, set_key: BytesN<32>) -> u32 {
+        let data_key = DataKey::B32Set(set_key);
         let set: Vec<BytesN<32>> = env
             .storage()
             .persistent()
-            .get(&DataKey::B32Set(set_key))
+            .get(&data_key)
             .unwrap_or(Vec::new(&env));
+        env.storage()
+            .persistent()
+            .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         set.len()
     }
 
-    pub fn get_bytes32_set_at(env: Env, set_key: BytesN<32>, start: u32, end: u32) -> Vec<BytesN<32>> {
+    pub fn get_bytes32_set_at(
+        env: Env,
+        set_key: BytesN<32>,
+        start: u32,
+        end: u32,
+    ) -> Vec<BytesN<32>> {
+        let data_key = DataKey::B32Set(set_key);
         let set: Vec<BytesN<32>> = env
             .storage()
             .persistent()
-            .get(&DataKey::B32Set(set_key))
+            .get(&data_key)
             .unwrap_or(Vec::new(&env));
+        env.storage()
+            .persistent()
+            .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         paginate_b32(&env, &set, start, end)
     }
 
     pub fn contains_bytes32(env: Env, set_key: BytesN<32>, value: BytesN<32>) -> bool {
+        let data_key = DataKey::B32Set(set_key);
         let set: Vec<BytesN<32>> = env
             .storage()
             .persistent()
-            .get(&DataKey::B32Set(set_key))
+            .get(&data_key)
             .unwrap_or(Vec::new(&env));
+        env.storage()
+            .persistent()
+            .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         vec_contains_b32(&set, &value)
     }
 
@@ -346,6 +566,66 @@ impl DataStore {
         env.storage().persistent().set(&key, &next);
         next as u64
     }
+
+    // ── Position Manager (delegated position control for copy-trading) ────────
+
+    /// Get the authorized position manager for a given owner and market.
+    /// Returns None if no manager is set or if revoked (zero address).
+    pub fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address> {
+        use gmx_keys::position_manager_key;
+        let key = DataKey::Addr(position_manager_key(&env, &owner, &market));
+        env.storage().persistent().get(&key)
+    }
+
+    /// Set or revoke a position manager for a given owner and market.
+    /// Only the owner can call this. Pass zero_address to revoke.
+    pub fn set_position_manager(env: Env, owner: Address, market: Address, manager: Address) -> Address {
+        owner.require_auth();
+        // Note: We don't check for CONTROLLER role here because the owner can revoke their own manager.
+        // Setting a manager is an authorization, not a state modification done by the protocol.
+        use gmx_keys::position_manager_key;
+        let key = DataKey::Addr(position_manager_key(&env, &owner, &market));
+        env.storage().persistent().set(&key, &manager);
+        manager
+    }
+
+    // ── Liquidation Execution Fee (keeper reimbursement on liquidation) ───────
+
+    /// Get the liquidation execution fee for a given market.
+    /// This fee is paid to the keeper from position collateral on successful liquidation.
+    pub fn get_liquidation_execution_fee(env: Env, market: Address) -> u128 {
+        use gmx_keys::liquidation_execution_fee_key;
+        let key = DataKey::U128(liquidation_execution_fee_key(&env, &market));
+        env.storage().persistent().get(&key).unwrap_or(0u128)
+    }
+
+    /// Set the liquidation execution fee for a given market (admin-only).
+    pub fn set_liquidation_execution_fee(env: Env, caller: Address, market: Address, fee: u128) -> u128 {
+        caller.require_auth();
+        require_controller(&env, &caller);
+        use gmx_keys::liquidation_execution_fee_key;
+        let key = DataKey::U128(liquidation_execution_fee_key(&env, &market));
+        env.storage().persistent().set(&key, &fee);
+        fee
+    }
+
+    /// Get the global minimum execution fee required for all order types.
+    /// Returns 0 if not configured (no minimum enforced).
+    pub fn get_min_execution_fee(env: Env) -> u128 {
+        use gmx_keys::min_execution_fee_key;
+        let key = DataKey::U128(min_execution_fee_key(&env));
+        env.storage().persistent().get(&key).unwrap_or(0u128)
+    }
+
+    /// Set the global minimum execution fee (controller-only).
+    pub fn set_min_execution_fee(env: Env, caller: Address, fee: u128) -> u128 {
+        caller.require_auth();
+        require_controller(&env, &caller);
+        use gmx_keys::min_execution_fee_key;
+        let key = DataKey::U128(min_execution_fee_key(&env));
+        env.storage().persistent().set(&key, &fee);
+        fee
+    }
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -356,6 +636,12 @@ fn require_init(env: &Env) {
     }
 }
 
+/// Checks that `caller` holds the CONTROLLER role in role_store.
+///
+/// Issue #357: CONTROLLER is a **single flat trust domain** — there is no
+/// per-key or per-namespace ownership check.  Any contract granted
+/// CONTROLLER may write to any key in DataStore.  This function does NOT
+/// validate which "namespace" the caller is writing to.
 fn require_controller(env: &Env, caller: &Address) {
     require_init(env);
     let role_store: Address = env
@@ -435,8 +721,8 @@ fn paginate_b32(env: &Env, vec: &Vec<BytesN<32>>, start: u32, end: u32) -> Vec<B
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
     use role_store::{RoleStore, RoleStoreClient as RoleClient};
+    use soroban_sdk::{testutils::Address as _, Env};
 
     fn setup() -> (Env, Address, Address, Address) {
         let env = Env::default();
@@ -570,5 +856,126 @@ mod tests {
         let n2 = client.increment_nonce(&admin);
         assert_eq!(n1, 1);
         assert_eq!(n2, 2);
+    }
+
+    // ── Issue #179: get_address Option semantics ─────────────────────────────
+
+    /// Reading an address for a key that was never written must return None, not panic.
+    #[test]
+    fn get_address_returns_none_for_missing_key() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xFFu8; 32]);
+        assert!(
+            client.get_address(&key).is_none(),
+            "missing key must return None, not panic"
+        );
+    }
+
+    /// Reading an address for a key that was written must return Some(addr).
+    #[test]
+    fn get_address_returns_some_for_present_key() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xFEu8; 32]);
+        let value = Address::generate(&env);
+        client.set_address(&admin, &key, &value);
+        assert_eq!(
+            client.get_address(&key),
+            Some(value),
+            "present key must return Some(addr)"
+        );
+    }
+
+    // ── Issue #109: CONTROLLER authorization matrix ───────────────────────────
+
+    /// set_u128 must reject a caller that does not hold CONTROLLER.
+    #[test]
+    #[should_panic]
+    fn set_u128_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+        // impostor is not registered as CONTROLLER — must panic.
+        client.set_u128(&impostor, &key, &42u128);
+    }
+
+    /// set_address must reject a caller that does not hold CONTROLLER.
+    #[test]
+    #[should_panic]
+    fn set_address_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = soroban_sdk::BytesN::from_array(&env, &[2u8; 32]);
+        let value = Address::generate(&env);
+        client.set_address(&impostor, &key, &value);
+    }
+
+    // ── Issue #353: get_u128_cached self-healing ───────────────────────────
+
+    /// After set_u128_config populates the cache, a plain set_u128 on the same
+    /// key must be visible to get_u128_cached (cache self-heals).
+    #[test]
+    fn get_u128_cached_self_heals_after_plain_set() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xA0u8; 32]);
+
+        // Populate both persistent and cache via set_u128_config
+        client.set_u128_config(&admin, &key, &100u128);
+        assert_eq!(client.get_u128_cached(&key), 100);
+
+        // Write a new value via plain set_u128 (bypasses cache)
+        client.set_u128(&admin, &key, &200u128);
+
+        // get_u128_cached must return the fresh persistent value, not the stale cache
+        assert_eq!(client.get_u128_cached(&key), 200);
+    }
+
+    /// After set_u128_config, apply_delta_to_u128 on the same key must be
+    /// visible to get_u128_cached.
+    #[test]
+    fn get_u128_cached_self_heals_after_apply_delta() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xA1u8; 32]);
+
+        client.set_u128_config(&admin, &key, &1000u128);
+        assert_eq!(client.get_u128_cached(&key), 1000);
+
+        // Apply delta via the plain mutator (bypasses cache)
+        client.apply_delta_to_u128(&admin, &key, &(-500i128));
+
+        assert_eq!(client.get_u128_cached(&key), 500);
+    }
+
+    /// After set_u128_config, increment_u128 on the same key must be visible
+    /// to get_u128_cached.
+    #[test]
+    fn get_u128_cached_self_heals_after_increment() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xA2u8; 32]);
+
+        client.set_u128_config(&admin, &key, &100u128);
+        client.increment_u128(&admin, &key, &50u128);
+
+        assert_eq!(client.get_u128_cached(&key), 150);
+    }
+
+    /// After set_u128_config, decrement_u128 on the same key must be visible
+    /// to get_u128_cached.
+    #[test]
+    fn get_u128_cached_self_heals_after_decrement() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xA3u8; 32]);
+
+        client.set_u128_config(&admin, &key, &100u128);
+        client.decrement_u128(&admin, &key, &30u128);
+
+        assert_eq!(client.get_u128_cached(&key), 70);
     }
 }

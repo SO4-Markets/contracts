@@ -18,7 +18,7 @@ gmx-market-utils = { path = "../../libs/market_utils" }
 soroban-sdk       = { workspace = true, features = ["testutils"] }
 role-store        = { path = "../role_store" }
 data-store        = { path = "../data_store" }
-oracle            = { path = "../oracle" }
+oracle            = { path = "../oracle", features = ["testutils"] }
 withdrawal-vault  = { path = "../withdrawal_vault" }
 deposit-vault     = { path = "../deposit_vault" }
 market-token      = { path = "../market_token" }

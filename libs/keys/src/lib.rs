@@ -244,11 +244,7 @@ pub fn withdrawal_key(env: &Env, nonce: u64) -> BytesN<32> {
 // ─── Borrowing keys ───────────────────────────────────────────────────────────
 
 /// sha256("CUMULATIVE_BORROWING_FACTOR" ‖ market ‖ is_long)
-pub fn cumulative_borrowing_factor_key(
-    env: &Env,
-    market: &Address,
-    is_long: bool,
-) -> BytesN<32> {
+pub fn cumulative_borrowing_factor_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "CUMULATIVE_BORROWING_FACTOR");
     push_addr(&mut b, env, market);
@@ -307,6 +303,22 @@ pub fn claimable_fee_amount_key(env: &Env, market: &Address, token: &Address) ->
     push_str(&mut b, env, "CLAIMABLE_FEE_AMOUNT");
     push_addr(&mut b, env, market);
     push_addr(&mut b, env, token);
+    sha256(env, &b)
+}
+
+/// sha256("CLAIMABLE_UI_FEE_AMOUNT" ‖ token ‖ ui_receiver)
+///
+/// Stores the UI fee accrued for a specific receiver + token pair.
+/// Added for issue #85 — UI fee claiming.
+pub fn claimable_ui_fee_amount_key(
+    env: &Env,
+    token: &Address,
+    ui_receiver: &Address,
+) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "CLAIMABLE_UI_FEE_AMOUNT");
+    push_addr(&mut b, env, token);
+    push_addr(&mut b, env, ui_receiver);
     sha256(env, &b)
 }
 
@@ -442,9 +454,28 @@ pub fn max_pool_amount_key(env: &Env, market: &Address, token: &Address) -> Byte
     sha256(env, &b)
 }
 
+/// Issue #279: minimum USD value (FLOAT_PRECISION-scaled) a deposit must meet
+/// to prevent dust LP positions. 0 means uncapped (default, no regression).
+pub fn min_deposit_usd_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "MIN_DEPOSIT_USD");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
 pub fn max_open_interest_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "MAX_OPEN_INTEREST");
+    push_addr(&mut b, env, market);
+    push_bool(&mut b, env, is_long);
+    sha256(env, &b)
+}
+
+/// Issue #278: per-market, per-side cap on a single position's size_in_usd.
+/// A value of 0 means uncapped.
+pub fn max_position_size_usd_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "MAX_POSITION_SIZE_USD");
     push_addr(&mut b, env, market);
     push_bool(&mut b, env, is_long);
     sha256(env, &b)
@@ -464,7 +495,11 @@ pub fn max_leverage_key(env: &Env, market: &Address) -> BytesN<32> {
     sha256(env, &b)
 }
 
-pub fn position_fee_factor_key(env: &Env, market: &Address, for_positive_impact: bool) -> BytesN<32> {
+pub fn position_fee_factor_key(
+    env: &Env,
+    market: &Address,
+    for_positive_impact: bool,
+) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "POSITION_FEE_FACTOR");
     push_addr(&mut b, env, market);
@@ -534,7 +569,12 @@ pub fn swap_impact_exponent_factor_key(env: &Env, market: &Address) -> BytesN<32
     sha256(env, &b)
 }
 
-pub fn max_pnl_factor_key(env: &Env, pnl_factor_type: &BytesN<32>, market: &Address, is_long: bool) -> BytesN<32> {
+pub fn max_pnl_factor_key(
+    env: &Env,
+    pnl_factor_type: &BytesN<32>,
+    market: &Address,
+    is_long: bool,
+) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "MAX_PNL_FACTOR");
     b.extend_from_array(&pnl_factor_type.to_array());
@@ -573,6 +613,34 @@ pub fn keeper_public_key_prefix(env: &Env) -> BytesN<32> {
     sha256(env, &b)
 }
 
+/// sha256("LAST_KEEPER_ACTIVITY" ‖ role)
+///
+/// Ledger sequence of the most recent successful execution by a holder of
+/// `role`. Updated by handlers on every successful keeper action so the protocol
+/// has an on-chain liveness signal per keeper role (issue #249).
+pub fn last_keeper_activity_key(env: &Env, role: &BytesN<32>) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "LAST_KEEPER_ACTIVITY");
+    b.extend_from_array(&role.to_array());
+    sha256(env, &b)
+}
+
+/// sha256("KEEPER_HEARTBEAT_TIMEOUT" ‖ role)
+///
+/// Maximum number of ledgers a keeper `role` may go silent before it is
+/// considered stale. Admin-configured; falls back to
+/// `DEFAULT_KEEPER_HEARTBEAT_TIMEOUT` when unset (issue #249).
+pub fn keeper_heartbeat_timeout_key(env: &Env, role: &BytesN<32>) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "KEEPER_HEARTBEAT_TIMEOUT");
+    b.extend_from_array(&role.to_array());
+    sha256(env, &b)
+}
+
+/// Default keeper heartbeat timeout: 2880 ledgers (~4 hours at ~5s/ledger).
+/// Used when `keeper_heartbeat_timeout_key(role)` is unset in data_store.
+pub const DEFAULT_KEEPER_HEARTBEAT_TIMEOUT: u64 = 2880;
+
 /// Market token wasm hash (for factory to deploy LP tokens)
 pub fn market_token_wasm_hash_key(env: &Env) -> BytesN<32> {
     let mut b = Bytes::new(env);
@@ -595,21 +663,6 @@ pub fn ui_fee_factor_key(env: &Env, ui_fee_receiver: &Address) -> BytesN<32> {
     sha256(env, &b)
 }
 
-/// Claimable UI fee amount per (market, token, ui_fee_receiver)
-pub fn claimable_ui_fee_amount_key(
-    env: &Env,
-    market: &Address,
-    token: &Address,
-    ui_fee_receiver: &Address,
-) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "CLAIMABLE_UI_FEE_AMOUNT");
-    push_addr(&mut b, env, market);
-    push_addr(&mut b, env, token);
-    push_addr(&mut b, env, ui_fee_receiver);
-    sha256(env, &b)
-}
-
 /// ADL enabled flag per (market, is_long)
 pub fn is_adl_enabled_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
     let mut b = Bytes::new(env);
@@ -620,6 +673,30 @@ pub fn is_adl_enabled_key(env: &Env, market: &Address, is_long: bool) -> BytesN<
 }
 
 /// Max PnL factor for ADL triggering
+/// sha256("POSITION_MANAGER" ‖ owner ‖ market)
+pub fn position_manager_key(env: &Env, owner: &Address, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "POSITION_MANAGER");
+    push_addr(&mut b, env, owner);
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+/// sha256("MIN_EXECUTION_FEE") — global minimum execution fee for all order types
+pub fn min_execution_fee_key(env: &Env) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "MIN_EXECUTION_FEE");
+    sha256(env, &b)
+}
+
+/// sha256("LIQUIDATION_EXECUTION_FEE" ‖ market)
+pub fn liquidation_execution_fee_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "LIQUIDATION_EXECUTION_FEE");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
 pub fn max_pnl_factor_for_adl_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "MAX_PNL_FACTOR_FOR_ADL");
@@ -664,6 +741,90 @@ pub fn max_pnl_factor_for_deposits_key(env: &Env) -> BytesN<32> {
 pub fn max_pnl_factor_for_withdrawals_key(env: &Env) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "MAX_PNL_FACTOR_FOR_WITHDRAWALS");
+    sha256(env, &b)
+}
+
+// ─── Pause keys ──────────────────────────────────────────────────────────────
+
+pub fn global_pause_key(env: &Env) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "GLOBAL_PAUSE");
+    sha256(env, &b)
+}
+
+/// The max allowed percentage price movement (e.g. 500 = 5%) before the circuit
+/// breaker pauses the market (issue #203). Stored in FLOAT_PRECISION in data_store.
+pub fn circuit_breaker_factor_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "CIRCUIT_BREAKER_FACTOR");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+/// Stores whether a specific market is paused (issue #203). Stored as a bool in data_store.
+pub fn is_market_paused_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "IS_MARKET_PAUSED");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+// ─── Fee tier keys (issue #204) ───────────────────────────────────────────────
+
+/// Volume threshold (USD, FLOAT_PRECISION) required to qualify for fee tier N.
+pub fn fee_tier_volume_threshold_key(env: &Env, market: &Address, tier: u32) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "FEE_TIER_VOL_THRESH");
+    push_addr(&mut b, env, market);
+    b.append(&Bytes::from_slice(env, &tier.to_be_bytes()));
+    sha256(env, &b)
+}
+
+/// Position fee factor (FLOAT_PRECISION) for a specific fee tier in a market.
+pub fn fee_tier_position_fee_factor_key(env: &Env, market: &Address, tier: u32) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "FEE_TIER_POS_FEE");
+    push_addr(&mut b, env, market);
+    b.append(&Bytes::from_slice(env, &tier.to_be_bytes()));
+    sha256(env, &b)
+}
+
+/// 30-day rolling trade volume (USD, FLOAT_PRECISION) for a trader in a market.
+pub fn trader_volume_key(env: &Env, trader: &Address, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "TRADER_VOLUME");
+    push_addr(&mut b, env, trader);
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+/// Ledger sequence at which the trader's rolling volume window started.
+pub fn trader_volume_window_start_key(env: &Env, trader: &Address, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "TRADER_VOL_WIN");
+    push_addr(&mut b, env, trader);
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+// ─── Unpause timelock key (issue #282) ───────────────────────────────────────
+
+/// Ledger sequence at which `execute_unpause` is allowed (issue #282).
+/// Written by `schedule_unpause`; cleared when the market is re-paused or unpause executes.
+pub fn scheduled_unpause_ledger_key(env: &Env) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "SCHEDULED_UNPAUSE_LEDGER");
+    sha256(env, &b)
+}
+
+// ─── Auto-compound fee key (issue #285) ──────────────────────────────────────
+
+/// Bool stored in data_store: when `true`, position fees for `market` are retained
+/// in `pool_amount` rather than accrued to the claimable balance. (issue #285)
+pub fn auto_compound_fees_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "AUTO_COMPOUND_FEES");
+    push_addr(&mut b, env, market);
     sha256(env, &b)
 }
 

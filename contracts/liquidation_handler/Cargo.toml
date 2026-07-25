@@ -21,7 +21,7 @@ gmx-decrease-position-utils  = { path = "../../libs/decrease_position_utils" }
 soroban-sdk    = { workspace = true, features = ["testutils"] }
 role-store     = { path = "../role_store" }
 data-store     = { path = "../data_store" }
-oracle         = { path = "../oracle" }
+oracle         = { path = "../oracle", features = ["testutils"] }
 order-vault    = { path = "../order_vault" }
 order-handler  = { path = "../order_handler" }
 market-token   = { path = "../market_token" }

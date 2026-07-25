@@ -16,3 +16,4 @@ gmx-keys = { path = "../keys" }
 soroban-sdk = { workspace = true, features = ["testutils"] }
 role-store = { path = "../../contracts/role_store" }
 data-store = { path = "../../contracts/data_store" }
+proptest = "1"
