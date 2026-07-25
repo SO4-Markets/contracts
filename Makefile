@@ -9,6 +9,7 @@ include mx/test.mk
 include mx/deploy.mk
 include mx/upgrade.mk
 include mx/tokens.mk
+include mx/oracle.mk
 
 .PHONY: all help clean
 
@@ -34,6 +35,10 @@ help:
 	@printf '%s\n' '  make token-deploy CODE=TWBTC NETWORK=testnet SOURCE=alice'
 	@printf '%s\n' '  make token-mint CODE=TWBTC TO=alice AMOUNT=1000000000 NETWORK=testnet SOURCE=alice'
 	@printf '%s\n' '  make token-bootstrap CODE=TWBTC TO=alice NETWORK=testnet SOURCE=alice'
+	@printf '%s\n' ''
+	@printf '%s\n' 'Oracle / keeper:'
+	@printf '%s\n' '  ORACLE=C... TOKEN=C... MIN_PRICE=5e32 MAX_PRICE=5e32 make submit-prices NETWORK=testnet SOURCE=alice'
+	@printf '%s\n' '  make grant-keeper KEEPER=alice NETWORK=testnet SOURCE=admin'
 	@printf '%s\n' ''
 	@printf '%s\n' 'Run make help-mx for the longer operator guide.'
 

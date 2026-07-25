@@ -78,3 +78,35 @@ That mints `10.0000000` TWBTC.
 
 For mainnet, do not use `token-bootstrap` for real assets. Deploy or look up the
 existing SAC for the real Stellar asset and configure markets with that address.
+
+## Oracle — submitting prices
+
+The keeper calls `set_prices_simple` on the oracle contract before each execution.
+All four env vars below are **required** — the script exits non-zero immediately if
+any are unset.  There is no placeholder fallback.
+
+```sh
+export ORACLE=C...          # deployed oracle contract address
+export TOKEN=C...           # token contract address to price
+export MIN_PRICE=500000000000000000000000000000000   # FLOAT_PRECISION (10^30) scaled
+export MAX_PRICE=500500000000000000000000000000000
+make submit-prices NETWORK=testnet SOURCE=alice
+```
+
+`SOURCE` must be a key that holds the `ORDER_KEEPER` role in `role_store`.
+Grant the role with:
+
+```sh
+make grant-keeper KEEPER=alice NETWORK=testnet SOURCE=admin
+```
+
+Where `SOURCE` (admin) holds the `ROLE_ADMIN` role and `KEEPER` is the key being
+promoted.  Both default to `alice` so a single-operator testnet setup works
+without extra flags.
+
+You can also call the script directly:
+
+```sh
+ORACLE=C... TOKEN=C... MIN_PRICE=... MAX_PRICE=... \
+  bash scripts/submit_prices.sh testnet alice
+```
