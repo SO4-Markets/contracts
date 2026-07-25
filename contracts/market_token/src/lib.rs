@@ -365,7 +365,10 @@ fn spend_allowance(env: &Env, from: &Address, spender: &Address, amount: i128) {
 mod tests {
     use super::*;
     use role_store::{RoleStore, RoleStoreClient as RsClient};
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        Env,
+    };
 
     fn deploy_role_store(env: &Env, admin: &Address) -> Address {
         let id = env.register(RoleStore, ());
@@ -600,5 +603,85 @@ mod tests {
         // Revoke and attempt again — must revert
         rs.revoke_role(&admin, &handler, &roles::controller(&env));
         client.mint(&handler, &user, &100_0000i128);
+    }
+
+    // ── Issue #362: allowance-expiration coverage ─────────────────────────────
+
+    /// Once the ledger sequence passes an approval's expiration_ledger,
+    /// allowance() must report 0 even though the underlying temporary entry
+    /// (if not yet TTL-evicted) still holds the original amount.
+    #[test]
+    fn allowance_reads_zero_after_expiration_ledger_passes() {
+        let (env, admin, _, mt_id) = setup();
+        let client = MarketTokenClient::new(&env, &mt_id);
+        let alice = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        client.mint(&admin, &alice, &1000_0000i128);
+
+        let expiration = env.ledger().sequence() + 100;
+        client.approve(&alice, &spender, &500_0000i128, &expiration);
+        assert_eq!(client.allowance(&alice, &spender), 500_0000);
+
+        // Advance past the approval's expiration_ledger.
+        env.ledger().set_sequence_number(expiration + 1);
+
+        assert_eq!(
+            client.allowance(&alice, &spender),
+            0,
+            "allowance() must return 0 once expiration_ledger has passed"
+        );
+    }
+
+    /// transfer_from on an expired allowance must revert with AllowanceExpired,
+    /// not InsufficientAllowance, even though the stored amount would otherwise
+    /// be enough to cover the transfer.
+    #[test]
+    fn transfer_from_after_expiration_reverts_with_allowance_expired() {
+        let (env, admin, _, mt_id) = setup();
+        let client = MarketTokenClient::new(&env, &mt_id);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        client.mint(&admin, &alice, &1000_0000i128);
+
+        let expiration = env.ledger().sequence() + 100;
+        client.approve(&alice, &spender, &500_0000i128, &expiration);
+
+        env.ledger().set_sequence_number(expiration + 1);
+
+        let result = client.try_transfer_from(&spender, &alice, &bob, &1_0000i128);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::AllowanceExpired as u32
+            )))
+        );
+    }
+
+    /// burn_from on an expired allowance must revert with AllowanceExpired,
+    /// exercising the same expiry branch in spend_allowance as transfer_from.
+    #[test]
+    fn burn_from_after_expiration_reverts_with_allowance_expired() {
+        let (env, admin, _, mt_id) = setup();
+        let client = MarketTokenClient::new(&env, &mt_id);
+        let alice = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        client.mint(&admin, &alice, &1000_0000i128);
+
+        let expiration = env.ledger().sequence() + 100;
+        client.approve(&alice, &spender, &500_0000i128, &expiration);
+
+        env.ledger().set_sequence_number(expiration + 1);
+
+        let result = client.try_burn_from(&spender, &alice, &1_0000i128);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::AllowanceExpired as u32
+            )))
+        );
     }
 }

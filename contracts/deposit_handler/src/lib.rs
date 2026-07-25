@@ -46,6 +46,10 @@ pub enum Error {
     BelowMinimumDeposit = 8,
     /// Issue #370: execution_fee is below the configured global minimum.
     InsufficientExecutionFee = 9,
+    /// Issue #371: market_token has no registered index/long/short tokens in
+    /// data_store. Distinct from DepositNotFound, which means "no such
+    /// deposit id" — this means "no such market".
+    InvalidMarket = 10,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -591,13 +595,13 @@ fn load_market_props(env: &Env, data_store: &Address, market_token: &Address) ->
         market_token: market_token.clone(),
         index_token: ds
             .get_address(&market_index_token_key(env, market_token))
-            .unwrap_or_else(|| panic_with_error!(env, Error::DepositNotFound)),
+            .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket)),
         long_token: ds
             .get_address(&market_long_token_key(env, market_token))
-            .unwrap_or_else(|| panic_with_error!(env, Error::DepositNotFound)),
+            .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket)),
         short_token: ds
             .get_address(&market_short_token_key(env, market_token))
-            .unwrap_or_else(|| panic_with_error!(env, Error::DepositNotFound)),
+            .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket)),
     }
 }
 
@@ -2177,5 +2181,42 @@ mod tests {
 
         let lp = MtClient::new(env, &w.market_tk).balance(&user);
         assert!(lp > 0, "normal deposit must still mint LP tokens after vault check added");
+    }
+
+    // ── Issue #371: unregistered market must raise InvalidMarket ──────────────
+
+    /// create_deposit against a market_token with no registered index/long/short
+    /// tokens in data_store must revert with InvalidMarket, not DepositNotFound.
+    /// DepositNotFound is reserved for lookups of an existing deposit id.
+    #[test]
+    fn create_deposit_unregistered_market_rejected_with_invalid_market() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+        let unregistered_market = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+
+        let hc = DepositHandlerClient::new(env, &w.handler);
+        let result = hc.try_create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: unregistered_market,
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: 1_000_0000i128,
+                short_token_amount: 0,
+                min_market_tokens: 0,
+                execution_fee: 0,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::InvalidMarket as u32
+            )))
+        );
     }
 }
