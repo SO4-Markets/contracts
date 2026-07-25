@@ -110,7 +110,7 @@ pub fn decrease_position(env: &Env, p: &DecreasePositionParams) -> DecreasePosit
     let size_delta_usd = p.size_delta_usd.min(position.size_in_usd);
 
     // 2. Update market funding + borrowing state
-    let index_price_mid = p.index_token_price.mid_price();
+    let index_price_mid = p.index_token_price.pick_price_for_pnl(p.is_long, false);
     update_funding_state(
         env,
         p.data_store,

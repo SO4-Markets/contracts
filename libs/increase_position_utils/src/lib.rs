@@ -105,7 +105,7 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
     // and price-impact pool writes are omitted to stay within Soroban's 40 ledger-entry
     // read budget. Funding/borrowing rates are zero when OI is zero (empty market), and
     // position open/close operations will refresh them once OI exists.
-    let index_price = p.index_token_price.mid_price();
+    let index_price = p.index_token_price.pick_price_for_pnl(p.is_long, true);
     let impact_usd: i128 = 0; // price impact skipped to save ledger entries
 
     // Execution price (no impact)
