@@ -1196,6 +1196,129 @@ mod tests {
         );
     }
 
+    // ── Issue #256: dominant OI side always pays the subordinate side ────────
+    //
+    // These tests seed `saved_factor` directly at the rate's converged target
+    // (rather than starting from 0 and relying on the per-second ramp to get
+    // there, as `funding_sign_flip_emits_event` does) so a modest `dt` already
+    // produces a comfortably nonzero per-size delta. Ramp-up dynamics are a
+    // separate, already-covered concern; these tests isolate the sign/magnitude
+    // of the steady-state pay/receive split itself.
+
+    /// Short-dominated OI: shorts must pay (positive per-size delta, a debit for
+    /// a fresh short position) and longs must receive (negative delta, a credit).
+    #[test]
+    fn funding_short_dominated_shorts_pay_longs_receive() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = make_market(&env);
+        let ds_c = DsClient::new(&env, &ds);
+
+        // $2M long vs $8M short OI → diff/total = 6M/10M = 0.6 → target rate = 0.6×FP,
+        // negative since short dominates. Seed saved_factor at exactly that value.
+        setup_funding_params(&env, &ds, &admin, &mt, -6 * FLOAT_PRECISION / 10);
+
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &lt, true), &(2_000_000 * FLOAT_PRECISION));
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &st, false), &(8_000_000 * FLOAT_PRECISION));
+
+        let market = make_market_props(&mt, &it, &lt, &st);
+        let result = update_funding_state(&env, &ds, &admin, &market, 0, 0, 100);
+
+        assert!(
+            result.funding_factor_per_second < 0,
+            "shorts dominate → rate must be negative (shorts pay)"
+        );
+        assert!(
+            result.short_funding_per_size_delta > 0,
+            "short-side per-size delta must be positive (a debit) when shorts dominate, got {}",
+            result.short_funding_per_size_delta
+        );
+        assert!(
+            result.long_funding_per_size_delta < 0,
+            "long-side per-size delta must be negative (a credit) when shorts dominate, got {}",
+            result.long_funding_per_size_delta
+        );
+    }
+
+    /// Long-dominated OI: longs must pay (positive per-size delta, a debit for a
+    /// fresh long position) and shorts must receive (negative delta, a credit).
+    /// This mirrors the existing long-dominated coverage in
+    /// `funding_magnitude_change_no_event`, asserting on the deltas directly.
+    #[test]
+    fn funding_long_dominated_longs_pay_shorts_receive() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = make_market(&env);
+        let ds_c = DsClient::new(&env, &ds);
+
+        // $8M long vs $2M short OI → same 0.6 ratio, positive since long dominates.
+        setup_funding_params(&env, &ds, &admin, &mt, 6 * FLOAT_PRECISION / 10);
+
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &lt, true), &(8_000_000 * FLOAT_PRECISION));
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &st, false), &(2_000_000 * FLOAT_PRECISION));
+
+        let market = make_market_props(&mt, &it, &lt, &st);
+        let result = update_funding_state(&env, &ds, &admin, &market, 0, 0, 100);
+
+        assert!(
+            result.funding_factor_per_second > 0,
+            "longs dominate → rate must be positive (longs pay)"
+        );
+        assert!(
+            result.long_funding_per_size_delta > 0,
+            "long-side per-size delta must be positive (a debit) when longs dominate, got {}",
+            result.long_funding_per_size_delta
+        );
+        assert!(
+            result.short_funding_per_size_delta < 0,
+            "short-side per-size delta must be negative (a credit) when longs dominate, got {}",
+            result.short_funding_per_size_delta
+        );
+    }
+
+    /// Conservation: the USD amount the dominant side is charged must equal (up to
+    /// integer-rounding dust) the USD amount credited to the subordinate side —
+    /// funding never creates or destroys value, only moves it between sides.
+    #[test]
+    fn funding_conserves_value_across_long_and_short_sides() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = make_market(&env);
+        let ds_c = DsClient::new(&env, &ds);
+
+        // $3M long vs $7M short OI → diff/total = 4M/10M = 0.4, negative (short-dominant).
+        setup_funding_params(&env, &ds, &admin, &mt, -4 * FLOAT_PRECISION / 10);
+
+        let long_oi: i128 = 3_000_000 * FLOAT_PRECISION;
+        let short_oi: i128 = 7_000_000 * FLOAT_PRECISION;
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &lt, true), &long_oi);
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &st, false), &short_oi);
+
+        let market = make_market_props(&mt, &it, &lt, &st);
+        let result = update_funding_state(&env, &ds, &admin, &market, 0, 0, 100);
+
+        // The deltas must actually be nonzero, or the sum-to-zero check below would
+        // trivially (and vacuously) pass.
+        assert!(result.long_funding_per_size_delta != 0);
+        assert!(result.short_funding_per_size_delta != 0);
+
+        // Aggregate each side's per-size delta back to a USD amount over its full OI.
+        let long_usd = mul_div_wide(&env, long_oi, result.long_funding_per_size_delta, FLOAT_PRECISION);
+        let short_usd = mul_div_wide(&env, short_oi, result.short_funding_per_size_delta, FLOAT_PRECISION);
+        let net = long_usd + short_usd;
+
+        // Each side's per-size delta is floor-rounded independently, so re-aggregating
+        // over its full OI can lose up to that side's own OI (in USD) as dust; bound
+        // net by both sides' OI combined — a real sign inversion would fail this by
+        // orders of magnitude (net would be ~2x one side's total instead of near 0).
+        let tolerance = long_oi / FLOAT_PRECISION + short_oi / FLOAT_PRECISION;
+        assert!(
+            net.abs() <= tolerance,
+            "net funding across both sides must sum to ~zero (within rounding dust), got {} (tolerance {})",
+            net, tolerance
+        );
+    }
+
     // ── Borrowing-fee overflow tests (issue #231) ─────────────────────────────
 
     use proptest::prelude::*;

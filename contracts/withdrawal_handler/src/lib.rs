@@ -6,7 +6,8 @@
 //!   1. User approves LP tokens to withdrawal_handler.
 //!   2. User calls `create_withdrawal` → LP tokens pulled to withdrawal_vault.
 //!   3. Keeper sets oracle prices, then calls `execute_withdrawal`:
-//!      - Computes pro-rata long/short amounts from pool.
+//!      - Splits the withdrawal by the pool's current USD-value weight between
+//!        long/short (issue #255), using prices fresh for this ledger.
 //!      - Burns LP tokens from vault.
 //!      - Transfers pool tokens from market_token contract → receiver.
 //!      - Updates pool amounts.
@@ -19,7 +20,7 @@ use gmx_keys::{
     market_short_token_key, roles, withdrawal_key, withdrawal_list_key,
 };
 use gmx_market_utils::{apply_delta_to_pool_amount, get_pool_amount};
-use gmx_math::mul_div_wide;
+use gmx_math::{mul_div_wide, TOKEN_PRECISION};
 pub use gmx_types::CreateWithdrawalParams;
 use gmx_types::{MarketProps, WithdrawalProps};
 use soroban_sdk::{
@@ -93,6 +94,7 @@ trait IDataStore {
 #[soroban_sdk::contractclient(name = "OracleClient")]
 trait IOracle {
     fn get_primary_price(env: Env, token: Address) -> gmx_types::PriceProps;
+    fn require_price_fresh(env: Env, token: Address, expected_ledger_seq: u32) -> gmx_types::PriceProps;
 }
 
 #[allow(dead_code)]
@@ -272,6 +274,11 @@ impl WithdrawalHandler {
             .instance()
             .get(&InstanceKey::WithdrawalVault)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let oracle: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Oracle)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
 
         let withdrawal: WithdrawalProps = env
@@ -284,15 +291,55 @@ impl WithdrawalHandler {
 
         let mt_client = MarketTokenClient::new(&env, &market.market_token);
         let total_supply = mt_client.total_supply();
-
-        // Pro-rata pool amounts:  out = pool_amount × lp_amount / total_supply
-        let long_pool = get_pool_amount(&env, &data_store, &market, &market.long_token) as i128;
-        let short_pool = get_pool_amount(&env, &data_store, &market, &market.short_token) as i128;
         let lp_amount = withdrawal.market_token_amount;
 
-        let long_out = mul_div_wide(&env, long_pool, lp_amount, total_supply);
-        let short_out = mul_div_wide(&env, short_pool, lp_amount, total_supply);
+        // Issue #255: split the withdrawal by the pool's CURRENT USD-value weight
+        // between long/short, not a fixed 50/50 or amount-only split. Prices must
+        // be fresh for this ledger (mirrors deposit_handler's #253 fix) so the
+        // weight reflects the keeper's just-submitted price.
+        let oracle_client = OracleClient::new(&env, &oracle);
+        let current_seq = env.ledger().sequence();
+        let long_price = oracle_client
+            .require_price_fresh(&market.long_token, &current_seq)
+            .mid_price();
+        let short_price = oracle_client
+            .require_price_fresh(&market.short_token, &current_seq)
+            .mid_price();
 
+        let long_pool = get_pool_amount(&env, &data_store, &market, &market.long_token) as i128;
+        let short_pool = get_pool_amount(&env, &data_store, &market, &market.short_token) as i128;
+        let long_pool_usd = mul_div_wide(&env, long_pool, long_price, TOKEN_PRECISION);
+        let short_pool_usd = mul_div_wide(&env, short_pool, short_price, TOKEN_PRECISION);
+        let total_pool_usd = long_pool_usd + short_pool_usd;
+
+        let (long_out, short_out) = if total_pool_usd == 0 {
+            (0, 0)
+        } else {
+            // USD value of the LP tokens being burned, at the pool's current total value.
+            let withdrawal_value_usd = mul_div_wide(&env, total_pool_usd, lp_amount, total_supply);
+
+            // Split by each side's USD weight (long_pool_usd / total_pool_usd), as a
+            // single fused division rather than normalizing the weight to a separate
+            // FLOAT_PRECISION fraction first and re-applying it: chaining two roundings
+            // can leave 1-unit dust behind even on a full (100%) withdrawal, where this
+            // fused form is exact.
+            let long_out_usd = mul_div_wide(&env, withdrawal_value_usd, long_pool_usd, total_pool_usd);
+            let short_out_usd = mul_div_wide(&env, withdrawal_value_usd, short_pool_usd, total_pool_usd);
+
+            let long_out = if long_price > 0 {
+                mul_div_wide(&env, long_out_usd, TOKEN_PRECISION, long_price)
+            } else {
+                0
+            };
+            let short_out = if short_price > 0 {
+                mul_div_wide(&env, short_out_usd, TOKEN_PRECISION, short_price)
+            } else {
+                0
+            };
+            (long_out, short_out)
+        };
+
+        // Slippage guard checked AFTER the weight-adjusted amounts are computed.
         if long_out < withdrawal.min_long_token_amount {
             panic_with_error!(&env, Error::InsufficientLongOut);
         }
@@ -465,7 +512,11 @@ mod tests {
     use market_token::{MarketToken, MarketTokenClient as MtClient};
     use oracle::{Oracle, OracleClient as OClient};
     use role_store::{RoleStore, RoleStoreClient as RsClient};
-    use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Env, Vec};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        token::StellarAssetClient,
+        Env, Vec,
+    };
     use withdrawal_vault::{WithdrawalVault, WithdrawalVaultClient as WVClient};
 
     struct World {
@@ -1129,5 +1180,87 @@ mod tests {
         // impostor has no ORDER_KEEPER role — must panic with Unauthorized.
         WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
             .execute_withdrawal(&impostor, &wth_key);
+    }
+
+    // ── Issue #255: withdrawal output matches current pool weight ────────────
+
+    /// Withdraw from a 70/30 imbalanced pool (USD terms) and assert the output
+    /// ratio matches the pool weight within 1 bps, not a hardcoded 50/50 split.
+    #[test]
+    fn execute_withdrawal_imbalanced_pool_matches_weight_ratio() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        // 70/30 imbalanced pool in USD terms:
+        // long price = 2000, short price = 1 (from set_prices)
+        // long_amount * 2000 = 700_000 (usd)  => long_amount = 350
+        // short_amount * 1   = 300_000 (usd)  => short_amount = 300_000
+        let long_amount = 350 * 10_000_000i128; // 350 tokens @ 7 decimals
+        let short_amount = 300_000 * 10_000_000i128; // 300,000 tokens @ 7 decimals
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &long_amount);
+        StellarAssetClient::new(env, &w.short_tk).mint(&user, &short_amount);
+        set_prices(&w);
+        let lp_balance = do_deposit(&w, &user, long_amount, short_amount);
+        assert!(lp_balance > 0);
+
+        set_prices(&w);
+        let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp_balance,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
+        WithdrawalHandlerClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &wth_key);
+
+        let long_out = StellarAssetClient::new(env, &w.long_tk).balance(&user);
+        let short_out = StellarAssetClient::new(env, &w.short_tk).balance(&user);
+
+        let long_out_usd = long_out * 2000;
+        let short_out_usd = short_out;
+        let total_usd = long_out_usd + short_out_usd;
+
+        // expect ~70% long, 30% short (within 1 bps = 0.01%)
+        let long_bps = long_out_usd * 10_000 / total_usd;
+        assert!((long_bps - 7000).abs() <= 1, "long_bps={} expected ~7000", long_bps);
+    }
+
+    /// execute_withdrawal must revert once the ledger has advanced past the price
+    /// submission, rather than computing the pool weight from a stale price.
+    #[test]
+    #[should_panic]
+    fn execute_withdrawal_reverts_on_stale_price() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+        let lp = do_deposit(&w, &user, 1_000_0000, 0);
+
+        set_prices(&w);
+        let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
+
+        // Ledger advances with no fresh price submitted — the stored price is now stale.
+        let seq = env.ledger().sequence();
+        env.ledger().set_sequence_number(seq + 1);
+
+        WithdrawalHandlerClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &wth_key);
     }
 }

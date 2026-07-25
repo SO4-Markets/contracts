@@ -93,6 +93,7 @@ trait IDataStore {
 #[soroban_sdk::contractclient(name = "OracleClient")]
 trait IOracle {
     fn get_primary_price(env: Env, token: Address) -> gmx_types::PriceProps;
+    fn require_price_fresh(env: Env, token: Address, expected_ledger_seq: u32) -> gmx_types::PriceProps;
 }
 
 #[allow(dead_code)]
@@ -327,16 +328,19 @@ impl DepositHandler {
         // Reconstruct MarketProps from data_store
         let market = load_market_props(&env, &data_store, &deposit.market);
 
-        // Read prices from oracle
+        // Read prices from oracle. Issue #253: require a price signed for THIS ledger
+        // so the mint amount always reflects the keeper's just-submitted price rather
+        // than a stale one still sitting in temporary storage from an earlier ledger.
         let oracle_client = OracleClient::new(&env, &oracle);
+        let current_seq = env.ledger().sequence();
         let long_price = oracle_client
-            .get_primary_price(&market.long_token)
+            .require_price_fresh(&market.long_token, &current_seq)
             .mid_price();
         let short_price = oracle_client
-            .get_primary_price(&market.short_token)
+            .require_price_fresh(&market.short_token, &current_seq)
             .mid_price();
         let index_price = oracle_client
-            .get_primary_price(&market.index_token)
+            .require_price_fresh(&market.index_token, &current_seq)
             .mid_price();
 
         // Verify vault actually holds at least what was recorded at deposit time.
@@ -572,7 +576,11 @@ mod tests {
     use market_token::{MarketToken, MarketTokenClient as MtClient};
     use oracle::{Oracle, OracleClient as OClient};
     use role_store::{RoleStore, RoleStoreClient as RsClient};
-    use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, BytesN, Env, Vec};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        token::StellarAssetClient,
+        BytesN, Env, Vec,
+    };
 
     struct World {
         env: Env,
@@ -772,6 +780,124 @@ mod tests {
         let short_pool = ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.short_tk));
         assert_eq!(long_pool, 1_000_0000);
         assert_eq!(short_pool, 500_0000);
+    }
+
+    // ── Issue #253: same-ledger price freshness ────────────────────────────────
+
+    /// A deposit executed after a same-ledger price move must mint against the
+    /// just-submitted price, not whatever price happened to be stored before it.
+    #[test]
+    fn execute_deposit_mints_correct_amount_after_same_ledger_price_move() {
+        let w = setup();
+        let env = &w.env;
+        let hc = DepositHandlerClient::new(env, &w.handler);
+        let fp = gmx_math::FLOAT_PRECISION;
+
+        // Seed the pool: 1 long token @ $2000 mints 2000 LP tokens (mt_price starts at $1).
+        let seed_user = Address::generate(env);
+        StellarAssetClient::new(env, &w.long_tk).mint(&seed_user, &1_000_0000i128);
+        set_prices(&w);
+        let seed_key = hc.create_deposit(
+            &seed_user,
+            &CreateDepositParams {
+                receiver: seed_user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: 1_000_0000i128,
+                short_token_amount: 0,
+                min_market_tokens: 1,
+                execution_fee: 0,
+            },
+        );
+        hc.execute_deposit(&w.keeper, &seed_key);
+
+        // Keeper submits a fresh price for the SAME ledger: long token +10% (2000 -> 2200).
+        // This raises pool value from 2000 to 2200, and mt_price from $1.0 to $1.1.
+        let bumped_price = 2200 * fp;
+        OClient::new(env, &w.oracle).set_prices_simple(
+            &w.keeper,
+            &Vec::from_array(
+                env,
+                [
+                    TokenPrice {
+                        token: w.long_tk.clone(),
+                        min: bumped_price,
+                        max: bumped_price,
+                    },
+                    TokenPrice {
+                        token: w.short_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: w.index_tk.clone(),
+                        min: bumped_price,
+                        max: bumped_price,
+                    },
+                ],
+            ),
+        );
+
+        // A second deposit executed in this same ledger must be priced off the bump:
+        // deposit_usd = 1 token * 2200 = 2200; mt_price = 2200 * TOKEN_PRECISION / 2e10 = 1.1
+        // mint = 2200 / 1.1 = 2000 LP tokens (same count as the seed deposit, not diluted).
+        let user = Address::generate(env);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        let dep_key = hc.create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: 1_000_0000i128,
+                short_token_amount: 0,
+                min_market_tokens: 1,
+                execution_fee: 0,
+            },
+        );
+        hc.execute_deposit(&w.keeper, &dep_key);
+
+        let lp_minted = MtClient::new(env, &w.market_tk).balance(&user);
+        assert_eq!(
+            lp_minted,
+            2000 * gmx_math::TOKEN_PRECISION,
+            "mint must reflect the just-submitted +10% price, not a stale pool value"
+        );
+    }
+
+    /// execute_deposit must revert once the ledger has advanced past the price
+    /// submission, rather than silently minting against a now-stale price.
+    #[test]
+    #[should_panic]
+    fn execute_deposit_reverts_on_stale_price() {
+        let w = setup();
+        let env = &w.env;
+        let hc = DepositHandlerClient::new(env, &w.handler);
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+        let dep_key = hc.create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: 1_000_0000i128,
+                short_token_amount: 0,
+                min_market_tokens: 1,
+                execution_fee: 0,
+            },
+        );
+
+        // Ledger advances with no fresh price submitted — the stored price is now stale.
+        let seq = env.ledger().sequence();
+        env.ledger().set_sequence_number(seq + 1);
+
+        hc.execute_deposit(&w.keeper, &dep_key);
     }
 
     // ── Issue #40: min_market_tokens slippage protection ──────────────────────

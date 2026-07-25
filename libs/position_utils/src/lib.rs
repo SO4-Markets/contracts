@@ -621,6 +621,60 @@ mod tests {
         );
     }
 
+    // ── Issue #256: dominant OI side always pays the subordinate side ────────
+
+    /// Short-dominated market: a short position being decreased must be charged a
+    /// funding debit (funding_fee_amount > 0), never credited.
+    #[test]
+    fn get_position_fees_short_holder_pays_debit_when_shorts_dominate() {
+        let w = setup();
+        let ds_c = DsClient::new(&w.env, &w.ds);
+
+        // Shorts dominate → the short-side accumulator (short_token, is_long=false)
+        // increases, exactly as market_utils::update_funding_state computes it.
+        let fnd_key = gmx_keys::funding_amount_per_size_key(&w.env, &w.market_tk, &w.short_tk, false);
+        let funding_per_size: i128 = FP / 100_000;
+        ds_c.apply_delta_to_i128(&w.admin, &fnd_key, &funding_per_size);
+
+        let market = make_market(&w);
+        let mut position = make_position(&w, 1_000 * FP, ONE_TOKEN * 10, 2_000 * FP);
+        position.is_long = false;
+        position.collateral_token = w.short_tk.clone();
+
+        let fees = get_position_fees(&w.env, &w.ds, &market, &position, FP, 1_000 * FP, true);
+
+        assert!(
+            fees.funding_fee_amount > 0,
+            "short holder must be charged a funding debit when shorts dominate, got {}",
+            fees.funding_fee_amount
+        );
+    }
+
+    /// Long-dominated market: a long position being decreased must be charged a
+    /// funding debit (funding_fee_amount > 0), never credited.
+    #[test]
+    fn get_position_fees_long_holder_pays_debit_when_longs_dominate() {
+        let w = setup();
+        let ds_c = DsClient::new(&w.env, &w.ds);
+
+        // Longs dominate → the long-side accumulator (long_token, is_long=true) increases.
+        let fnd_key = gmx_keys::funding_amount_per_size_key(&w.env, &w.market_tk, &w.long_tk, true);
+        let funding_per_size: i128 = FP / 100_000;
+        ds_c.apply_delta_to_i128(&w.admin, &fnd_key, &funding_per_size);
+
+        let market = make_market(&w);
+        let position = make_position(&w, 1_000 * FP, ONE_TOKEN * 10, 2_000 * FP);
+        // default make_position is already is_long: true, collateral_token: long_tk
+
+        let fees = get_position_fees(&w.env, &w.ds, &market, &position, FP, 1_000 * FP, true);
+
+        assert!(
+            fees.funding_fee_amount > 0,
+            "long holder must be charged a funding debit when longs dominate, got {}",
+            fees.funding_fee_amount
+        );
+    }
+
     // ── Issue #136: property tests for position_utils ─────────────────────────
 
     /// get_position_pnl_usd returns 0 when the position has zero size.
