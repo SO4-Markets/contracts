@@ -32,6 +32,8 @@ enum RoleKey {
     AllRoles,
     /// Init flag
     Initialized,
+    /// u32 — number of members holding a given role (avoids full Vec read)
+    RoleMemberCount(BytesN<32>),
 }
 
 // ─── Events ───────────────────────────────────────────────────────────────────
@@ -143,12 +145,10 @@ impl RoleStore {
 
     /// Count of accounts holding `role`.
     pub fn get_role_member_count(env: Env, role: BytesN<32>) -> u32 {
-        let members: Vec<Address> = env
-            .storage()
+        env.storage()
             .persistent()
-            .get(&RoleKey::RoleMembers(role))
-            .unwrap_or(Vec::new(&env));
-        members.len()
+            .get(&RoleKey::RoleMemberCount(role))
+            .unwrap_or(0)
     }
 
     /// All role IDs that have ever been granted.
@@ -202,6 +202,17 @@ fn internal_grant_role(env: &Env, account: &Address, role: &BytesN<32>) {
     }
     env.storage().persistent().set(&has_key, &true);
 
+    // Increment member count
+    let count_key = RoleKey::RoleMemberCount(role.clone());
+    let count: u32 = env
+        .storage()
+        .persistent()
+        .get(&count_key)
+        .unwrap_or(0);
+    env.storage()
+        .persistent()
+        .set(&count_key, &(count + 1));
+
     // Add to role's member list
     let mut members: Vec<Address> = env
         .storage()
@@ -247,6 +258,19 @@ fn internal_revoke_role(env: &Env, account: &Address, role: &BytesN<32>) {
         return; // idempotent
     }
     env.storage().persistent().remove(&has_key);
+
+    // Decrement member count
+    let count_key = RoleKey::RoleMemberCount(role.clone());
+    let count: u32 = env
+        .storage()
+        .persistent()
+        .get(&count_key)
+        .unwrap_or(0);
+    if count > 0 {
+        env.storage()
+            .persistent()
+            .set(&count_key, &(count - 1));
+    }
 
     // Remove from role's member list
     let mut members: Vec<Address> = env

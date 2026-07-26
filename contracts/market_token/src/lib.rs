@@ -24,17 +24,20 @@ pub enum Error {
     InsufficientAllowance = 5,
     NegativeAmount = 6,
     AllowanceExpired = 7,
+    InvalidPoolToken = 8,
 }
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
 #[contracttype]
 enum InstanceKey {
-    Admin,     // Address: market_factory (initial admin)
-    RoleStore, // Address: role_store for controller checks
-    Decimals,  // u32
-    Name,      // String
-    Symbol,    // String
+    Admin,      // Address: market_factory (initial admin)
+    RoleStore,  // Address: role_store for controller checks
+    Decimals,   // u32
+    Name,       // String
+    Symbol,     // String
+    LongToken,  // Address: the market's long token
+    ShortToken, // Address: the market's short token
 }
 
 #[contracttype]
@@ -77,6 +80,8 @@ impl MarketToken {
         decimal: u32,
         name: String,
         symbol: String,
+        long_token: Address,
+        short_token: Address,
     ) {
         if env.storage().instance().has(&InstanceKey::Admin) {
             panic_with_error!(&env, Error::AlreadyInitialized);
@@ -90,6 +95,12 @@ impl MarketToken {
             .set(&InstanceKey::Decimals, &decimal);
         env.storage().instance().set(&InstanceKey::Name, &name);
         env.storage().instance().set(&InstanceKey::Symbol, &symbol);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::LongToken, &long_token);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::ShortToken, &short_token);
         env.storage()
             .persistent()
             .set(&DataKey::TotalSupply, &0i128);
@@ -249,7 +260,8 @@ impl MarketToken {
 
     /// Transfer underlying pool tokens (long/short token) held by this contract
     /// to a receiver. Called by withdrawal_handler after burning LP tokens.
-    /// Caller must hold CONTROLLER role.
+    /// Caller must hold CONTROLLER role. pool_token must be the market's
+    /// registered long or short token.
     pub fn withdraw_from_pool(
         env: Env,
         caller: Address,
@@ -262,6 +274,19 @@ impl MarketToken {
             panic_with_error!(&env, Error::NegativeAmount);
         }
         require_controller(&env, &caller);
+        let long_token: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::LongToken)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let short_token: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::ShortToken)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if pool_token != long_token && pool_token != short_token {
+            panic_with_error!(&env, Error::InvalidPoolToken);
+        }
         token::Client::new(&env, &pool_token).transfer(
             &env.current_contract_address(),
             &receiver,
@@ -377,7 +402,7 @@ mod tests {
         id
     }
 
-    fn deploy_market_token(env: &Env, admin: &Address, role_store: &Address) -> Address {
+    fn deploy_market_token(env: &Env, admin: &Address, role_store: &Address, long_token: &Address, short_token: &Address) -> Address {
         let id = env.register(MarketToken, ());
         let client = MarketTokenClient::new(env, &id);
         client.initialize(
@@ -386,11 +411,13 @@ mod tests {
             &7u32,
             &String::from_str(env, "GMX Market Token"),
             &String::from_str(env, "GM"),
+            long_token,
+            short_token,
         );
         id
     }
 
-    fn setup() -> (Env, Address, Address, Address) {
+    fn setup() -> (Env, Address, Address, Address, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
         let admin = Address::generate(&env);
@@ -398,13 +425,19 @@ mod tests {
         // Grant CONTROLLER to admin
         let rs = RsClient::new(&env, &rs_id);
         rs.grant_role(&admin, &admin, &roles::controller(&env));
-        let mt_id = deploy_market_token(&env, &admin, &rs_id);
-        (env, admin, rs_id, mt_id)
+        let long_token = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let short_token = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let mt_id = deploy_market_token(&env, &admin, &rs_id, &long_token, &short_token);
+        (env, admin, rs_id, mt_id, long_token, short_token)
     }
 
     #[test]
     fn test_metadata() {
-        let (env, _, _, mt_id) = setup();
+        let (env, _, _, mt_id, _, _) = setup();
         let client = MarketTokenClient::new(&env, &mt_id);
         assert_eq!(client.decimals(), 7);
         assert_eq!(client.name(), String::from_str(&env, "GMX Market Token"));
@@ -413,7 +446,7 @@ mod tests {
 
     #[test]
     fn test_mint_and_balance() {
-        let (env, admin, _, mt_id) = setup();
+        let (env, admin, _, mt_id, _, _) = setup();
         let client = MarketTokenClient::new(&env, &mt_id);
         let user = Address::generate(&env);
 
@@ -425,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_transfer() {
-        let (env, admin, _, mt_id) = setup();
+        let (env, admin, _, mt_id, _, _) = setup();
         let client = MarketTokenClient::new(&env, &mt_id);
         let alice = Address::generate(&env);
         let bob = Address::generate(&env);
@@ -438,7 +471,7 @@ mod tests {
 
     #[test]
     fn test_burn() {
-        let (env, admin, _, mt_id) = setup();
+        let (env, admin, _, mt_id, _, _) = setup();
         let client = MarketTokenClient::new(&env, &mt_id);
         let user = Address::generate(&env);
 
@@ -450,7 +483,7 @@ mod tests {
 
     #[test]
     fn test_approve_and_transfer_from() {
-        let (env, admin, _, mt_id) = setup();
+        let (env, admin, _, mt_id, _, _) = setup();
         let client = MarketTokenClient::new(&env, &mt_id);
         let alice = Address::generate(&env);
         let bob = Address::generate(&env);
@@ -474,7 +507,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_transfer_insufficient_balance() {
-        let (env, admin, _, mt_id) = setup();
+        let (env, admin, _, mt_id, _, _) = setup();
         let client = MarketTokenClient::new(&env, &mt_id);
         let user = Address::generate(&env);
         let other = Address::generate(&env);
@@ -489,7 +522,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn unauthorized_mint_reverts() {
-        let (env, _admin, rs_id, mt_id) = setup();
+        let (env, _admin, rs_id, mt_id, _, _) = setup();
         let attacker = Address::generate(&env);
         let victim = Address::generate(&env);
 
@@ -507,7 +540,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn unauthorized_withdraw_from_pool_reverts() {
-        let (env, admin, rs_id, mt_id) = setup();
+        let (env, admin, rs_id, mt_id, _, _) = setup();
         let attacker = Address::generate(&env);
         let victim = Address::generate(&env);
 
@@ -526,10 +559,28 @@ mod tests {
         client.withdraw_from_pool(&attacker, &pool_token, &victim, &1_000i128);
     }
 
+    /// A CONTROLLER caller must not be able to withdraw an arbitrary pool token
+    /// that is not the market's registered long or short token.
+    #[test]
+    #[should_panic]
+    fn withdraw_from_pool_rejects_unregistered_token() {
+        let (env, admin, _, mt_id, _, _) = setup();
+        let client = MarketTokenClient::new(&env, &mt_id);
+        let receiver = Address::generate(&env);
+
+        // Register a third token that is NOT the market's long or short token
+        let unregistered = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+
+        client.mint(&admin, &receiver, &1_000_0000i128);
+        client.withdraw_from_pool(&admin, &unregistered, &receiver, &100_0000i128);
+    }
+
     /// A caller WITH CONTROLLER role can mint and the balance is reflected correctly.
     #[test]
     fn authorized_mint_succeeds() {
-        let (env, admin, _, mt_id) = setup();
+        let (env, admin, _, mt_id, _, _) = setup();
         let user = Address::generate(&env);
         let client = MarketTokenClient::new(&env, &mt_id);
 
@@ -549,7 +600,7 @@ mod tests {
     /// After mint + burn, total supply and balance return to zero.
     #[test]
     fn authorized_burn_reduces_supply() {
-        let (env, admin, _, mt_id) = setup();
+        let (env, admin, _, mt_id, _, _) = setup();
         let user = Address::generate(&env);
         let client = MarketTokenClient::new(&env, &mt_id);
 
@@ -573,7 +624,7 @@ mod tests {
     /// takes effect for mint (simulates deposit_handler being granted CONTROLLER).
     #[test]
     fn newly_granted_controller_can_mint() {
-        let (env, admin, rs_id, mt_id) = setup();
+        let (env, admin, rs_id, mt_id, _, _) = setup();
         let handler = Address::generate(&env);
         let user = Address::generate(&env);
 
@@ -589,7 +640,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn revoked_controller_cannot_mint() {
-        let (env, admin, rs_id, mt_id) = setup();
+        let (env, admin, rs_id, mt_id, _, _) = setup();
         let handler = Address::generate(&env);
         let user = Address::generate(&env);
 
@@ -612,7 +663,7 @@ mod tests {
     /// (if not yet TTL-evicted) still holds the original amount.
     #[test]
     fn allowance_reads_zero_after_expiration_ledger_passes() {
-        let (env, admin, _, mt_id) = setup();
+        let (env, admin, _, mt_id, _, _) = setup();
         let client = MarketTokenClient::new(&env, &mt_id);
         let alice = Address::generate(&env);
         let spender = Address::generate(&env);
@@ -638,7 +689,7 @@ mod tests {
     /// be enough to cover the transfer.
     #[test]
     fn transfer_from_after_expiration_reverts_with_allowance_expired() {
-        let (env, admin, _, mt_id) = setup();
+        let (env, admin, _, mt_id, _, _) = setup();
         let client = MarketTokenClient::new(&env, &mt_id);
         let alice = Address::generate(&env);
         let bob = Address::generate(&env);
@@ -660,11 +711,39 @@ mod tests {
         );
     }
 
+    /// burn_from exercises the allowance-gated burn: approve, call burn_from,
+    /// and assert the burner's balance, the allowance remainder, and total_supply
+    /// are all correctly updated.
+    #[test]
+    fn test_approve_and_burn_from() {
+        let (env, admin, _, mt_id, _, _) = setup();
+        let client = MarketTokenClient::new(&env, &mt_id);
+        let alice = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        client.mint(&admin, &alice, &1000_0000i128);
+        assert_eq!(client.total_supply(), 1000_0000);
+
+        client.approve(
+            &alice,
+            &spender,
+            &500_0000i128,
+            &(env.ledger().sequence() + 100),
+        );
+        assert_eq!(client.allowance(&alice, &spender), 500_0000);
+
+        client.burn_from(&spender, &alice, &300_0000i128);
+
+        assert_eq!(client.balance(&alice), 700_0000);
+        assert_eq!(client.allowance(&alice, &spender), 200_0000);
+        assert_eq!(client.total_supply(), 700_0000);
+    }
+
     /// burn_from on an expired allowance must revert with AllowanceExpired,
     /// exercising the same expiry branch in spend_allowance as transfer_from.
     #[test]
     fn burn_from_after_expiration_reverts_with_allowance_expired() {
-        let (env, admin, _, mt_id) = setup();
+        let (env, admin, _, mt_id, _, _) = setup();
         let client = MarketTokenClient::new(&env, &mt_id);
         let alice = Address::generate(&env);
         let spender = Address::generate(&env);

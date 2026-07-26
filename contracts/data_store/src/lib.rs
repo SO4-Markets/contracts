@@ -1002,4 +1002,264 @@ mod tests {
         assert_eq!(client.get_u128_instance(&key), 777);
         assert_eq!(client.get_i128_instance(&key), -42);
     }
+
+    // ── Issue #360: CRUD tests for untested functions ─────────────────────
+
+    #[test]
+    fn test_get_u128_batch() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let k1 = BytesN::from_array(&env, &[0xC1u8; 32]);
+        let k2 = BytesN::from_array(&env, &[0xC2u8; 32]);
+        let k3 = BytesN::from_array(&env, &[0xC3u8; 32]);
+
+        client.set_u128(&admin, &k1, &11u128);
+        client.set_u128(&admin, &k2, &22u128);
+
+        let keys = soroban_sdk::vec![&env, k1.clone(), k2.clone(), k3.clone()];
+        let results = client.get_u128_batch(&keys);
+        assert_eq!(results.len(), 3);
+        assert_eq!(results.get_unchecked(0), 11u128);
+        assert_eq!(results.get_unchecked(1), 22u128);
+        assert_eq!(results.get_unchecked(2), 0u128);
+    }
+
+    #[test]
+    fn test_u128_instance_crud() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xC4u8; 32]);
+
+        assert_eq!(client.get_u128_instance(&key), 0);
+        client.set_u128_instance(&admin, &key, &999u128);
+        assert_eq!(client.get_u128_instance(&key), 999);
+        client.set_u128_instance(&admin, &key, &0u128);
+        assert_eq!(client.get_u128_instance(&key), 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn set_u128_instance_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0xC5u8; 32]);
+        client.set_u128_instance(&impostor, &key, &42u128);
+    }
+
+    #[test]
+    fn test_i128_instance_crud() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xC6u8; 32]);
+
+        assert_eq!(client.get_i128_instance(&key), 0);
+        client.set_i128_instance(&admin, &key, &-777i128);
+        assert_eq!(client.get_i128_instance(&key), -777);
+        client.set_i128_instance(&admin, &key, &0i128);
+        assert_eq!(client.get_i128_instance(&key), 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn set_i128_instance_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0xC7u8; 32]);
+        client.set_i128_instance(&impostor, &key, &42i128);
+    }
+
+    #[test]
+    fn test_set_u128_config_and_get_u128_cached() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xC8u8; 32]);
+
+        assert_eq!(client.get_u128(&key), 0);
+        client.set_u128_config(&admin, &key, &500u128);
+        assert_eq!(client.get_u128(&key), 500);
+        assert_eq!(client.get_u128_cached(&key), 500);
+        assert_eq!(client.get_u128_instance(&key), 500);
+    }
+
+    #[test]
+    #[should_panic]
+    fn set_u128_config_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0xC9u8; 32]);
+        client.set_u128_config(&impostor, &key, &42u128);
+    }
+
+    #[test]
+    fn test_bytes32_crud() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xCAu8; 32]);
+        let val = BytesN::from_array(&env, &[0xABu8; 32]);
+
+        assert_eq!(
+            client.get_bytes32(&key),
+            BytesN::from_array(&env, &[0u8; 32])
+        );
+        client.set_bytes32(&admin, &key, &val);
+        assert_eq!(client.get_bytes32(&key), val);
+    }
+
+    #[test]
+    #[should_panic]
+    fn set_bytes32_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0xCBu8; 32]);
+        let val = BytesN::from_array(&env, &[0xABu8; 32]);
+        client.set_bytes32(&impostor, &key, &val);
+    }
+
+    #[test]
+    fn test_remove_i128() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xCCu8; 32]);
+
+        client.set_i128(&admin, &key, &-42i128);
+        assert_eq!(client.get_i128(&key), -42);
+        client.remove_i128(&admin, &key);
+        assert_eq!(client.get_i128(&key), 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn remove_i128_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0xCDu8; 32]);
+        client.remove_i128(&impostor, &key);
+    }
+
+    #[test]
+    fn test_apply_delta_to_i128() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xCEu8; 32]);
+
+        assert_eq!(client.get_i128(&key), 0);
+        let result = client.apply_delta_to_i128(&admin, &key, &100i128);
+        assert_eq!(result, 100);
+        let result = client.apply_delta_to_i128(&admin, &key, &(-30i128));
+        assert_eq!(result, 70);
+    }
+
+    #[test]
+    #[should_panic]
+    fn apply_delta_to_i128_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0xCFu8; 32]);
+        client.apply_delta_to_i128(&impostor, &key, &10i128);
+    }
+
+    #[test]
+    fn test_remove_address() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xD0u8; 32]);
+        let value = Address::generate(&env);
+
+        assert!(client.get_address(&key).is_none());
+        client.set_address(&admin, &key, &value);
+        assert_eq!(client.get_address(&key), Some(value.clone()));
+        client.remove_address(&admin, &key);
+        assert!(client.get_address(&key).is_none());
+    }
+
+    #[test]
+    #[should_panic]
+    fn remove_address_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0xD1u8; 32]);
+        client.remove_address(&impostor, &key);
+    }
+
+    #[test]
+    fn test_remove_bool() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xD2u8; 32]);
+
+        client.set_bool(&admin, &key, &true);
+        assert!(client.get_bool(&key));
+        client.remove_bool(&admin, &key);
+        assert!(!client.get_bool(&key));
+    }
+
+    #[test]
+    #[should_panic]
+    fn remove_bool_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0xD3u8; 32]);
+        client.remove_bool(&impostor, &key);
+    }
+
+    #[test]
+    fn test_position_manager_crud() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let owner = Address::generate(&env);
+        let market = Address::generate(&env);
+        let manager = Address::generate(&env);
+
+        assert!(client.get_position_manager(&owner, &market).is_none());
+        client.set_position_manager(&owner, &market, &manager);
+        assert_eq!(client.get_position_manager(&owner, &market), Some(manager));
+    }
+
+    #[test]
+    fn test_liquidation_execution_fee() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let market = Address::generate(&env);
+
+        assert_eq!(client.get_liquidation_execution_fee(&market), 0);
+        client.set_liquidation_execution_fee(&admin, &market, &5000u128);
+        assert_eq!(client.get_liquidation_execution_fee(&market), 5000);
+    }
+
+    #[test]
+    #[should_panic]
+    fn set_liquidation_execution_fee_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let market = Address::generate(&env);
+        client.set_liquidation_execution_fee(&impostor, &market, &1000u128);
+    }
+
+    #[test]
+    fn test_min_execution_fee() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+
+        assert_eq!(client.get_min_execution_fee(), 0);
+        client.set_min_execution_fee(&admin, &3000u128);
+        assert_eq!(client.get_min_execution_fee(), 3000);
+    }
+
+    #[test]
+    #[should_panic]
+    fn set_min_execution_fee_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        client.set_min_execution_fee(&impostor, &1000u128);
+    }
 }
