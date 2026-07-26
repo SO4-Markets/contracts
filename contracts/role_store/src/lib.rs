@@ -432,6 +432,49 @@ mod tests {
         client.revoke_role(&impostor, &holder, &ctrl);
     }
 
+    // ── Issue #359: get_roles(account) test coverage ────────────────────────
+
+    /// get_roles(account) must reflect grants and revokes on the account-keyed
+    /// side of the bookkeeping (AccountRoles), including multiple roles
+    /// simultaneously and correct removal after revoke.
+    #[test]
+    fn get_roles_reflects_grants_and_revokes() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let order_keeper = roles::order_keeper(&env);
+        let user = Address::generate(&env);
+
+        // Initially empty
+        let roles_list = client.get_roles(&user);
+        assert_eq!(roles_list.len(), 0);
+
+        // Grant first role
+        client.grant_role(&admin, &user, &ctrl);
+        let roles_list = client.get_roles(&user);
+        assert_eq!(roles_list.len(), 1);
+        assert_eq!(roles_list.get_unchecked(0), ctrl);
+
+        // Grant second role — both must be present
+        client.grant_role(&admin, &user, &order_keeper);
+        let roles_list = client.get_roles(&user);
+        assert_eq!(roles_list.len(), 2);
+        assert!(vec_contains_b32(&roles_list, &ctrl));
+        assert!(vec_contains_b32(&roles_list, &order_keeper));
+
+        // Revoke first role — only second must remain
+        client.revoke_role(&admin, &user, &ctrl);
+        let roles_list = client.get_roles(&user);
+        assert_eq!(roles_list.len(), 1);
+        assert_eq!(roles_list.get_unchecked(0), order_keeper);
+        assert!(!vec_contains_b32(&roles_list, &ctrl));
+
+        // Revoke second role — empty again
+        client.revoke_role(&admin, &user, &order_keeper);
+        let roles_list = client.get_roles(&user);
+        assert_eq!(roles_list.len(), 0);
+    }
+
     // ── Issue #233: CONTROLLER cannot self-grant ROLE_ADMIN ──────────────────
 
     /// A CONTROLLER-only address cannot call grant_role to elevate itself to
