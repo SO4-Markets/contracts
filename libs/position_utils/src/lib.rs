@@ -342,8 +342,8 @@ pub fn is_liquidatable(
         min_collateral_factor,
         FLOAT_PRECISION,
     );
-    // Use net_collateral (no PnL) so unrealised gains cannot hide a collateral shortfall.
-    net_collateral < min_required
+    // Fold PnL into the comparison so adverse index-price moves cannot hide insolvency.
+    remaining < min_required
 }
 
 // ─── Position key ─────────────────────────────────────────────────────────────
