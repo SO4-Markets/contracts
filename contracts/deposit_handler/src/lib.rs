@@ -187,7 +187,10 @@ impl DepositHandler {
     pub fn create_deposit(env: Env, caller: Address, params: CreateDepositParams) -> BytesN<32> {
         caller.require_auth();
 
-        if params.long_token_amount == 0 && params.short_token_amount == 0 {
+        if params.long_token_amount <= 0 && params.short_token_amount <= 0 {
+            panic_with_error!(&env, Error::ZeroDeposit);
+        }
+        if params.long_token_amount < 0 || params.short_token_amount < 0 {
             panic_with_error!(&env, Error::ZeroDeposit);
         }
 
@@ -2181,6 +2184,81 @@ mod tests {
 
         let lp = MtClient::new(env, &w.market_tk).balance(&user);
         assert!(lp > 0, "normal deposit must still mint LP tokens after vault check added");
+    }
+
+    // ── Issue #368: negative amount validation ──────────────────────────────
+
+    /// create_deposit with a negative long_token_amount must revert (not create
+    /// a ghost deposit record).
+    #[test]
+    #[should_panic]
+    fn create_deposit_negative_long_token_amount_reverts() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        let handler_client = DepositHandlerClient::new(env, &w.handler);
+        handler_client.create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: -1,
+                short_token_amount: 0,
+                min_market_tokens: 0,
+                execution_fee: 0,
+            },
+        );
+    }
+
+    /// create_deposit with a negative short_token_amount must revert.
+    #[test]
+    #[should_panic]
+    fn create_deposit_negative_short_token_amount_reverts() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        let handler_client = DepositHandlerClient::new(env, &w.handler);
+        handler_client.create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: 0,
+                short_token_amount: -1,
+                min_market_tokens: 0,
+                execution_fee: 0,
+            },
+        );
+    }
+
+    /// create_deposit with both amounts negative must revert.
+    #[test]
+    #[should_panic]
+    fn create_deposit_both_negative_amounts_reverts() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        let handler_client = DepositHandlerClient::new(env, &w.handler);
+        handler_client.create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: -5,
+                short_token_amount: -3,
+                min_market_tokens: 0,
+                execution_fee: 0,
+            },
+        );
     }
 
     // ── Issue #371: unregistered market must raise InvalidMarket ──────────────

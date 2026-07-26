@@ -111,12 +111,13 @@ impl InsuranceFundRouter {
     pub fn configure_insurance_fund(
         env: Env,
         data_store: Address,
+        role_store: Address,
         caller: Address,
         market: Address,
         fund: Address,
         allocation_bps: u32,
     ) {
-        caller.require_auth();
+        require_controller(&env, &role_store, &caller);
         if allocation_bps > BPS_DIVISOR as u32 {
             panic_with_error!(&env, Error::AllocationTooHigh);
         }
@@ -426,7 +427,7 @@ mod tests {
         let pool = Address::generate(&w.env);
 
         StellarAssetClient::new(&w.env, &w.token).mint(&fund, &1_000i128);
-        client.configure_insurance_fund(&w.ds, &w.admin, &market, &fund, &5_000u32);
+        client.configure_insurance_fund(&w.ds, &w.rs, &w.admin, &market, &fund, &5_000u32);
         client.configure_market_pool(&w.ds, &w.admin, &market, &pool);
 
         let coverage =
@@ -448,7 +449,7 @@ mod tests {
         let fund = Address::generate(&w.env);
 
         StellarAssetClient::new(&w.env, &w.token).mint(&fund, &1_000i128);
-        client.configure_insurance_fund(&w.ds, &w.admin, &market, &fund, &5_000u32);
+        client.configure_insurance_fund(&w.ds, &w.rs, &w.admin, &market, &fund, &5_000u32);
         client.cover_shortfall(&w.ds, &w.rs, &w.admin, &market, &w.token, &600u128);
     }
 
@@ -463,8 +464,24 @@ mod tests {
         let stranger = Address::generate(&w.env);
 
         StellarAssetClient::new(&w.env, &w.token).mint(&fund, &1_000i128);
-        client.configure_insurance_fund(&w.ds, &w.admin, &market, &fund, &5_000u32);
+        client.configure_insurance_fund(&w.ds, &w.rs, &w.admin, &market, &fund, &5_000u32);
         client.configure_market_pool(&w.ds, &w.admin, &market, &pool);
         client.cover_shortfall(&w.ds, &w.rs, &stranger, &market, &w.token, &600u128);
+    }
+
+    // ── Issue #418: configure_insurance_fund requires controller role ─────────
+
+    /// configure_insurance_fund must reject a caller that does not hold CONTROLLER.
+    #[test]
+    #[should_panic]
+    fn configure_insurance_fund_panics_without_controller_role() {
+        let w = setup();
+        let client = InsuranceFundRouterClient::new(&w.env, &w.router);
+        let market = Address::generate(&w.env);
+        let fund = Address::generate(&w.env);
+        let stranger = Address::generate(&w.env);
+
+        // stranger has no CONTROLLER role — must panic.
+        client.configure_insurance_fund(&w.ds, &w.rs, &stranger, &market, &fund, &5_000u32);
     }
 }
