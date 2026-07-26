@@ -231,21 +231,23 @@ pub fn decrease_position(env: &Env, p: &DecreasePositionParams) -> DecreasePosit
         size_delta_usd,
         for_positive_impact,
     );
-    // Fee income goes to pool; also track in claimable_fee_amount_key so
-    // fee_handler.claim_fees can sweep it consistently across all fee paths.
-    apply_delta_to_pool_amount(
-        env,
-        p.data_store,
-        p.caller,
-        p.market,
-        p.collateral_token,
-        fees.total_cost_amount,
-    );
-    if fees.total_cost_amount > 0 {
+    // Only borrowing fee and position fee belong to the LP pool.
+    // Funding fee is peer-to-peer and tracked separately via the funding
+    // accumulator; adding it here would double-book and inflate pool_amount.
+    let lp_fee_amount = fees.borrowing_fee_amount + fees.position_fee_amount;
+    if lp_fee_amount > 0 {
+        apply_delta_to_pool_amount(
+            env,
+            p.data_store,
+            p.caller,
+            p.market,
+            p.collateral_token,
+            lp_fee_amount,
+        );
         DataStoreClient::new(env, p.data_store).apply_delta_to_u128(
             p.caller,
             &claimable_fee_amount_key(env, &p.market.market_token, p.collateral_token),
-            &(fees.total_cost_amount as i128),
+            &(lp_fee_amount as i128),
         );
     }
 
