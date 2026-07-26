@@ -78,6 +78,8 @@ trait IMarketToken {
         decimal: u32,
         name: String,
         symbol: String,
+        long_token: Address,
+        short_token: Address,
     );
     fn decimals(env: Env) -> u32;
 }
@@ -205,6 +207,8 @@ impl MarketFactory {
             &7u32,
             &name,
             &symbol,
+            &long_token,
+            &short_token,
         );
 
         let market = MarketProps {
