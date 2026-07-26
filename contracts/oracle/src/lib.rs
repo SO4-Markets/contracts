@@ -129,6 +129,21 @@ pub struct OracleSignerRotated {
     pub new_signer: BytesN<32>,
 }
 
+#[contracttype]
+pub struct PriceSubmitted {
+    pub keeper: Address,
+    pub token: Address,
+    pub min: i128,
+    pub max: i128,
+    pub ledger_seq: u32,
+}
+
+#[contracttype]
+pub struct PricesSubmittedBatch {
+    pub keeper: Address,
+    pub count: u32,
+}
+
 // ─── Contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -250,8 +265,21 @@ impl Oracle {
             env.storage()
                 .temporary()
                 .extend_ttl(&price_key, PRICE_TTL_LEDGERS, PRICE_TTL_LEDGERS);
+
+            // Emit per-price event for indexers and price-feed dashboards
+            env.events().publish(
+                (symbol_short!("price_sub"),),
+                PriceSubmitted {
+                    keeper: caller.clone(),
+                    token: sp.token.clone(),
+                    min: sp.min_price,
+                    max: sp.max_price,
+                    ledger_seq: sp.ledger_seq,
+                },
+            );
         }
 
+        // Emit batch summary event for backward compatibility
         env.events()
             .publish((symbol_short!("prices"),), (caller, prices.len()));
     }
@@ -482,7 +510,28 @@ impl Oracle {
             env.storage()
                 .temporary()
                 .extend_ttl(&price_key, PRICE_TTL_LEDGERS, PRICE_TTL_LEDGERS);
+
+            // Emit per-price event for indexers and price-feed dashboards
+            env.events().publish(
+                (symbol_short!("price_sub"),),
+                PriceSubmitted {
+                    keeper: caller.clone(),
+                    token: tp.token.clone(),
+                    min: tp.min,
+                    max: tp.max,
+                    ledger_seq: env.ledger().sequence(),
+                },
+            );
         }
+
+        // Emit batch summary event for parity with signed path
+        env.events().publish(
+            (symbol_short!("prices"),),
+            PricesSubmittedBatch {
+                keeper: caller,
+                count: prices.len(),
+            },
+        );
     }
 }
 
