@@ -330,7 +330,7 @@ impl FeeHandler {
             .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let key = claimable_fee_amount_key(&env, &market, &token);
-        DataStoreClient::new(&env, &data_store).apply_delta_to_u128(&caller, &key, amount as i128);
+        DataStoreClient::new(&env, &data_store).apply_delta_to_u128(&caller, &key, &(amount as i128));
 
         env.events().publish_event(&FeeAccrued {
             market,

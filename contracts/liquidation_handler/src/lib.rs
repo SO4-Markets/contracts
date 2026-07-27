@@ -78,7 +78,7 @@ pub struct LiquidatePositionResult {
     pub pnl_usd: i128,
 }
 
-#[contracttype]
+#[contractevent(topics = ["part_liq"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PartialLiquidationExecuted {
     pub keeper: Address,
@@ -365,7 +365,7 @@ impl LiquidationHandler {
         }
 
         let size_in_usd = position.size_in_usd;
-        let factor = liquidation_factor_bps.min(10000);
+        let factor = (liquidation_factor_bps.min(10000)) as i128;
         let liquidated_size = (size_in_usd * factor) / 10000;
         let remaining_size = size_in_usd.saturating_sub(liquidated_size);
         let liquidation_fee = (liquidated_size * 50) / 10000; // 50 bps fee
@@ -376,13 +376,13 @@ impl LiquidationHandler {
             market,
             collateral_token,
             is_long,
-            liquidation_factor_bps: factor,
-            liquidated_size_usd: liquidated_size,
-            remaining_size_usd: remaining_size,
-            liquidation_fee,
+            liquidation_factor_bps: factor as u128,
+            liquidated_size_usd: liquidated_size as u128,
+            remaining_size_usd: remaining_size as u128,
+            liquidation_fee: liquidation_fee as u128,
         });
 
-        liquidated_size
+        liquidated_size as u128
     }
 }
 
