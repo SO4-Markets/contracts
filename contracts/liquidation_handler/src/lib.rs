@@ -13,7 +13,7 @@ use gmx_keys::{
 use gmx_position_utils::is_liquidatable;
 use gmx_types::{MarketProps, PositionProps, PriceProps};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     BytesN, Env,
 };
 
