@@ -96,6 +96,16 @@ pub struct DataStoreInitialized {
     pub role_store: Address,
 }
 
+#[contractevent(topics = ["kpr_slash"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeeperSlashed {
+    pub keeper: Address,
+    pub executed_price: u128,
+    pub expected_price: u128,
+    pub variance_bps: u128,
+    pub penalty_amount: u128,
+}
+
 // ─── Contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -565,6 +575,66 @@ impl DataStore {
         let next = current + 1;
         env.storage().persistent().set(&key, &next);
         next as u64
+    }
+
+    // ── Keeper Reputation & Slashing (Issue #514) ────────────────────────────
+
+    /// Record execution quality metrics for a keeper and apply slashing penalty if variance exceeds limit (>5%).
+    pub fn record_keeper_execution(
+        env: Env,
+        caller: Address,
+        keeper: Address,
+        executed_price: u128,
+        expected_price: u128,
+    ) {
+        caller.require_auth();
+        require_controller(&env, &caller);
+
+        let count_key = gmx_keys::keeper_execution_count_key(&env, &keeper);
+        let current_count = Self::get_u128(env.clone(), count_key.clone());
+        Self::set_u128(env.clone(), caller.clone(), count_key, current_count + 1);
+
+        let variance = if executed_price >= expected_price {
+            executed_price - expected_price
+        } else {
+            expected_price - executed_price
+        };
+
+        if expected_price > 0 {
+            let variance_bps = (variance * 10000) / expected_price;
+            let total_var_key = gmx_keys::keeper_total_variance_key(&env, &keeper);
+            let current_total_var = Self::get_u128(env.clone(), total_var_key.clone());
+            Self::set_u128(env.clone(), caller.clone(), total_var_key, current_total_var + variance_bps);
+
+            // Slash penalty for execution variance exceeding 500 bps (5%)
+            if variance_bps > 500 {
+                let slash_key = gmx_keys::keeper_slash_amount_key(&env, &keeper);
+                let current_slash = Self::get_u128(env.clone(), slash_key.clone());
+                let penalty = 100u128;
+                Self::set_u128(env.clone(), caller.clone(), slash_key, current_slash + penalty);
+
+                env.events().publish_event(&KeeperSlashed {
+                    keeper,
+                    executed_price,
+                    expected_price,
+                    variance_bps,
+                    penalty_amount: penalty,
+                });
+            }
+        }
+    }
+
+    /// Retrieve performance metrics for a keeper: (execution_count, total_variance_bps, slash_penalty_amount).
+    pub fn get_keeper_stats(env: Env, keeper: Address) -> (u128, u128, u128) {
+        let count_key = gmx_keys::keeper_execution_count_key(&env, &keeper);
+        let total_var_key = gmx_keys::keeper_total_variance_key(&env, &keeper);
+        let slash_key = gmx_keys::keeper_slash_amount_key(&env, &keeper);
+
+        let count = Self::get_u128(env.clone(), count_key);
+        let total_var = Self::get_u128(env.clone(), total_var_key);
+        let slash = Self::get_u128(env.clone(), slash_key);
+
+        (count, total_var, slash)
     }
 
     // ── Position Manager (delegated position control for copy-trading) ────────
