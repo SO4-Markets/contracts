@@ -19,7 +19,7 @@ use gmx_keys::{
     market_long_token_key, market_short_token_key, min_deposit_usd_key, roles,
 };
 use gmx_market_utils::{
-    apply_delta_to_pool_amount, get_market_token_price,
+    apply_delta_to_pool_amount, get_market_token_price, validate_pool_amount,
 };
 use gmx_math::{mul_div_wide, TOKEN_PRECISION};
 pub use gmx_types::CreateDepositParams;
@@ -50,6 +50,8 @@ pub enum Error {
     /// data_store. Distinct from DepositNotFound, which means "no such
     /// deposit id" — this means "no such market".
     InvalidMarket = 10,
+    /// Issue #367: pool amount exceeds the configured max_pool_amount cap.
+    MaxPoolAmountExceeded = 11,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -460,6 +462,15 @@ impl DepositHandler {
                 &market.short_token,
                 deposit.short_token_amount,
             );
+        }
+
+        // Issue #367: enforce max_pool_amount cap after pool amounts are updated.
+        // Reject the deposit if either token's pool balance now exceeds its cap.
+        if validate_pool_amount(&env, &data_store, &market, &market.long_token).is_err() {
+            panic_with_error!(&env, Error::MaxPoolAmountExceeded);
+        }
+        if validate_pool_amount(&env, &data_store, &market, &market.short_token).is_err() {
+            panic_with_error!(&env, Error::MaxPoolAmountExceeded);
         }
 
         // Mint LP tokens to receiver
