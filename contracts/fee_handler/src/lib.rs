@@ -121,6 +121,15 @@ pub struct UiFeeFactorSet {
     pub factor: u128,
 }
 
+#[contractevent(topics = ["fee_acc"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeAccrued {
+    pub market: Address,
+    pub token: Address,
+    pub fee_type: u32,
+    pub amount: u128,
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 /// Returns the amount that can safely be transferred from the pool without
@@ -302,6 +311,33 @@ impl FeeHandler {
             .unwrap();
         DataStoreClient::new(&env, &data_store)
             .get_bool(&auto_compound_fees_key(&env, &market))
+    }
+
+    /// Record fee accrual and emit FeeAccrued event with fee_type breakdown (Issue #515).
+    /// fee_type: 1 = Position, 2 = Funding, 3 = Borrowing, 4 = Swap, 5 = Liquidation
+    pub fn record_fee_accrual(
+        env: Env,
+        caller: Address,
+        market: Address,
+        token: Address,
+        fee_type: u32,
+        amount: u128,
+    ) {
+        caller.require_auth();
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let key = claimable_fee_amount_key(&env, &market, &token);
+        DataStoreClient::new(&env, &data_store).apply_delta_to_u128(&caller, &key, &(amount as i128));
+
+        env.events().publish_event(&FeeAccrued {
+            market,
+            token,
+            fee_type,
+            amount,
+        });
     }
 
     /// Upgrade the contract wasm. Only the stored admin may call this.

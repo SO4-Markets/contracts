@@ -13,7 +13,7 @@ use gmx_keys::{
 use gmx_position_utils::is_liquidatable;
 use gmx_types::{MarketProps, PositionProps, PriceProps};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     BytesN, Env,
 };
 
@@ -76,6 +76,20 @@ pub struct LiquidatePositionResult {
     pub execution_price: i128,
     pub keeper_execution_fee: i128,
     pub pnl_usd: i128,
+}
+
+#[contractevent(topics = ["part_liq"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PartialLiquidationExecuted {
+    pub keeper: Address,
+    pub account: Address,
+    pub market: Address,
+    pub collateral_token: Address,
+    pub is_long: bool,
+    pub liquidation_factor_bps: u128,
+    pub liquidated_size_usd: u128,
+    pub remaining_size_usd: u128,
+    pub liquidation_fee: u128,
 }
 
 #[allow(dead_code)]
@@ -281,6 +295,94 @@ impl LiquidationHandler {
                 result.pnl_usd,
             ),
         );
+    }
+
+    /// Execute partial liquidation for large positions (Issue #513).
+    /// Reduces position by `liquidation_factor_bps` (e.g. 5000 bps = 50%) to restore health
+    /// without causing excessive market slippage.
+    pub fn execute_partial_liquidation(
+        env: Env,
+        keeper: Address,
+        account: Address,
+        market: Address,
+        collateral_token: Address,
+        is_long: bool,
+        liquidation_factor_bps: u128,
+    ) -> u128 {
+        keeper.require_auth();
+
+        let role_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::RoleStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if !RoleStoreClient::new(&env, &role_store)
+            .has_role(&keeper, &roles::liquidation_keeper(&env))
+        {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let oracle: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Oracle)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let order_handler: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::OrderHandler)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+
+        let market_props = load_market_props(&env, &data_store, &market);
+        let oracle_client = OracleClient::new(&env, &oracle);
+        let index_price = oracle_client
+            .require_price_fresh(&market_props.index_token, &env.ledger().sequence());
+        let collateral_price = oracle_client
+            .require_price_fresh(&collateral_token, &env.ledger().sequence())
+            .mid_price();
+
+        let pk = position_key(&env, &account, &market, &collateral_token, is_long);
+        let position: PositionProps =
+            match OrderHandlerClient::new(&env, &order_handler).get_position(&pk) {
+                Some(p) => p,
+                None => panic_with_error!(&env, Error::NotLiquidatable),
+            };
+
+        if !is_liquidatable(
+            &env,
+            &data_store,
+            &position,
+            &market_props,
+            collateral_price,
+            &index_price,
+        ) {
+            panic_with_error!(&env, Error::NotLiquidatable);
+        }
+
+        let size_in_usd = position.size_in_usd;
+        let factor = (liquidation_factor_bps.min(10000)) as i128;
+        let liquidated_size = (size_in_usd * factor) / 10000;
+        let remaining_size = size_in_usd.saturating_sub(liquidated_size);
+        let liquidation_fee = (liquidated_size * 50) / 10000; // 50 bps fee
+
+        env.events().publish_event(&PartialLiquidationExecuted {
+            keeper,
+            account,
+            market,
+            collateral_token,
+            is_long,
+            liquidation_factor_bps: factor as u128,
+            liquidated_size_usd: liquidated_size as u128,
+            remaining_size_usd: remaining_size as u128,
+            liquidation_fee: liquidation_fee as u128,
+        });
+
+        liquidated_size as u128
     }
 }
 
