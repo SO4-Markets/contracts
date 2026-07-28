@@ -16,8 +16,8 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    account_withdrawal_list_key, market_index_token_key, market_long_token_key,
-    market_short_token_key, roles, withdrawal_key, withdrawal_list_key,
+    account_withdrawal_list_key, is_market_paused_key, market_index_token_key,
+    market_long_token_key, market_short_token_key, roles, withdrawal_key, withdrawal_list_key,
 };
 use gmx_market_utils::{apply_delta_to_pool_amount, get_pool_amount};
 use gmx_math::{mul_div_wide, TOKEN_PRECISION};
@@ -45,6 +45,8 @@ pub enum Error {
     InvalidReceiver = 9,
     /// Issue #370: execution_fee is below the configured global minimum.
     InsufficientExecutionFee = 10,
+    /// Issue #366: market is paused due to oracle circuit breaker.
+    MarketPaused = 11,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -79,6 +81,7 @@ trait IRoleStore {
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
+    fn get_bool(env: Env, key: BytesN<32>) -> bool;
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
     fn get_i128(env: Env, key: BytesN<32>) -> i128;
@@ -221,6 +224,11 @@ impl WithdrawalHandler {
             panic_with_error!(&env, Error::InvalidMarket);
         }
 
+        // Issue #366: reject withdrawals when the market is paused (oracle circuit breaker)
+        if ds.get_bool(&is_market_paused_key(&env, &params.market)) {
+            panic_with_error!(&env, Error::MarketPaused);
+        }
+
         // Issue #370: validate execution_fee against the global minimum before
         // any tokens move. execution_fee is collected in the market (LP) token; 0
         // means no fee required.
@@ -312,6 +320,12 @@ impl WithdrawalHandler {
             .unwrap_or_else(|| panic_with_error!(&env, Error::WithdrawalNotFound));
 
         let market = load_market_props(&env, &data_store, &withdrawal.market);
+
+        // Issue #366: reject execution when the market is paused (oracle circuit breaker)
+        let ds = DataStoreClient::new(&env, &data_store);
+        if ds.get_bool(&is_market_paused_key(&env, &withdrawal.market)) {
+            panic_with_error!(&env, Error::MarketPaused);
+        }
 
         let mt_client = MarketTokenClient::new(&env, &market.market_token);
         let total_supply = mt_client.total_supply();
