@@ -17,8 +17,8 @@ use gmx_keys::{
 };
 use gmx_types::MarketProps;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Bytes, BytesN, Env, String, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
+    Address, Bytes, BytesN, Env, String, Vec,
 };
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -241,10 +241,13 @@ impl MarketFactory {
             &market_short_token_key(&env, &market_token_address),
             &short_token,
         );
-        // 3. Store token decimals (7 for Stellar standard)
-        ds_client.set_u128(&factory, &token_decimals_key(&env, &long_token), &7u128);
-        ds_client.set_u128(&factory, &token_decimals_key(&env, &short_token), &7u128);
-        ds_client.set_u128(&factory, &token_decimals_key(&env, &index_token), &7u128);
+        // 3. Store token decimals (queried from each SEP-41 token contract)
+        let long_decimals = token::Client::new(&env, &long_token).decimals() as u128;
+        let short_decimals = token::Client::new(&env, &short_token).decimals() as u128;
+        let index_decimals = token::Client::new(&env, &index_token).decimals() as u128;
+        ds_client.set_u128(&factory, &token_decimals_key(&env, &long_token), &long_decimals);
+        ds_client.set_u128(&factory, &token_decimals_key(&env, &short_token), &short_decimals);
+        ds_client.set_u128(&factory, &token_decimals_key(&env, &index_token), &index_decimals);
         // 4. Add to market list
         ds_client.add_address_to_set(&factory, &market_list_key(&env), &market_token_address);
 
