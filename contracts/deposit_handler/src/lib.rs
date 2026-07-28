@@ -15,8 +15,9 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    account_deposit_list_key, deposit_key, deposit_list_key, market_index_token_key,
-    market_long_token_key, market_short_token_key, min_deposit_usd_key, roles,
+    account_deposit_list_key, deposit_key, deposit_list_key, is_market_paused_key,
+    market_index_token_key, market_long_token_key, market_short_token_key, min_deposit_usd_key,
+    roles,
 };
 use gmx_market_utils::{
     apply_delta_to_pool_amount, get_market_token_price, validate_pool_amount,
@@ -52,6 +53,8 @@ pub enum Error {
     InvalidMarket = 10,
     /// Issue #367: pool amount exceeds the configured max_pool_amount cap.
     MaxPoolAmountExceeded = 11,
+    /// Issue #366: market is paused due to oracle circuit breaker.
+    MarketPaused = 12,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -82,6 +85,7 @@ trait IRoleStore {
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
+    fn get_bool(env: Env, key: BytesN<32>) -> bool;
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
     fn get_i128(env: Env, key: BytesN<32>) -> i128;
@@ -211,6 +215,11 @@ impl DepositHandler {
 
         // Issue #37: Validate tokens match market configuration BEFORE any transfer
         let market = load_market_props(&env, &data_store, &params.market);
+
+        // Issue #366: reject deposits when the market is paused (oracle circuit breaker)
+        if ds.get_bool(&is_market_paused_key(&env, &params.market)) {
+            panic_with_error!(&env, Error::MarketPaused);
+        }
 
         if params.long_token_amount > 0 && params.initial_long_token != market.long_token {
             panic_with_error!(&env, Error::Unauthorized); // Wrong long token
@@ -361,6 +370,12 @@ impl DepositHandler {
 
         // Reconstruct MarketProps from data_store
         let market = load_market_props(&env, &data_store, &deposit.market);
+
+        // Issue #366: reject execution when the market is paused (oracle circuit breaker)
+        let ds = DataStoreClient::new(&env, &data_store);
+        if ds.get_bool(&is_market_paused_key(&env, &deposit.market)) {
+            panic_with_error!(&env, Error::MarketPaused);
+        }
 
         // Read prices from oracle. Issue #253: require a price signed for THIS ledger
         // so the mint amount always reflects the keeper's just-submitted price rather
