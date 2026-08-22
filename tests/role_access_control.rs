@@ -241,7 +241,7 @@ fn unauthorized_adl_reverts() {
     ds_c.set_u128(
         &w.admin,
         &max_pnl_factor_for_adl_key(&w.env, &w.market_tk, true),
-        &(90_000_000_000_000_000_000_000_000_000 as u128), // 0.9 * 10^30
+        &90_000_000_000_000_000_000_000_000_000_u128, // 0.9 * 10^30
     );
 
     // Try to execute ADL without ADL_KEEPER role

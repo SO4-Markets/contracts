@@ -15,9 +15,8 @@
 #![cfg(test)]
 
 use data_store::{DataStore, DataStoreClient as DsClient};
-use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
 use gmx_keys::{
-    market_index_token_key, market_long_token_key, market_short_token_key, order_key,
+    market_index_token_key, market_long_token_key, market_short_token_key,
     position_key, roles,
 };
 use gmx_math::FLOAT_PRECISION;
@@ -27,7 +26,7 @@ use oracle::{Oracle, OracleClient as OClient};
 use order_handler::{OrderHandler, OrderHandlerClient as OHClient};
 use order_vault::{OrderVault, OrderVaultClient as OVClient};
 use role_store::{RoleStore, RoleStoreClient as RsClient};
-use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, BytesN, Env};
+use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env};
 
 const ONE_TOKEN: i128 = 10_000_000; // Stellar 7-decimal precision
 const ONE_USD: i128 = FLOAT_PRECISION; // 10^30
@@ -185,7 +184,7 @@ fn stop_loss_triggers_at_exact_trigger_price() {
     let w = setup();
     let oh_c = OHClient::new(&w.env, &w.ord_handler);
     let oracle_c = OClient::new(&w.env, &w.oracle);
-    let ds_c = DsClient::new(&w.env, &w.ds);
+    let _ds_c = DsClient::new(&w.env, &w.ds);
 
     // Transfer collateral to vault
     StellarAssetClient::new(&w.env, &w.long_tk).transfer(
@@ -212,7 +211,7 @@ fn stop_loss_triggers_at_exact_trigger_price() {
     });
 
     // Create a mock position first (simplified)
-    let pos_key = position_key(&w.env, &w.trader, &w.market_tk, &w.long_tk, true);
+    let _pos_key = position_key(&w.env, &w.trader, &w.market_tk, &w.long_tk, true);
     
     // Oracle submits price at trigger (1,900 USD)
     oracle_c.set_prices_simple(

@@ -15,8 +15,7 @@
 
 use data_store::{DataStore, DataStoreClient as DsClient};
 use gmx_keys::{
-    market_index_token_key, market_long_token_key, market_short_token_key,
-    position_key, roles,
+    market_index_token_key, market_long_token_key, market_short_token_key, roles,
 };
 use gmx_math::FLOAT_PRECISION;
 use gmx_types::{CreateOrderParams, OrderType, TokenPrice};

@@ -222,7 +222,7 @@ fn validate_position_rejects_below_min_collateral() {
         is_long: true,
     };
 
-    let collateral_price = PriceProps { min: fp, max: fp }; // $1 USDC
+    let _collateral_price = PriceProps { min: fp, max: fp }; // $1 USDC
     let index_price = PriceProps { min: 100 * fp, max: 100 * fp };
 
     // Must panic: $9 collateral < $10 minimum (10% of $100 size)
@@ -397,9 +397,9 @@ fn insufficient_collateral_position_is_liquidatable() {
         short_token: w.short_tk.clone(),
     };
 
-    let collateral_amount = 20 * tp as i128; // $20
+    let collateral_amount = 20 * tp; // $20
     let size_in_usd = 1_000 * fp;            // $1 000 position
-    let size_in_tokens = 10 * tp as i128;    // 10 tokens at $100
+    let size_in_tokens = 10 * tp;    // 10 tokens at $100
 
     let position = PositionProps {
         account: w.user.clone(),

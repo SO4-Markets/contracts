@@ -20,7 +20,7 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use gmx_keys::{keeper_public_key_prefix, stable_price_key, market_list_key, market_index_token_key, market_long_token_key, market_short_token_key};
+use gmx_keys::{keeper_public_key_prefix, stable_price_key};
 use gmx_types::{PriceProps, TokenPrice};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,

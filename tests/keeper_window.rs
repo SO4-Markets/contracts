@@ -202,7 +202,7 @@ fn seed_pool(w: &TestWorld) {
 /// Open a small long position and execute it; returns the order handler client.
 ///
 /// Used to trigger `record_keeper_activity` so the heartbeat ledger is stamped.
-fn execute_order_at_current_ledger(w: &TestWorld) -> OHClient {
+fn execute_order_at_current_ledger(w: &TestWorld) -> OHClient<'_> {
     let oh_c = OHClient::new(&w.env, &w.ord_handler);
     let trader = Address::generate(&w.env);
     let collateral = 5 * ONE_TOKEN;

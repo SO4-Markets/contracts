@@ -16,7 +16,7 @@ use gmx_keys::{account_position_list_key, collateral_sum_key, max_position_size_
 use gmx_market_utils::{
     apply_delta_to_open_interest, apply_delta_to_open_interest_in_tokens,
 };
-use gmx_math::{mul_div_wide, FLOAT_PRECISION, TOKEN_PRECISION};
+use gmx_math::{mul_div_wide, TOKEN_PRECISION};
 use gmx_position_utils::get_position_fees;
 use gmx_pricing_utils::get_execution_price;
 use gmx_types::{MarketProps, PositionProps, PriceProps};

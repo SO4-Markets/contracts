@@ -20,9 +20,9 @@ use gmx_decrease_position_utils::{decrease_position, DecreasePositionParams};
 use gmx_increase_position_utils::{increase_position, IncreasePositionParams};
 use gmx_keys::{
     account_order_list_key, keeper_heartbeat_timeout_key, last_keeper_activity_key,
-    liquidation_execution_fee_key, min_execution_fee_key,
+    liquidation_execution_fee_key,
     market_index_token_key, market_long_token_key, market_short_token_key,
-    max_leverage_key, max_swap_path_length_key, order_key, order_list_key,
+    max_leverage_key, order_key, order_list_key,
     position_fee_factor_key, position_key,
     open_interest_key,
     saved_funding_factor_per_second_key,
@@ -30,7 +30,7 @@ use gmx_keys::{
     trader_volume_key, trader_volume_window_start_key,
     roles, DEFAULT_KEEPER_HEARTBEAT_TIMEOUT, is_market_paused_key,
 };
-use gmx_math::{mul_div_wide, FLOAT_PRECISION};
+use gmx_math::mul_div_wide;
 use gmx_swap_utils::{swap_with_path, MAX_SWAP_PATH_LENGTH};
 pub use gmx_types::CreateOrderParams;
 use gmx_types::PositionProps;
@@ -610,7 +610,7 @@ impl OrderHandler {
                 acceptable_price: params.acceptable_price,
                 execution_fee: params.execution_fee,
                 min_output_amount: params.min_output_amount,
-                order_type: params.order_type.clone(),
+                order_type: params.order_type,
                 is_long: params.is_long,
                 updated_at_time: env.ledger().timestamp(),
             };
@@ -631,7 +631,7 @@ impl OrderHandler {
                     params.market.clone(),
                     params.size_delta_usd,
                     collateral_delta_amount,
-                    params.order_type.clone(),
+                    params.order_type,
                 ),
             );
             keys.push_back(key);
@@ -852,7 +852,7 @@ impl OrderHandler {
                 order.market.clone(),
                 order.size_delta_usd,
                 order.collateral_delta_amount,
-                order.order_type.clone(),
+                order.order_type,
             ),
         );
         key
@@ -4208,7 +4208,7 @@ mod tests {
     #[test]
     fn sequential_pool_amount_writes_both_accumulate() {
         let w = setup();
-        let fp = gmx_math::FLOAT_PRECISION;
+        let _fp = gmx_math::FLOAT_PRECISION;
         let tp = gmx_math::TOKEN_PRECISION;
         let ds_c = DsClient::new(&w.env, &w.ds);
         let pool_key = gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk);

@@ -15,7 +15,7 @@
 use data_store::{DataStore, DataStoreClient as DsClient};
 use deposit_handler::{DepositHandler, DepositHandlerClient};
 use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
-use gmx_keys::{position_key, roles};
+use gmx_keys::roles;
 use gmx_math::{FLOAT_PRECISION, TOKEN_PRECISION};
 use gmx_types::{CreateDepositParams, OrderType, TokenPrice};
 use market_token::{MarketToken, MarketTokenClient as MtClient};

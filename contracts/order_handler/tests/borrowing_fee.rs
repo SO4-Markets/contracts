@@ -383,7 +383,7 @@ fn pool_receives_borrowing_fee_on_position_decrease() {
     seed_pool(&w);
 
     let pool_key = gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk);
-    let pool_before = ds_c.get_u128(&pool_key);
+    let _pool_before = ds_c.get_u128(&pool_key);
 
     let collateral = 10 * TOKEN_PRECISION;
     StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &collateral);

@@ -428,6 +428,6 @@ fn oi_cap_boundary_via_real_multi_trader_multi_collateral_orders_exact_boundary_
 
     // A further increase from either trader, in either collateral token, must
     // now revert — the aggregate is exactly at the cap.
-    let over = try_real_increase(&w, &w.trader1, &w.long_tk, 10 * ONE_TOKEN, 1 * ONE_USD, true);
+    let over = try_real_increase(&w, &w.trader1, &w.long_tk, 10 * ONE_TOKEN, ONE_USD, true);
     assert!(!over, "any further long increase once the aggregate cap is hit must fail");
 }

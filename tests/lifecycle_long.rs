@@ -187,7 +187,7 @@ fn full_lifecycle_deposit_long_close_withdraw() {
 
     // ── Mint tokens ───────────────────────────────────────────────────────────
     // Alice: 1 WETH + 2000 USDC for LP deposit
-    StellarAssetClient::new(env, &w.long_tk).mint(&alice, &(1 * ONE_TOKEN));
+    StellarAssetClient::new(env, &w.long_tk).mint(&alice, &ONE_TOKEN);
     StellarAssetClient::new(env, &w.short_tk).mint(&alice, &(2000 * ONE_TOKEN));
     // Bob: 200 USDC as collateral for a long position
     StellarAssetClient::new(env, &w.short_tk).mint(&bob, &(200 * ONE_TOKEN));
@@ -204,7 +204,7 @@ fn full_lifecycle_deposit_long_close_withdraw() {
             market: w.market_tk.clone(),
             initial_long_token: w.long_tk.clone(),
             initial_short_token: w.short_tk.clone(),
-            long_token_amount: 1 * ONE_TOKEN,
+            long_token_amount: ONE_TOKEN,
             short_token_amount: 2000 * ONE_TOKEN,
             min_market_tokens: 1,
             execution_fee: 0,
@@ -218,7 +218,7 @@ fn full_lifecycle_deposit_long_close_withdraw() {
     let ds_c = DsClient::new(env, &w.ds);
     let long_pool = ds_c.get_u128(&pool_amount_key(env, &w.market_tk, &w.long_tk));
     let short_pool = ds_c.get_u128(&pool_amount_key(env, &w.market_tk, &w.short_tk));
-    assert_eq!(long_pool, 1 * ONE_TOKEN as u128, "long pool must reflect Alice's deposit");
+    assert_eq!(long_pool, (ONE_TOKEN as u128), "long pool must reflect Alice's deposit");
     assert!(short_pool > 0, "short pool must reflect Alice's deposit");
 
     // ── Step 2: Bob opens a long position ────────────────────────────────────

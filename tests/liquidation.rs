@@ -334,7 +334,7 @@ fn check_liquidatable_returns_true_after_crash() {
     seed_pool(&w, 1_000_000 * ONE_TOKEN);
 
     // 1 token collateral ($2 000), $20 000 size → 10× leverage.
-    let collateral = 1 * ONE_TOKEN;
+    let collateral = ONE_TOKEN;
     let size_usd = 20_000 * ONE_USD;
     open_long_position(&w, collateral, size_usd);
 
@@ -369,7 +369,7 @@ fn liquidation_of_underwater_long_removes_position() {
     set_prices(&w, entry_price);
     seed_pool(&w, 1_000_000 * ONE_TOKEN);
 
-    let collateral = 1 * ONE_TOKEN; // $2 000 at entry
+    let collateral = ONE_TOKEN; // $2 000 at entry
     let size_usd = 20_000 * ONE_USD; // 10× leverage
     open_long_position(&w, collateral, size_usd);
 
@@ -430,7 +430,7 @@ fn liquidation_of_underwater_short_removes_position() {
     seed_short_pool(&w, 1_000_000 * ONE_TOKEN);
 
     // 1 short_tk = $1 at stablecoin price; $10 size = 10× leverage.
-    let collateral = 1 * ONE_TOKEN;
+    let collateral = ONE_TOKEN;
     let size_usd = 10 * ONE_USD;
     open_short_position(&w, collateral, size_usd);
 
@@ -518,7 +518,7 @@ fn liquidation_requires_liquidation_keeper_role() {
     set_prices(&w, entry_price);
     seed_pool(&w, 1_000_000 * ONE_TOKEN);
 
-    let collateral = 1 * ONE_TOKEN;
+    let collateral = ONE_TOKEN;
     let size_usd = 20_000 * ONE_USD;
     open_long_position(&w, collateral, size_usd);
 
