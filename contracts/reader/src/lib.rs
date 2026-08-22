@@ -86,6 +86,7 @@ trait IOrderHandler {
     fn get_order(env: Env, key: BytesN<32>) -> Option<OrderProps>;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "MarketTokenClient")]
 trait IMarketToken {
     fn total_supply(env: Env) -> i128;

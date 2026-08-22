@@ -31,6 +31,7 @@ use gmx_types::{OrderType, TokenPrice};
 const FLOAT_PRECISION: i128 = 1_000_000_000_000_000_000_000_000_000_000;
 const TOKEN_PRECISION: i128 = 10_000_000;
 const INDEX_PRICE: i128 = 2_000 * TOKEN_PRECISION;
+#[allow(dead_code)]
 const COLLATERAL_PRICE: i128 = TOKEN_PRECISION; // stable = $1
 const COLLATERAL_AMOUNT: i128 = 100 * TOKEN_PRECISION; // 100 tokens
 const SIZE_USD: i128 = 500 * TOKEN_PRECISION; // 5× leverage

@@ -7,8 +7,7 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    market_index_token_key, market_long_token_key, market_short_token_key,
-    max_pnl_factor_for_adl_key, position_key, roles,
+    market_index_token_key, market_long_token_key, market_short_token_key, position_key, roles,
 };
 use gmx_position_utils::get_position_pnl_usd;
 use gmx_types::{MarketProps, PositionProps, PriceProps};
@@ -246,6 +245,27 @@ impl AdlHandler {
     }
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+fn load_market_props(env: &Env, data_store: &Address, market_token: &Address) -> MarketProps {
+    let ds = DataStoreClient::new(env, data_store);
+    let index_token = ds
+        .get_address(&market_index_token_key(env, market_token))
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidInput));
+    let long_token = ds
+        .get_address(&market_long_token_key(env, market_token))
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidInput));
+    let short_token = ds
+        .get_address(&market_short_token_key(env, market_token))
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidInput));
+    MarketProps {
+        market_token: market_token.clone(),
+        index_token,
+        long_token,
+        short_token,
+    }
+}
+
 // ─── Tests — Issue #134: ADL E2E tests through deployed-style clients ─────────
 //
 // Done: ADL triggers above threshold. Below threshold reverts. Keeper-only
@@ -257,6 +277,7 @@ mod tests {
     use deposit_handler::{DepositHandler, DepositHandlerClient};
     use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
     use gmx_keys::roles;
+    use gmx_keys::max_pnl_factor_for_adl_key;
     use gmx_math::FLOAT_PRECISION;
     use gmx_types::{CreateDepositParams, CreateOrderParams, OrderType, TokenPrice};
     use market_token::{MarketToken, MarketTokenClient as MtClient};
@@ -784,26 +805,5 @@ mod tests {
             !AdlHandlerClient::new(&w.env, &w.adl_handler).is_adl_required(&w.market_tk, &true),
             "ADL must not be required when position PnL is negative"
         );
-    }
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-fn load_market_props(env: &Env, data_store: &Address, market_token: &Address) -> MarketProps {
-    let ds = DataStoreClient::new(env, data_store);
-    let index_token = ds
-        .get_address(&market_index_token_key(env, market_token))
-        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidInput));
-    let long_token = ds
-        .get_address(&market_long_token_key(env, market_token))
-        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidInput));
-    let short_token = ds
-        .get_address(&market_short_token_key(env, market_token))
-        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidInput));
-    MarketProps {
-        market_token: market_token.clone(),
-        index_token,
-        long_token,
-        short_token,
     }
 }

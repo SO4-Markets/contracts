@@ -1901,7 +1901,6 @@ mod tests {
     use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
     use gmx_keys::{position_key, roles};
     use gmx_types::TokenPrice;
-    use soroban_sdk::testutils::Ledger as _;
     use market_token::{MarketToken, MarketTokenClient as MtClient};
     use oracle::{Oracle, OracleClient as OClient};
     use order_vault::{OrderVault, OrderVaultClient as OVClient};
