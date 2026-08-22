@@ -722,16 +722,6 @@ mod tests {
         let ord_vault = env.register(OrderVault, ());
         OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
-        // Market token (LP token + pool custodian)
-        let market_tk = env.register(MarketToken, ());
-        MtClient::new(&env, &market_tk).initialize(
-            &admin,
-            &rs,
-            &7u32,
-            &soroban_sdk::String::from_str(&env, "SO4 Market"),
-            &soroban_sdk::String::from_str(&env, "GM"),
-        );
-
         // Underlying tokens
         let long_tk = env
             .register_stellar_asset_contract_v2(admin.clone())
@@ -740,6 +730,18 @@ mod tests {
             .register_stellar_asset_contract_v2(admin.clone())
             .address();
         let index_tk = Address::generate(&env);
+
+        // Market token (LP token + pool custodian)
+        let market_tk = env.register(MarketToken, ());
+        MtClient::new(&env, &market_tk).initialize(
+            &admin,
+            &rs,
+            &7u32,
+            &soroban_sdk::String::from_str(&env, "SO4 Market"),
+            &soroban_sdk::String::from_str(&env, "GM"),
+            &long_tk,
+            &short_tk,
+        );
 
         // Handlers
         let dep_handler = env.register(DepositHandler, ());

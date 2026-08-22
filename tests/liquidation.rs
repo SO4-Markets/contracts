@@ -103,16 +103,6 @@ fn setup() -> TestWorld {
     let ord_vault = env.register(OrderVault, ());
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
-    // Market token (LP + pool custodian)
-    let market_tk = env.register(MarketToken, ());
-    MtClient::new(&env, &market_tk).initialize(
-        &admin,
-        &rs,
-        &7u32,
-        &soroban_sdk::String::from_str(&env, "Liq Test Market"),
-        &soroban_sdk::String::from_str(&env, "GM-LIQ"),
-    );
-
     // Underlying tokens
     let long_tk = env
         .register_stellar_asset_contract_v2(admin.clone())
@@ -121,6 +111,18 @@ fn setup() -> TestWorld {
         .register_stellar_asset_contract_v2(admin.clone())
         .address();
     let index_tk = Address::generate(&env);
+
+    // Market token (LP + pool custodian)
+    let market_tk = env.register(MarketToken, ());
+    MtClient::new(&env, &market_tk).initialize(
+        &admin,
+        &rs,
+        &7u32,
+        &soroban_sdk::String::from_str(&env, "Liq Test Market"),
+        &soroban_sdk::String::from_str(&env, "GM-LIQ"),
+        &long_tk,
+        &short_tk,
+    );
 
     // Order handler
     let ord_handler = env.register(OrderHandler, ());
@@ -257,6 +259,7 @@ fn open_long_position(w: &TestWorld, collateral_tokens: i128, size_usd: i128) {
             min_output_amount: 0,
             order_type: OrderType::MarketIncrease,
             is_long: true,
+            expiry_ledger: None,
         },
     );
     OHClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
@@ -280,6 +283,7 @@ fn open_short_position(w: &TestWorld, collateral_tokens: i128, size_usd: i128) {
             min_output_amount: 0,
             order_type: OrderType::MarketIncrease,
             is_long: false,
+            expiry_ledger: None,
         },
     );
     OHClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);

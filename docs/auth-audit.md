@@ -27,50 +27,52 @@ File: `contracts/data_store/src/lib.rs`
 
 | Function | Expected Auth | Status | Notes |
 |---|---|---|---|
-| `initialize` | caller/admin/keeper | ✅ PASS | line 108, before state change |
-| `get_u128` | read-only | ➖ N/A | line 124, read-only |
-| `get_u128_batch` | read-only | ➖ N/A | line 133, read-only |
-| `get_u128_instance` | read-only | ➖ N/A | line 143, read-only |
-| `set_u128_instance` | caller/admin/keeper | ✅ PASS | line 151, before state change |
-| `get_i128_instance` | read-only | ➖ N/A | line 159, read-only |
-| `set_i128_instance` | caller/admin/keeper | ✅ PASS | line 167, before state change |
-| `set_u128` | caller/admin/keeper | ✅ PASS | line 182, before state change |
-| `set_u128_config` | caller/admin/keeper | ✅ PASS | line 196, before state change |
-| `get_u128_cached` | read-only | ➖ N/A | line 216, read-only |
-| `remove_u128` | caller/admin/keeper | ✅ PASS | line 226, before state change |
-| `apply_delta_to_u128` | caller/admin/keeper | ✅ PASS | line 253, before state change |
-| `increment_u128` | caller/admin/keeper | ✅ PASS | line 271, before state change |
-| `decrement_u128` | caller/admin/keeper | ✅ PASS | line 284, before state change |
-| `get_i128` | read-only | ➖ N/A | line 304, read-only |
-| `set_i128` | caller/admin/keeper | ✅ PASS | line 310, before state change |
-| `remove_i128` | caller/admin/keeper | ✅ PASS | line 316, before state change |
-| `apply_delta_to_i128` | caller/admin/keeper | ✅ PASS | line 323, before state change |
-| `get_address` | read-only | ➖ N/A | line 339, read-only |
-| `set_address` | caller/admin/keeper | ✅ PASS | line 342, before state change |
-| `remove_address` | caller/admin/keeper | ✅ PASS | line 348, before state change |
-| `get_bool` | read-only | ➖ N/A | line 358, read-only |
-| `set_bool` | caller/admin/keeper | ✅ PASS | line 364, before state change |
-| `remove_bool` | caller/admin/keeper | ✅ PASS | line 370, before state change |
-| `get_bytes32` | read-only | ➖ N/A | line 380, read-only |
-| `set_bytes32` | caller/admin/keeper | ✅ PASS | line 386, before state change |
-| `add_address_to_set` | caller/admin/keeper | ✅ PASS | line 401, before state change |
-| `remove_address_from_set` | caller/admin/keeper | ✅ PASS | line 415, before state change |
-| `get_address_set_count` | read-only | ➖ N/A | line 430, read-only |
-| `get_address_set_at` | read-only | ➖ N/A | line 438, read-only |
-| `contains_address` | read-only | ➖ N/A | line 448, read-only |
-| `add_bytes32_to_set` | caller/admin/keeper | ✅ PASS | line 460, before state change |
-| `remove_bytes32_from_set` | caller/admin/keeper | ✅ PASS | line 480, before state change |
-| `get_bytes32_set_count` | read-only | ➖ N/A | line 504, read-only |
-| `get_bytes32_set_at` | read-only | ➖ N/A | line 516, read-only |
-| `contains_bytes32` | read-only | ➖ N/A | line 535, read-only |
-| `get_nonce` | read-only | ➖ N/A | line 551, read-only |
-| `increment_nonce` | caller/admin/keeper | ✅ PASS | line 556, before state change |
-| `get_position_manager` | read-only | ➖ N/A | line 573, read-only |
-| `set_position_manager` | caller/admin/keeper | ✅ PASS | line 581, before state change |
-| `get_liquidation_execution_fee` | read-only | ➖ N/A | line 595, read-only |
-| `set_liquidation_execution_fee` | caller/admin/keeper | ✅ PASS | line 602, before state change |
-| `get_min_execution_fee` | read-only | ➖ N/A | line 613, read-only |
-| `set_min_execution_fee` | caller/admin/keeper | ✅ PASS | line 620, before state change |
+| `initialize` | caller/admin/keeper | ✅ PASS | line 118, before state change |
+| `get_u128` | read-only | ➖ N/A | line 134, read-only |
+| `get_u128_batch` | read-only | ➖ N/A | line 143, read-only |
+| `get_u128_instance` | read-only | ➖ N/A | line 153, read-only |
+| `set_u128_instance` | caller/admin/keeper | ✅ PASS | line 161, before state change |
+| `get_i128_instance` | read-only | ➖ N/A | line 169, read-only |
+| `set_i128_instance` | caller/admin/keeper | ✅ PASS | line 177, before state change |
+| `set_u128` | caller/admin/keeper | ✅ PASS | line 192, before state change |
+| `set_u128_config` | caller/admin/keeper | ✅ PASS | line 206, before state change |
+| `get_u128_cached` | read-only | ➖ N/A | line 226, read-only |
+| `remove_u128` | caller/admin/keeper | ✅ PASS | line 236, before state change |
+| `apply_delta_to_u128` | caller/admin/keeper | ✅ PASS | line 263, before state change |
+| `increment_u128` | caller/admin/keeper | ✅ PASS | line 281, before state change |
+| `decrement_u128` | caller/admin/keeper | ✅ PASS | line 294, before state change |
+| `get_i128` | read-only | ➖ N/A | line 314, read-only |
+| `set_i128` | caller/admin/keeper | ✅ PASS | line 320, before state change |
+| `remove_i128` | caller/admin/keeper | ✅ PASS | line 326, before state change |
+| `apply_delta_to_i128` | caller/admin/keeper | ✅ PASS | line 333, before state change |
+| `get_address` | read-only | ➖ N/A | line 349, read-only |
+| `set_address` | caller/admin/keeper | ✅ PASS | line 352, before state change |
+| `remove_address` | caller/admin/keeper | ✅ PASS | line 358, before state change |
+| `get_bool` | read-only | ➖ N/A | line 368, read-only |
+| `set_bool` | caller/admin/keeper | ✅ PASS | line 374, before state change |
+| `remove_bool` | caller/admin/keeper | ✅ PASS | line 380, before state change |
+| `get_bytes32` | read-only | ➖ N/A | line 390, read-only |
+| `set_bytes32` | caller/admin/keeper | ✅ PASS | line 396, before state change |
+| `add_address_to_set` | caller/admin/keeper | ✅ PASS | line 411, before state change |
+| `remove_address_from_set` | caller/admin/keeper | ✅ PASS | line 425, before state change |
+| `get_address_set_count` | read-only | ➖ N/A | line 440, read-only |
+| `get_address_set_at` | read-only | ➖ N/A | line 448, read-only |
+| `contains_address` | read-only | ➖ N/A | line 458, read-only |
+| `add_bytes32_to_set` | caller/admin/keeper | ✅ PASS | line 470, before state change |
+| `remove_bytes32_from_set` | caller/admin/keeper | ✅ PASS | line 490, before state change |
+| `get_bytes32_set_count` | read-only | ➖ N/A | line 514, read-only |
+| `get_bytes32_set_at` | read-only | ➖ N/A | line 526, read-only |
+| `contains_bytes32` | read-only | ➖ N/A | line 545, read-only |
+| `get_nonce` | read-only | ➖ N/A | line 561, read-only |
+| `increment_nonce` | caller/admin/keeper | ✅ PASS | line 566, before state change |
+| `record_keeper_execution` | caller/admin/keeper | ✅ PASS | line 582, before state change |
+| `get_keeper_stats` | read-only | ➖ N/A | line 627, read-only |
+| `get_position_manager` | read-only | ➖ N/A | line 643, read-only |
+| `set_position_manager` | caller/admin/keeper | ✅ PASS | line 651, before state change |
+| `get_liquidation_execution_fee` | read-only | ➖ N/A | line 665, read-only |
+| `set_liquidation_execution_fee` | caller/admin/keeper | ✅ PASS | line 672, before state change |
+| `get_min_execution_fee` | read-only | ➖ N/A | line 683, read-only |
+| `set_min_execution_fee` | caller/admin/keeper | ✅ PASS | line 690, before state change |
 
 ---
 
@@ -80,13 +82,13 @@ File: `contracts/role_store/src/lib.rs`
 
 | Function | Expected Auth | Status | Notes |
 |---|---|---|---|
-| `initialize` | caller/admin/keeper | ✅ PASS | line 69, before state change |
-| `grant_role` | caller/admin/keeper | ✅ PASS | line 84, before state change |
-| `revoke_role` | caller/admin/keeper | ✅ PASS | line 94, before state change |
-| `has_role` | read-only | ➖ N/A | line 118, read-only |
-| `get_roles` | read-only | ➖ N/A | line 126, read-only |
-| `get_role_members` | read-only | ➖ N/A | line 134, read-only |
-| `get_role_member_count` | read-only | ➖ N/A | line 144, read-only |
+| `initialize` | caller/admin/keeper | ✅ PASS | line 71, before state change |
+| `grant_role` | caller/admin/keeper | ✅ PASS | line 86, before state change |
+| `revoke_role` | caller/admin/keeper | ✅ PASS | line 96, before state change |
+| `has_role` | read-only | ➖ N/A | line 120, read-only |
+| `get_roles` | read-only | ➖ N/A | line 128, read-only |
+| `get_role_members` | read-only | ➖ N/A | line 136, read-only |
+| `get_role_member_count` | read-only | ➖ N/A | line 146, read-only |
 | `get_all_roles` | read-only | ➖ N/A | line 154, read-only |
 | `get_role_count` | read-only | ➖ N/A | line 162, read-only |
 
@@ -98,20 +100,20 @@ File: `contracts/oracle/src/lib.rs`
 
 | Function | Expected Auth | Status | Notes |
 |---|---|---|---|
-| `initialize` | caller/admin/keeper | ✅ PASS | line 139, before state change |
-| `upgrade` | caller/admin/keeper | ✅ PASS | line 167, before state change |
-| `set_prices` | caller/admin/keeper | ✅ PASS | line 184, before state change |
-| `get_primary_price` | read-only | ➖ N/A | line 261, read-only |
-| `try_get_price` | read-only | ➖ N/A | line 277, read-only |
-| `get_stable_price` | read-only | ➖ N/A | line 292, read-only |
-| `get_price_with_stable_fallback` | read-only | ➖ N/A | line 312, read-only |
-| `require_price_fresh` | read-only | ➖ N/A | line 348, read-only |
-| `clear_price` | caller/admin/keeper | ✅ PASS | line 366, before state change |
-| `clear_prices` | caller/admin/keeper | ✅ PASS | line 373, before state change |
-| `rotate_signer` | caller/admin/keeper | ✅ PASS | line 390, before state change |
-| `register_market_for_circuit_breaker` | caller/admin/keeper | ✅ PASS | line 423, before state change |
-| `set_prices_simple` | caller/admin/keeper | ✅ PASS | line 448, before state change |
-| `set_prices_simple` | caller/admin/keeper | ✅ PASS | line 456, before state change |
+| `initialize` | caller/admin/keeper | ✅ PASS | line 154, before state change |
+| `upgrade` | caller/admin/keeper | ✅ PASS | line 182, before state change |
+| `set_prices` | caller/admin/keeper | ✅ PASS | line 199, before state change |
+| `get_primary_price` | read-only | ➖ N/A | line 289, read-only |
+| `try_get_price` | read-only | ➖ N/A | line 305, read-only |
+| `get_stable_price` | read-only | ➖ N/A | line 320, read-only |
+| `get_price_with_stable_fallback` | read-only | ➖ N/A | line 340, read-only |
+| `require_price_fresh` | read-only | ➖ N/A | line 376, read-only |
+| `clear_price` | caller/admin/keeper | ✅ PASS | line 394, before state change |
+| `clear_prices` | caller/admin/keeper | ✅ PASS | line 401, before state change |
+| `rotate_signer` | caller/admin/keeper | ✅ PASS | line 418, before state change |
+| `register_market_for_breaker` | caller/admin/keeper | ✅ PASS | line 451, before state change |
+| `set_prices_simple` | caller/admin/keeper | ✅ PASS | line 476, before state change |
+| `set_prices_simple` | caller/admin/keeper | ✅ PASS | line 484, before state change |
 
 ---
 
@@ -121,13 +123,13 @@ File: `contracts/market_factory/src/lib.rs`
 
 | Function | Expected Auth | Status | Notes |
 |---|---|---|---|
-| `initialize` | caller/admin/keeper | ✅ PASS | line 92, before state change |
-| `set_market_token_wasm_hash` | caller/admin/keeper | ✅ PASS | line 113, before state change |
-| `get_market_token_wasm_hash` | read-only | ➖ N/A | line 121, read-only |
-| `create_market` | caller/admin/keeper | ✅ PASS | line 137, before state change |
-| `upgrade` | caller/admin/keeper | ✅ PASS | line 260, before state change |
-| `get_market_count` | read-only | ➖ N/A | line 272, read-only |
-| `get_markets` | read-only | ➖ N/A | line 281, read-only |
+| `initialize` | caller/admin/keeper | ✅ PASS | line 94, before state change |
+| `set_market_token_wasm_hash` | caller/admin/keeper | ✅ PASS | line 115, before state change |
+| `get_market_token_wasm_hash` | read-only | ➖ N/A | line 123, read-only |
+| `create_market` | caller/admin/keeper | ✅ PASS | line 139, before state change |
+| `upgrade` | caller/admin/keeper | ✅ PASS | line 267, before state change |
+| `get_market_count` | read-only | ➖ N/A | line 279, read-only |
+| `get_markets` | read-only | ➖ N/A | line 288, read-only |
 
 ---
 
@@ -164,13 +166,13 @@ File: `contracts/deposit_handler/src/lib.rs`
 
 | Function | Expected Auth | Status | Notes |
 |---|---|---|---|
-| `initialize` | caller/admin/keeper | ✅ PASS | line 124, before state change |
-| `upgrade` | caller/admin/keeper | ✅ PASS | line 151, before state change |
-| `update_oracle` | caller/admin/keeper | ✅ PASS | line 161, before state change |
-| `create_deposit` | caller/admin/keeper | ✅ PASS | line 182, before state change |
-| `execute_deposit` | caller/admin/keeper | ✅ PASS | line 324, before state change |
-| `cancel_deposit` | caller/admin/keeper | ✅ PASS | line 496, before state change |
-| `get_deposit` | read-only | ➖ N/A | line 568, read-only |
+| `initialize` | caller/admin/keeper | ✅ PASS | line 134, before state change |
+| `upgrade` | caller/admin/keeper | ✅ PASS | line 161, before state change |
+| `update_oracle` | caller/admin/keeper | ✅ PASS | line 171, before state change |
+| `create_deposit` | caller/admin/keeper | ✅ PASS | line 192, before state change |
+| `execute_deposit` | caller/admin/keeper | ✅ PASS | line 342, before state change |
+| `cancel_deposit` | caller/admin/keeper | ✅ PASS | line 529, before state change |
+| `get_deposit` | read-only | ➖ N/A | line 601, read-only |
 
 ---
 
@@ -180,13 +182,13 @@ File: `contracts/withdrawal_handler/src/lib.rs`
 
 | Function | Expected Auth | Status | Notes |
 |---|---|---|---|
-| `initialize` | caller/admin/keeper | ✅ PASS | line 130, before state change |
-| `upgrade` | caller/admin/keeper | ✅ PASS | line 157, before state change |
-| `update_oracle` | caller/admin/keeper | ✅ PASS | line 167, before state change |
-| `create_withdrawal` | caller/admin/keeper | ✅ PASS | line 185, before state change |
-| `execute_withdrawal` | caller/admin/keeper | ✅ PASS | line 286, before state change |
-| `cancel_withdrawal` | caller/admin/keeper | ✅ PASS | line 427, before state change |
-| `get_withdrawal` | read-only | ➖ N/A | line 487, read-only |
+| `initialize` | caller/admin/keeper | ✅ PASS | line 133, before state change |
+| `upgrade` | caller/admin/keeper | ✅ PASS | line 160, before state change |
+| `update_oracle` | caller/admin/keeper | ✅ PASS | line 170, before state change |
+| `create_withdrawal` | caller/admin/keeper | ✅ PASS | line 188, before state change |
+| `execute_withdrawal` | caller/admin/keeper | ✅ PASS | line 294, before state change |
+| `cancel_withdrawal` | caller/admin/keeper | ✅ PASS | line 441, before state change |
+| `get_withdrawal` | read-only | ➖ N/A | line 501, read-only |
 
 ---
 
@@ -224,10 +226,11 @@ File: `contracts/liquidation_handler/src/lib.rs`
 
 | Function | Expected Auth | Status | Notes |
 |---|---|---|---|
-| `initialize` | caller/admin/keeper | ✅ PASS | line 100, before state change |
-| `upgrade` | caller/admin/keeper | ✅ PASS | line 130, before state change |
-| `check_liquidatable` | read-only | ➖ N/A | line 141, read-only |
-| `liquidate_position` | caller/admin/keeper | ✅ PASS | line 193, before state change |
+| `initialize` | caller/admin/keeper | ✅ PASS | line 114, before state change |
+| `upgrade` | caller/admin/keeper | ✅ PASS | line 144, before state change |
+| `check_liquidatable` | read-only | ➖ N/A | line 155, read-only |
+| `liquidate_position` | caller/admin/keeper | ✅ PASS | line 207, before state change |
+| `execute_partial_liquidation` | caller/admin/keeper | ✅ PASS | line 302, before state change |
 
 ---
 
@@ -249,18 +252,19 @@ File: `contracts/fee_handler/src/lib.rs`
 
 | Function | Expected Auth | Status | Notes |
 |---|---|---|---|
-| `initialize` | caller/admin/keeper | ✅ PASS | line 148, before state change |
-| `claimable_fees` | read-only | ➖ N/A | line 167, read-only |
-| `claim_fees` | caller/admin/keeper | ✅ PASS | line 186, before state change |
-| `set_auto_compound` | caller/admin/keeper | ✅ PASS | line 276, before state change |
-| `is_auto_compound` | read-only | ➖ N/A | line 296, read-only |
-| `upgrade` | caller/admin/keeper | ✅ PASS | line 307, before state change |
-| `claimable_ui_fees` | read-only | ➖ N/A | line 320, read-only |
-| `accrue_ui_fee` | caller/admin/keeper | ✅ PASS | line 334, before state change |
-| `claim_ui_fees` | caller/admin/keeper | ✅ PASS | line 382, before state change |
-| `claim_funding_fees` | caller/admin/keeper | ✅ PASS | line 425, before state change |
-| `get_ui_fee_factor` | read-only | ➖ N/A | line 468, read-only |
-| `set_ui_fee_factor` | caller/admin/keeper | ✅ PASS | line 481, before state change |
+| `initialize` | caller/admin/keeper | ✅ PASS | line 157, before state change |
+| `claimable_fees` | read-only | ➖ N/A | line 176, read-only |
+| `claim_fees` | caller/admin/keeper | ✅ PASS | line 195, before state change |
+| `set_auto_compound` | caller/admin/keeper | ✅ PASS | line 285, before state change |
+| `is_auto_compound` | read-only | ➖ N/A | line 305, read-only |
+| `record_fee_accrual` | caller/admin/keeper | ✅ PASS | line 317, before state change |
+| `upgrade` | caller/admin/keeper | ✅ PASS | line 343, before state change |
+| `claimable_ui_fees` | read-only | ➖ N/A | line 356, read-only |
+| `accrue_ui_fee` | caller/admin/keeper | ✅ PASS | line 370, before state change |
+| `claim_ui_fees` | caller/admin/keeper | ✅ PASS | line 418, before state change |
+| `claim_funding_fees` | caller/admin/keeper | ✅ PASS | line 461, before state change |
+| `get_ui_fee_factor` | read-only | ➖ N/A | line 504, read-only |
+| `set_ui_fee_factor` | caller/admin/keeper | ✅ PASS | line 517, before state change |
 
 ---
 
@@ -414,20 +418,20 @@ File: `contracts/market_token/src/lib.rs`
 
 | Function | Expected Auth | Status | Notes |
 |---|---|---|---|
-| `initialize` | read-only | ➖ N/A | line 72, read-only |
-| `decimals` | read-only | ➖ N/A | line 98, read-only |
-| `name` | read-only | ➖ N/A | line 104, read-only |
-| `symbol` | read-only | ➖ N/A | line 111, read-only |
-| `total_supply` | read-only | ➖ N/A | line 118, read-only |
-| `balance` | read-only | ➖ N/A | line 128, read-only |
-| `allowance` | read-only | ➖ N/A | line 134, read-only |
-| `approve` | caller/admin/keeper | ✅ PASS | line 154, before state change |
-| `transfer` | caller/admin/keeper | ✅ PASS | line 185, before state change |
-| `transfer_from` | caller/admin/keeper | ✅ PASS | line 197, before state change |
-| `burn` | caller/admin/keeper | ✅ PASS | line 209, before state change |
-| `burn_from` | caller/admin/keeper | ✅ PASS | line 220, before state change |
-| `mint` | caller/admin/keeper | ✅ PASS | line 237, before state change |
-| `withdraw_from_pool` | caller/admin/keeper | ✅ PASS | line 252, before state change |
+| `initialize` | read-only | ➖ N/A | line 75, read-only |
+| `decimals` | read-only | ➖ N/A | line 109, read-only |
+| `name` | read-only | ➖ N/A | line 115, read-only |
+| `symbol` | read-only | ➖ N/A | line 122, read-only |
+| `total_supply` | read-only | ➖ N/A | line 129, read-only |
+| `balance` | read-only | ➖ N/A | line 139, read-only |
+| `allowance` | read-only | ➖ N/A | line 145, read-only |
+| `approve` | caller/admin/keeper | ✅ PASS | line 165, before state change |
+| `transfer` | caller/admin/keeper | ✅ PASS | line 196, before state change |
+| `transfer_from` | caller/admin/keeper | ✅ PASS | line 208, before state change |
+| `burn` | caller/admin/keeper | ✅ PASS | line 220, before state change |
+| `burn_from` | caller/admin/keeper | ✅ PASS | line 231, before state change |
+| `mint` | caller/admin/keeper | ✅ PASS | line 248, before state change |
+| `withdraw_from_pool` | caller/admin/keeper | ✅ PASS | line 264, before state change |
 
 ---
 
@@ -438,11 +442,11 @@ File: `contracts/insurance_fund_router/src/lib.rs`
 | Function | Expected Auth | Status | Notes |
 |---|---|---|---|
 | `configure_insurance_fund` | caller/admin/keeper | ✅ PASS | line 109, before state change |
-| `configure_market_pool` | caller/admin/keeper | ✅ PASS | line 140, before state change |
-| `configure_treasury` | caller/admin/keeper | ✅ PASS | line 157, before state change |
-| `route_liquidation_penalty` | caller/admin/keeper | ✅ PASS | line 163, before state change |
-| `cover_shortfall` | caller/admin/keeper | ✅ PASS | line 205, before state change |
-| `preview_penalty_split` | read-only | ➖ N/A | line 248, read-only |
+| `configure_market_pool` | caller/admin/keeper | ✅ PASS | line 141, before state change |
+| `configure_treasury` | caller/admin/keeper | ✅ PASS | line 158, before state change |
+| `route_liquidation_penalty` | caller/admin/keeper | ✅ PASS | line 164, before state change |
+| `cover_shortfall` | caller/admin/keeper | ✅ PASS | line 206, before state change |
+| `preview_penalty_split` | read-only | ➖ N/A | line 249, read-only |
 
 ---
 
@@ -496,7 +500,7 @@ File: `contracts/test_token/src/lib.rs`
 
 | Total public functions audited | Auth-bearing | Read-only (N/A) | PASS | FAIL |
 |---|---|---|---|---|
-| 264 | 146 | 118 | **146** | **0** |
+| 268 | 149 | 119 | **149** | **0** |
 
 All `require_auth` call-sites fire **before** any storage read or write that could be influenced by the caller's identity. No failures were identified. No linked bug issues are raised.
 

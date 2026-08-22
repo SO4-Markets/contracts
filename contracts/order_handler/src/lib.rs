@@ -1955,6 +1955,13 @@ mod tests {
         let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
         OClient::new(&env, &oracle_addr).initialize(&admin, &rs, &ds, &passphrase);
 
+        let long_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let short_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+
         let market_tk = env.register(MarketToken, ());
         MtClient::new(&env, &market_tk).initialize(
             &admin,
@@ -1962,6 +1969,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(&env, "GMX Market Token"),
             &soroban_sdk::String::from_str(&env, "GM"),
+            &long_tk,
+            &short_tk,
         );
         rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
 
@@ -1990,13 +1999,6 @@ mod tests {
             &ord_vault,
         );
         rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
-
-        let long_tk = env
-            .register_stellar_asset_contract_v2(admin.clone())
-            .address();
-        let short_tk = env
-            .register_stellar_asset_contract_v2(admin.clone())
-            .address();
         let index_tk = Address::generate(&env);
 
         let ds_c = DsClient::new(&env, &ds);
@@ -2950,6 +2952,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market1"),
             &soroban_sdk::String::from_str(env, "M1"),
+            &w.long_tk,
+            &mid_tk,
         );
         let market_tk2 = env.register(MarketToken, ());
         MtClient::new(env, &market_tk2).initialize(
@@ -2958,6 +2962,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market2"),
             &soroban_sdk::String::from_str(env, "M2"),
+            &mid_tk,
+            &w.short_tk,
         );
 
         let ds_c = DsClient::new(env, &w.ds);
@@ -3130,6 +3136,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market1"),
             &soroban_sdk::String::from_str(env, "M1"),
+            &w.long_tk,
+            &mid_tk,
         );
         let market_tk2 = env.register(MarketToken, ());
         MtClient::new(env, &market_tk2).initialize(
@@ -3138,6 +3146,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market2"),
             &soroban_sdk::String::from_str(env, "M2"),
+            &mid_tk,
+            &w.short_tk,
         );
 
         let ds_c = DsClient::new(env, &w.ds);
@@ -3697,6 +3707,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market2"),
             &soroban_sdk::String::from_str(env, "M2"),
+            &w.long_tk,
+            &w.short_tk,
         );
         let hc = OrderHandlerClient::new(env, &w.ord_handler);
         hc.create_order(
@@ -3734,6 +3746,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market2"),
             &soroban_sdk::String::from_str(env, "M2"),
+            &w.long_tk,
+            &w.short_tk,
         );
         let market_tk3 = env.register(MarketToken, ());
         MtClient::new(env, &market_tk3).initialize(
@@ -3742,6 +3756,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market3"),
             &soroban_sdk::String::from_str(env, "M3"),
+            &w.long_tk,
+            &w.short_tk,
         );
         // MarketSwap requires vault collateral (is_increase_or_swap = true)
         StellarAssetClient::new(env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);

@@ -195,6 +195,14 @@ mod tests {
         let vault = env.register(DepositVault, ());
         DVClient::new(&env, &vault).initialize(&admin, &rs);
 
+        let long_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let short_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let index_tk = Address::generate(&env);
+
         let market_tk = env.register(MarketToken, ());
         MtClient::new(&env, &market_tk).initialize(
             &admin,
@@ -202,6 +210,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(&env, "GMX Market Token"),
             &soroban_sdk::String::from_str(&env, "GM"),
+            &long_tk,
+            &short_tk,
         );
 
         let dep_handler = env.register(DepositHandler, ());
@@ -213,14 +223,6 @@ mod tests {
             &vault,
         );
         rs_c.grant_role(&admin, &dep_handler, &roles::controller(&env));
-
-        let long_tk = env
-            .register_stellar_asset_contract_v2(admin.clone())
-            .address();
-        let short_tk = env
-            .register_stellar_asset_contract_v2(admin.clone())
-            .address();
-        let index_tk = Address::generate(&env);
 
         let ds_c = DsClient::new(&env, &ds);
         ds_c.set_address(
@@ -325,12 +327,12 @@ mod tests {
         let short_cap: u128 = 20_000 * fp as u128; // $20,000
         ds_c.set_u128(
             &w.admin,
-            &gmx_keys::max_open_interest_key(&w.env, &w.market_tk, &true),
+            &gmx_keys::max_open_interest_key(&w.env, &w.market_tk, true),
             &long_cap,
         );
         ds_c.set_u128(
             &w.admin,
-            &gmx_keys::max_open_interest_key(&w.env, &w.market_tk, &false),
+            &gmx_keys::max_open_interest_key(&w.env, &w.market_tk, false),
             &short_cap,
         );
 
@@ -382,13 +384,13 @@ mod tests {
         let oi_value: u128 = 10_000 * fp as u128;
         ds_c.set_u128(
             &w.admin,
-            &gmx_keys::max_open_interest_key(&w.env, &w.market_tk, &true),
+            &gmx_keys::max_open_interest_key(&w.env, &w.market_tk, true),
             &oi_value,
         );
         // Write open interest directly (simulating a position being opened)
         ds_c.set_u128(
             &w.admin,
-            &gmx_keys::open_interest_key(&w.env, &w.market_tk, &w.long_tk, &true),
+            &gmx_keys::open_interest_key(&w.env, &w.market_tk, &w.long_tk, true),
             &oi_value,
         );
 
@@ -411,7 +413,7 @@ mod tests {
         let ds_c = DsClient::new(&w.env, &w.ds);
         ds_c.set_u128(
             &w.admin,
-            &gmx_keys::open_interest_key(&w.env, &w.market_tk, &w.long_tk, &true),
+            &gmx_keys::open_interest_key(&w.env, &w.market_tk, &w.long_tk, true),
             &(5_000 * fp as u128),
         );
 

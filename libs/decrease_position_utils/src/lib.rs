@@ -447,16 +447,6 @@ mod tests {
         let ds = env.register(DataStore, ());
         DsClient::new(&env, &ds).initialize(&admin, &rs);
 
-        let market_tk = env.register(MarketToken, ());
-        MtClient::new(&env, &market_tk).initialize(
-            &admin,
-            &rs,
-            &7u32,
-            &soroban_sdk::String::from_str(&env, "SO4 Market"),
-            &soroban_sdk::String::from_str(&env, "GM"),
-        );
-        rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
-
         let long_tk = env
             .register_stellar_asset_contract_v2(admin.clone())
             .address();
@@ -464,6 +454,18 @@ mod tests {
             .register_stellar_asset_contract_v2(admin.clone())
             .address();
         let index_tk = Address::generate(&env);
+
+        let market_tk = env.register(MarketToken, ());
+        MtClient::new(&env, &market_tk).initialize(
+            &admin,
+            &rs,
+            &7u32,
+            &soroban_sdk::String::from_str(&env, "SO4 Market"),
+            &soroban_sdk::String::from_str(&env, "GM"),
+            &long_tk,
+            &short_tk,
+        );
+        rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
 
         let ds_c = DsClient::new(&env, &ds);
         ds_c.set_address(

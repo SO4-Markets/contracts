@@ -705,6 +705,14 @@ mod tests {
         let vault = env.register(DepositVault, ());
         DVClient::new(&env, &vault).initialize(&admin, &rs);
 
+        let long_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let short_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let index_tk = Address::generate(&env);
+
         let market_tk = env.register(MarketToken, ());
         MtClient::new(&env, &market_tk).initialize(
             &admin,
@@ -712,6 +720,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(&env, "GMX Market Token"),
             &soroban_sdk::String::from_str(&env, "GM"),
+            &long_tk,
+            &short_tk,
         );
 
         let handler = env.register(DepositHandler, ());
@@ -724,14 +734,6 @@ mod tests {
         );
 
         rs_c.grant_role(&admin, &handler, &roles::controller(&env));
-
-        let long_tk = env
-            .register_stellar_asset_contract_v2(admin.clone())
-            .address();
-        let short_tk = env
-            .register_stellar_asset_contract_v2(admin.clone())
-            .address();
-        let index_tk = Address::generate(&env);
 
         let ds_c = DsClient::new(&env, &ds);
         ds_c.set_address(

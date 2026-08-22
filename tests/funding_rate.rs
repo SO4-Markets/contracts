@@ -32,7 +32,11 @@ use order_handler::{OrderHandler, OrderHandlerClient as OHClient};
 use order_vault::{OrderVault, OrderVaultClient as OVClient};
 use reader::{Reader, ReaderClient as RClient};
 use role_store::{RoleStore, RoleStoreClient as RsClient};
-use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, BytesN, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger as _},
+    token::StellarAssetClient,
+    Address, BytesN, Env,
+};
 
 const ONE_TOKEN: i128 = 10_000_000;
 const ONE_USD: i128 = FLOAT_PRECISION;
@@ -84,6 +88,12 @@ fn setup() -> TestWorld {
     let ord_vault = env.register(OrderVault, ());
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
+    // Tokens
+    let long_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let index_tk = Address::generate(&env);
+
     // Market token
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
@@ -92,13 +102,9 @@ fn setup() -> TestWorld {
         &7u32,
         &soroban_sdk::String::from_str(&env, "ETH Market"),
         &soroban_sdk::String::from_str(&env, "GM-ETH"),
+        &long_tk,
+        &long_tk,
     );
-
-    // Tokens
-    let long_tk = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
-    let index_tk = Address::generate(&env);
 
     // Order handler
     let ord_handler = env.register(OrderHandler, ());
@@ -106,7 +112,7 @@ fn setup() -> TestWorld {
 
     // Reader
     let reader = env.register(Reader, ());
-    RClient::new(&env, &reader).initialize(&admin, &rs, &ds, &oracle_addr);
+    RClient::new(&env, &reader).initialize(&admin);
 
     // Setup market
     let ds_c = DsClient::new(&env, &ds);
@@ -228,7 +234,7 @@ fn open_long_position(w: &TestWorld, size_usd: i128, collateral: i128) -> BytesN
         &collateral,
     );
 
-    let order_key = oh_c.create_order(&CreateOrderParams {
+    let order_key = oh_c.create_order(&w.trader1, &CreateOrderParams {
         receiver: w.trader1.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -241,6 +247,7 @@ fn open_long_position(w: &TestWorld, size_usd: i128, collateral: i128) -> BytesN
         min_output_amount: 0,
         order_type: OrderType::MarketIncrease,
         is_long: true,
+        expiry_ledger: None,
     });
 
     oh_c.execute_order(&w.keeper, &order_key);
@@ -258,7 +265,7 @@ fn open_short_position(w: &TestWorld, size_usd: i128, collateral: i128) -> Bytes
         &collateral,
     );
 
-    let order_key = oh_c.create_order(&CreateOrderParams {
+    let order_key = oh_c.create_order(&w.trader2, &CreateOrderParams {
         receiver: w.trader2.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -271,6 +278,7 @@ fn open_short_position(w: &TestWorld, size_usd: i128, collateral: i128) -> Bytes
         min_output_amount: 0,
         order_type: OrderType::MarketIncrease,
         is_long: false,
+        expiry_ledger: None,
     });
 
     oh_c.execute_order(&w.keeper, &order_key);
@@ -319,7 +327,7 @@ fn funding_rate_longs_pay_shorts_when_long_oi_exceeds_short() {
     w.env.ledger().set_timestamp(new_time);
 
     // Trigger funding update via position decrease (partial close)
-    let close_key = oh_c.create_order(&CreateOrderParams {
+    let close_key = oh_c.create_order(&w.trader1, &CreateOrderParams {
         receiver: w.trader1.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -332,6 +340,7 @@ fn funding_rate_longs_pay_shorts_when_long_oi_exceeds_short() {
         min_output_amount: 0,
         order_type: OrderType::MarketDecrease,
         is_long: true,
+        expiry_ledger: None,
     });
     oh_c.execute_order(&w.keeper, &close_key);
 
@@ -419,7 +428,7 @@ fn funding_rate_shorts_pay_longs_when_short_oi_exceeds_long() {
     w.env.ledger().set_timestamp(3600);
 
     // Trigger funding via decrease
-    let close_key = oh_c.create_order(&CreateOrderParams {
+    let close_key = oh_c.create_order(&w.trader2, &CreateOrderParams {
         receiver: w.trader2.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -432,6 +441,7 @@ fn funding_rate_shorts_pay_longs_when_short_oi_exceeds_long() {
         min_output_amount: 0,
         order_type: OrderType::MarketDecrease,
         is_long: false,
+        expiry_ledger: None,
     });
     oh_c.execute_order(&w.keeper, &close_key);
 
@@ -497,7 +507,7 @@ fn funding_rate_zero_when_oi_balanced() {
     w.env.ledger().set_timestamp(3600);
 
     // Trigger funding via decrease
-    let close_key = oh_c.create_order(&CreateOrderParams {
+    let close_key = oh_c.create_order(&w.trader1, &CreateOrderParams {
         receiver: w.trader1.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -510,6 +520,7 @@ fn funding_rate_zero_when_oi_balanced() {
         min_output_amount: 0,
         order_type: OrderType::MarketDecrease,
         is_long: true,
+        expiry_ledger: None,
     });
     oh_c.execute_order(&w.keeper, &close_key);
 
@@ -570,7 +581,7 @@ fn funding_rate_zero_when_no_oi() {
 
     // Fully close the position
     let pos = oh_c.get_position(&pos_key).expect("position must exist");
-    let close_key = oh_c.create_order(&CreateOrderParams {
+    let close_key = oh_c.create_order(&w.trader1, &CreateOrderParams {
         receiver: w.trader1.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -583,6 +594,7 @@ fn funding_rate_zero_when_no_oi() {
         min_output_amount: 0,
         order_type: OrderType::MarketDecrease,
         is_long: true,
+        expiry_ledger: None,
     });
     oh_c.execute_order(&w.keeper, &close_key);
 
@@ -643,7 +655,7 @@ fn funding_settlement_accumulates_claimable_amount() {
     // Advance time by 1 hour and trigger funding via another decrease
     w.env.ledger().set_timestamp(3600);
 
-    let close_key = oh_c.create_order(&CreateOrderParams {
+    let close_key = oh_c.create_order(&w.trader1, &CreateOrderParams {
         receiver: w.trader1.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -656,6 +668,7 @@ fn funding_settlement_accumulates_claimable_amount() {
         min_output_amount: 0,
         order_type: OrderType::MarketDecrease,
         is_long: true,
+        expiry_ledger: None,
     });
     oh_c.execute_order(&w.keeper, &close_key);
 
@@ -713,7 +726,7 @@ fn funding_rate_ramps_proportionally_to_dt() {
 
     w.env.ledger().set_timestamp(3600);
 
-    let close_key = oh_c.create_order(&CreateOrderParams {
+    let close_key = oh_c.create_order(&w.trader1, &CreateOrderParams {
         receiver: w.trader1.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -726,6 +739,7 @@ fn funding_rate_ramps_proportionally_to_dt() {
         min_output_amount: 0,
         order_type: OrderType::MarketDecrease,
         is_long: true,
+        expiry_ledger: None,
     });
     oh_c.execute_order(&w.keeper, &close_key);
 
@@ -748,7 +762,7 @@ fn funding_rate_ramps_proportionally_to_dt() {
 
     w.env.ledger().set_timestamp(7200);
 
-    let close_key2 = oh_c.create_order(&CreateOrderParams {
+    let close_key2 = oh_c.create_order(&w.trader1, &CreateOrderParams {
         receiver: w.trader1.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -761,6 +775,7 @@ fn funding_rate_ramps_proportionally_to_dt() {
         min_output_amount: 0,
         order_type: OrderType::MarketDecrease,
         is_long: true,
+        expiry_ledger: None,
     });
     oh_c.execute_order(&w.keeper, &close_key2);
 
@@ -850,7 +865,7 @@ fn test_funding_rate_accumulation_and_settlement_integration() {
         &(5_000 * ONE_TOKEN),
     );
     let oh_c = OHClient::new(&w.env, &w.ord_handler);
-    let seed_key = oh_c.create_order(&CreateOrderParams {
+    let seed_key = oh_c.create_order(&w.trader1, &CreateOrderParams {
         receiver: w.trader1.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -863,6 +878,7 @@ fn test_funding_rate_accumulation_and_settlement_integration() {
         min_output_amount: 0,
         order_type: OrderType::MarketIncrease,
         is_long: true,
+        expiry_ledger: None,
     });
     oh_c.execute_order(&w.keeper, &seed_key);
 

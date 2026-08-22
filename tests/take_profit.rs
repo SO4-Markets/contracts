@@ -74,6 +74,12 @@ fn setup() -> TestWorld {
     let ord_vault = env.register(OrderVault, ());
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
+    // Tokens
+    let long_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let index_tk = Address::generate(&env);
+
     // Market token
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
@@ -82,13 +88,9 @@ fn setup() -> TestWorld {
         &7u32,
         &soroban_sdk::String::from_str(&env, "ETH Market"),
         &soroban_sdk::String::from_str(&env, "GM-ETH"),
+        &long_tk,
+        &long_tk,
     );
-
-    // Tokens
-    let long_tk = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
-    let index_tk = Address::generate(&env);
 
     // Order handler
     let ord_handler = env.register(OrderHandler, ());
@@ -137,7 +139,7 @@ fn take_profit_not_triggered_above_trigger_price() {
     );
 
     // Step 2: Create take-profit decrease order for short position
-    let order_key = oh_c.create_order(&CreateOrderParams {
+    let order_key = oh_c.create_order(&w.trader, &CreateOrderParams {
         receiver: w.trader.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -150,24 +152,25 @@ fn take_profit_not_triggered_above_trigger_price() {
         min_output_amount: 0,
         order_type: OrderType::LimitDecrease, // Take-profit for short
         is_long: false, // Short position
+        expiry_ledger: None,
     });
 
     // Step 3: Oracle submits price above trigger (1,850 USD)
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.index_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.index_tk.clone(),
             min: 1850 * ONE_USD,
             max: 1850 * ONE_USD,
-        },
+        }]),
     );
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.long_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.long_tk.clone(),
             min: ONE_USD,
             max: ONE_USD,
-        },
+        }]),
     );
 
     // Step 4: Try to execute - should fail (price not low enough for short TP)
@@ -192,7 +195,7 @@ fn take_profit_triggers_at_exact_trigger_price() {
     );
 
     // Create take-profit decrease order
-    let order_key = oh_c.create_order(&CreateOrderParams {
+    let order_key = oh_c.create_order(&w.trader, &CreateOrderParams {
         receiver: w.trader.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -205,24 +208,25 @@ fn take_profit_triggers_at_exact_trigger_price() {
         min_output_amount: 0,
         order_type: OrderType::LimitDecrease,
         is_long: false, // Short position
+        expiry_ledger: None,
     });
 
     // Oracle submits price at trigger (1,800 USD)
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.index_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.index_tk.clone(),
             min: 1800 * ONE_USD,
             max: 1800 * ONE_USD,
-        },
+        }]),
     );
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.long_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.long_tk.clone(),
             min: ONE_USD,
             max: ONE_USD,
-        },
+        }]),
     );
 
     // Execute order - should succeed
@@ -247,7 +251,7 @@ fn take_profit_triggers_below_trigger_price() {
     );
 
     // Create take-profit decrease order
-    let order_key = oh_c.create_order(&CreateOrderParams {
+    let order_key = oh_c.create_order(&w.trader, &CreateOrderParams {
         receiver: w.trader.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -264,21 +268,21 @@ fn take_profit_triggers_below_trigger_price() {
     });
 
     // Oracle submits price below trigger (1,750 USD - even better)
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.index_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.index_tk.clone(),
             min: 1750 * ONE_USD,
             max: 1750 * ONE_USD,
-        },
+        }]),
     );
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.long_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.long_tk.clone(),
             min: ONE_USD,
             max: ONE_USD,
-        },
+        }]),
     );
 
     // Execute order - should succeed
@@ -303,7 +307,7 @@ fn take_profit_slippage_protection_rejects_worse_price() {
     );
 
     // Create take-profit order with tight acceptable price
-    let order_key = oh_c.create_order(&CreateOrderParams {
+    let order_key = oh_c.create_order(&w.trader, &CreateOrderParams {
         receiver: w.trader.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -320,21 +324,21 @@ fn take_profit_slippage_protection_rejects_worse_price() {
     });
 
     // Oracle submits price above acceptable (1,830 USD - worse than 1,820 for short)
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.index_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.index_tk.clone(),
             min: 1830 * ONE_USD,
             max: 1830 * ONE_USD,
-        },
+        }]),
     );
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.long_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.long_tk.clone(),
             min: ONE_USD,
             max: ONE_USD,
-        },
+        }]),
     );
 
     // Execute order - should fail due to slippage
@@ -359,7 +363,7 @@ fn take_profit_long_position_triggers_above_entry_price() {
     );
 
     // Create take-profit for LONG position (trigger when price rises)
-    let order_key = oh_c.create_order(&CreateOrderParams {
+    let order_key = oh_c.create_order(&w.trader, &CreateOrderParams {
         receiver: w.trader.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -372,24 +376,25 @@ fn take_profit_long_position_triggers_above_entry_price() {
         min_output_amount: 0,
         order_type: OrderType::LimitDecrease,
         is_long: true, // Long position
+        expiry_ledger: None,
     });
 
     // Oracle submits price below trigger (2,100 USD - not high enough yet)
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.index_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.index_tk.clone(),
             min: 2100 * ONE_USD,
             max: 2100 * ONE_USD,
-        },
+        }]),
     );
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.long_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.long_tk.clone(),
             min: ONE_USD,
             max: ONE_USD,
-        },
+        }]),
     );
 
     // Should not trigger yet
@@ -400,13 +405,13 @@ fn take_profit_long_position_triggers_above_entry_price() {
     );
 
     // Oracle submits price at trigger (2,200 USD)
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.index_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.index_tk.clone(),
             min: 2200 * ONE_USD,
             max: 2200 * ONE_USD,
-        },
+        }]),
     );
 
     // Should trigger now

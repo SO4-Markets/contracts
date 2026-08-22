@@ -298,19 +298,6 @@ mod tests {
         let vault = env.register(OrderVault, ());
         OVClient::new(&env, &vault).initialize(&admin, &rs);
 
-        // Market token (LP + pool custodian)
-        let market_tk = env.register(MarketToken, ());
-        MtClient::new(&env, &market_tk).initialize(
-            &admin,
-            &rs,
-            &7u32,
-            &soroban_sdk::String::from_str(&env, "SO4 Market"),
-            &soroban_sdk::String::from_str(&env, "GM"),
-        );
-
-        // Grant market_token CONTROLLER so it can be used as pool custodian
-        rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
-
         // Underlying tokens
         let long_tk = env
             .register_stellar_asset_contract_v2(admin.clone())
@@ -319,6 +306,21 @@ mod tests {
             .register_stellar_asset_contract_v2(admin.clone())
             .address();
         let index_tk = Address::generate(&env);
+
+        // Market token (LP + pool custodian)
+        let market_tk = env.register(MarketToken, ());
+        MtClient::new(&env, &market_tk).initialize(
+            &admin,
+            &rs,
+            &7u32,
+            &soroban_sdk::String::from_str(&env, "SO4 Market"),
+            &soroban_sdk::String::from_str(&env, "GM"),
+            &long_tk,
+            &short_tk,
+        );
+
+        // Grant market_token CONTROLLER so it can be used as pool custodian
+        rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
 
         // Register market in DataStore
         let ds_c = DsClient::new(&env, &ds);

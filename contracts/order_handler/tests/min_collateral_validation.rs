@@ -75,6 +75,9 @@ fn setup() -> World {
     let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
     OClient::new(&env, &oracle_addr).initialize(&admin, &rs, &ds, &passphrase);
 
+    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
         &admin,
@@ -82,6 +85,8 @@ fn setup() -> World {
         &7u32,
         &soroban_sdk::String::from_str(&env, "GMX Market Token"),
         &soroban_sdk::String::from_str(&env, "GM"),
+        &long_tk,
+        &short_tk,
     );
     rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
 
@@ -101,8 +106,6 @@ fn setup() -> World {
         .initialize(&admin, &rs, &ds, &oracle_addr, &ord_vault);
     rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
 
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
     let index_tk = Address::generate(&env);
 
     let ds_c = DsClient::new(&env, &ds);
@@ -217,7 +220,6 @@ fn validate_position_rejects_below_min_collateral() {
         increased_at_time: 0,
         decreased_at_time: 0,
         is_long: true,
-        expiry_ledger: None,
     };
 
     let collateral_price = PriceProps { min: fp, max: fp }; // $1 USDC
@@ -414,7 +416,6 @@ fn insufficient_collateral_position_is_liquidatable() {
         increased_at_time: 0,
         decreased_at_time: 0,
         is_long: true,
-        expiry_ledger: None,
     };
 
     let index_price = PriceProps { min: 100 * fp, max: 100 * fp }; // $100
