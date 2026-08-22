@@ -10,6 +10,11 @@
 //!   salt = sha256("GMX_MARKET" ‖ index_token ‖ long_token ‖ short_token ‖ market_type)
 //!   LP token address = env.deployer().with_address(factory, salt).deployed_address()
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 
 use gmx_keys::{
     market_index_token_key, market_key, market_list_key, market_long_token_key,

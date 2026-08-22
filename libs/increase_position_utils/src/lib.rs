@@ -10,6 +10,11 @@
 //!   6. Validate leverage and OI limits.
 //!   7. Persist updated position.
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{account_position_list_key, collateral_sum_key, max_position_size_usd_key, pool_amount_key, claimable_fee_amount_key, position_key, position_list_key};

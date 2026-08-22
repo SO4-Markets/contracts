@@ -14,6 +14,11 @@
 //!   update_order  → modify trigger_price / acceptable_price / size before execution
 //!   freeze_order  → mark order as frozen (keeper-side circuit breaker)
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_decrease_position_utils::{decrease_position, DecreasePositionParams};

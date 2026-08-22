@@ -4,6 +4,11 @@
 //! by `market_factory`. Mint and burn are gated to CONTROLLER role (held by
 //! deposit_handler / withdrawal_handler). All other SEP-41 methods are public.
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 
 use gmx_keys::roles;
 use soroban_sdk::{
