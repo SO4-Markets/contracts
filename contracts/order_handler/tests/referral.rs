@@ -30,6 +30,7 @@ use soroban_sdk::{
     Address, Bytes, Env, Vec,
 };
 
+#[allow(dead_code)]
 struct World {
     env: Env,
     admin: Address,

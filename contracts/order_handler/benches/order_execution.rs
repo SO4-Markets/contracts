@@ -35,6 +35,7 @@ const COLLATERAL_PRICE: i128 = TOKEN_PRECISION; // stable = $1
 const COLLATERAL_AMOUNT: i128 = 100 * TOKEN_PRECISION; // 100 tokens
 const SIZE_USD: i128 = 500 * TOKEN_PRECISION; // 5× leverage
 
+#[allow(dead_code)]
 struct World {
     env: Env,
     keeper: Address,

@@ -61,6 +61,7 @@ const ONE_USD: i128 = FLOAT_PRECISION;
 
 // ─── Test world ────────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 struct TestWorld {
     env: Env,
     admin: Address,

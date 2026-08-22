@@ -665,6 +665,7 @@ mod tests {
 
     // ── Issue #101: shared full-protocol harness ──────────────────────────────
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,

@@ -553,6 +553,7 @@ mod tests {
 
     const ONE_TOKEN: i128 = 10_000_000;
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,

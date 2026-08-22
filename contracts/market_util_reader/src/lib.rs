@@ -156,6 +156,7 @@ mod tests {
     use role_store::{RoleStore, RoleStoreClient as RsClient};
     use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Env, Vec};
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,

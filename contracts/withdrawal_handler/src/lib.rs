@@ -569,6 +569,7 @@ mod tests {
     };
     use withdrawal_vault::{WithdrawalVault, WithdrawalVaultClient as WVClient};
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,

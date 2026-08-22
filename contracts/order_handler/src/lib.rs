@@ -1914,6 +1914,7 @@ mod tests {
 
     const COLLATERAL: i128 = 10_000_000;
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,

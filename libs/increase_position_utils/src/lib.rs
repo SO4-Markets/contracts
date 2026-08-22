@@ -251,6 +251,7 @@ mod tests {
     /// 1 whole token at 7-decimal Stellar precision.
     const ONE_TOKEN: i128 = 10_000_000; // 10^7
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,

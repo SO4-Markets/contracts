@@ -667,6 +667,7 @@ mod tests {
         BytesN, Env, Vec,
     };
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,

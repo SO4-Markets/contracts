@@ -27,6 +27,7 @@ use soroban_sdk::{
     Address, Env, Vec,
 };
 
+#[allow(dead_code)]
 struct World {
     env: Env,
     admin: Address,
@@ -120,6 +121,7 @@ fn setup() -> World {
     }
 }
 
+#[allow(dead_code)]
 fn seed_pool(w: &World) {
     let lp = Address::generate(&w.env);
     StellarAssetClient::new(&w.env, &w.long_tk).mint(&lp, &(10_000 * TOKEN_PRECISION));

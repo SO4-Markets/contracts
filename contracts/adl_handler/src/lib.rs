@@ -268,6 +268,7 @@ mod tests {
 
     const ONE_TOKEN: i128 = 10_000_000; // Stellar 7-decimal precision
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,

@@ -31,6 +31,7 @@ use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, E
 const ONE_TOKEN: i128 = 10_000_000; // Stellar 7-decimal precision
 const ONE_USD: i128 = FLOAT_PRECISION; // 10^30
 
+#[allow(dead_code)]
 struct TestWorld {
     env: Env,
     admin: Address,

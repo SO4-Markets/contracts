@@ -41,6 +41,7 @@ use soroban_sdk::{
 const ONE_TOKEN: i128 = 10_000_000;
 const ONE_USD: i128 = FLOAT_PRECISION;
 
+#[allow(dead_code)]
 struct TestWorld {
     env: Env,
     admin: Address,
