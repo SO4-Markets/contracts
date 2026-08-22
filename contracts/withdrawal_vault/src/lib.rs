@@ -127,7 +127,7 @@ mod tests {
         let admin = Address::generate(env);
         let rs = env.register(RoleStore, ());
         RsClient::new(env, &rs).initialize(&admin);
-        RsClient::new(env, &rs).grant_role(&admin, &admin, &roles::controller(&env));
+        RsClient::new(env, &rs).grant_role(&admin, &admin, &roles::controller(env));
 
         let vault = env.register(WithdrawalVault, ());
         WithdrawalVaultClient::new(env, &vault).initialize(&admin, &rs);
