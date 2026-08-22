@@ -73,6 +73,7 @@ impl MarketToken {
     // ── Initializer ──────────────────────────────────────────────────────────
 
     /// Called once by market_factory immediately after deploying this contract.
+    #[allow(clippy::too_many_arguments)]
     pub fn initialize(
         env: Env,
         admin: Address,

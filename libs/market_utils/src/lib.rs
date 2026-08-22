@@ -197,6 +197,7 @@ pub fn get_pnl(
 /// `index_price` is the mid-market price used for pool valuation; `pnl_price`
 /// is the maximize-resolved price (`PriceProps::pick_price_for_pnl`) used for
 /// the PnL calculation itself (issue #377).
+#[allow(clippy::too_many_arguments)]
 pub fn is_adl_required(
     env: &Env,
     ds: &Address,

@@ -974,11 +974,7 @@ fn test_funding_rate_accumulation_and_settlement_integration() {
     let rhs = abs_long as u128 * short_oi / ONE_USD as u128;
     let numerator = lhs.abs_diff(rhs);
     let denominator = lhs.max(rhs);
-    let ratio_error_bps = if denominator == 0 {
-        0u128
-    } else {
-        numerator * 10_000 / denominator
-    };
+    let ratio_error_bps = (numerator * 10_000).checked_div(denominator).unwrap_or(0);
 
     assert!(
         ratio_error_bps <= tolerance_bps as u128,
@@ -999,11 +995,7 @@ fn test_funding_rate_accumulation_and_settlement_integration() {
     let short_recv = abs_short as u128 * short_oi / ONE_USD as u128;
     let conserv_num = long_paid.abs_diff(short_recv);
     let conserv_denom = long_paid.max(short_recv);
-    let conserv_error_bps = if conserv_denom == 0 {
-        0u128
-    } else {
-        conserv_num * 10_000 / conserv_denom
-    };
+    let conserv_error_bps = (conserv_num * 10_000).checked_div(conserv_denom).unwrap_or(0);
 
     assert!(
         conserv_error_bps <= tolerance_bps as u128,

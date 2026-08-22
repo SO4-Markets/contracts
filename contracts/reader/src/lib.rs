@@ -243,14 +243,6 @@ impl Reader {
         }
     }
 
-    /// Aggregate protocol-wide statistics across the supplied markets (issue #251).
-    ///
-    /// Returns total pool value (TVL), long/short open interest, and accumulated
-    /// (unclaimed) fees — all in USD at the current oracle prices — plus the
-    /// market count and the ledger the snapshot was taken at. Lets the frontend
-    /// fetch headline numbers in one call instead of N per-market round-trips.
-    ///
-
     /// Issue #207: per-hour funding rate view for the frontend.
     ///
     /// For **historical** funding rates, use the off-chain event indexer: `execute_order`
@@ -419,6 +411,7 @@ impl Reader {
     ///
     /// Reads position from the canonical location (order_handler storage) via cross-contract call.
     /// This ensures all consumers (liquidation_handler, adl_handler, reader) agree on position state.
+    #[allow(clippy::too_many_arguments)]
     pub fn get_position_info(
         env: Env,
         data_store: Address,
@@ -530,6 +523,7 @@ impl Reader {
     /// (claimable side) and `get_position_fees` (owed side) apply during a real
     /// decrease, so the returned amounts match what would actually be
     /// credited/debited if the position were decreased right now.
+    #[allow(clippy::too_many_arguments)]
     pub fn get_claimable_funding_amount(
         env: Env,
         data_store: Address,
@@ -626,6 +620,7 @@ impl Reader {
     /// Return whether a position is currently liquidatable at oracle prices.
     ///
     /// Reads position from the canonical location (order_handler storage) via cross-contract call.
+    #[allow(clippy::too_many_arguments)]
     pub fn is_position_liquidatable(
         env: Env,
         data_store: Address,
@@ -1096,6 +1091,7 @@ impl Reader {
     ///
     /// Pagination: the `offset` first matching entries are skipped; at most `limit`
     /// entries are returned. No state is written.
+    #[allow(clippy::too_many_arguments)]
     pub fn get_liquidatable_positions(
         env: Env,
         data_store: Address,

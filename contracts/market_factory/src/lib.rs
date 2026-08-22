@@ -71,6 +71,7 @@ trait IDataStore {
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "MarketTokenClient")]
 trait IMarketToken {
+    #[allow(clippy::too_many_arguments)]
     fn initialize(
         env: Env,
         admin: Address,
