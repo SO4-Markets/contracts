@@ -806,9 +806,9 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
-        let lp = do_deposit(&w, &user, 1_000_0000, 0);
+        let lp = do_deposit(&w, &user, 10_000_000, 0);
 
         set_prices(&w);
         let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
@@ -864,9 +864,9 @@ mod tests {
         let user = Address::generate(env);
 
         // Deposit only long tokens → short pool stays empty
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
-        let lp = do_deposit(&w, &user, 1_000_0000, 0);
+        let lp = do_deposit(&w, &user, 10_000_000, 0);
 
         set_prices(&w);
         let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
@@ -890,9 +890,9 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
-        let lp = do_deposit(&w, &user, 1_000_0000, 0);
+        let lp = do_deposit(&w, &user, 10_000_000, 0);
 
         set_prices(&w);
         let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
@@ -923,9 +923,9 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
-        let lp = do_deposit(&w, &user, 1_000_0000, 0);
+        let lp = do_deposit(&w, &user, 10_000_000, 0);
         assert!(lp > 0);
 
         let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
@@ -973,9 +973,9 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
-        let lp = do_deposit(&w, &user, 1_000_0000, 0);
+        let lp = do_deposit(&w, &user, 10_000_000, 0);
         assert!(lp > 0);
 
         set_prices(&w);
@@ -1024,11 +1024,11 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         StellarAssetClient::new(env, &w.short_tk).mint(&user, &500_0000i128);
         set_prices(&w);
 
-        let lp_balance = do_deposit(&w, &user, 1_000_0000, 500_0000);
+        let lp_balance = do_deposit(&w, &user, 10_000_000, 500_0000);
         assert!(lp_balance > 0);
 
         set_prices(&w);
@@ -1070,15 +1070,15 @@ mod tests {
         let user_c = Address::generate(env);
 
         for u in [&user_a, &user_b, &user_c] {
-            StellarAssetClient::new(env, &w.long_tk).mint(u, &1_000_0000i128);
+            StellarAssetClient::new(env, &w.long_tk).mint(u, &10_000_000_i128);
         }
         set_prices(&w);
 
-        let lp_a = do_deposit(&w, &user_a, 1_000_0000, 0);
+        let lp_a = do_deposit(&w, &user_a, 10_000_000, 0);
         set_prices(&w);
-        let lp_b = do_deposit(&w, &user_b, 1_000_0000, 0);
+        let lp_b = do_deposit(&w, &user_b, 10_000_000, 0);
         set_prices(&w);
-        let lp_c = do_deposit(&w, &user_c, 1_000_0000, 0);
+        let lp_c = do_deposit(&w, &user_c, 10_000_000, 0);
 
         assert!(lp_a > 0);
         assert!(lp_b > 0);
@@ -1178,9 +1178,9 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
-        let lp_balance = do_deposit(&w, &user, 1_000_0000, 0);
+        let lp_balance = do_deposit(&w, &user, 10_000_000, 0);
 
         let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
             &user,
@@ -1210,10 +1210,10 @@ mod tests {
     fn execute_withdrawal_by_non_keeper_panics() {
         let w = setup();
         let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &5_000_0000i128);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &2_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &50_000_000_i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &20_000_000_i128);
         set_prices(&w);
-        let lp_balance = do_deposit(&w, &user, 5_000_0000, 2_000_0000);
+        let lp_balance = do_deposit(&w, &user, 50_000_000, 20_000_000);
 
         // Create a withdrawal to get a key.
         let wth_key = WithdrawalHandlerClient::new(&w.env, &w.wth_handler).create_withdrawal(
@@ -1292,9 +1292,9 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
-        let lp = do_deposit(&w, &user, 1_000_0000, 0);
+        let lp = do_deposit(&w, &user, 10_000_000, 0);
 
         set_prices(&w);
         let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(

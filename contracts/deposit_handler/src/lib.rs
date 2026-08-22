@@ -803,7 +803,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
 
         let handler_client = DepositHandlerClient::new(env, &w.handler);
 
@@ -814,7 +814,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 min_market_tokens: 0,
                 execution_fee: 0,
@@ -822,7 +822,7 @@ mod tests {
         );
 
         let dep = handler_client.get_deposit(&key).unwrap();
-        assert_eq!(dep.long_token_amount, 1_000_0000);
+        assert_eq!(dep.long_token_amount, 10_000_000);
         assert_eq!(dep.account, user);
 
         handler_client.cancel_deposit(&user, &key);
@@ -835,7 +835,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         StellarAssetClient::new(env, &w.short_tk).mint(&user, &500_0000i128);
 
         set_prices(&w);
@@ -849,7 +849,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 500_0000i128,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -865,7 +865,7 @@ mod tests {
         let ds_c = DsClient::new(env, &w.ds);
         let long_pool = ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.long_tk));
         let short_pool = ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.short_tk));
-        assert_eq!(long_pool, 1_000_0000);
+        assert_eq!(long_pool, 10_000_000);
         assert_eq!(short_pool, 500_0000);
     }
 
@@ -882,7 +882,7 @@ mod tests {
 
         // Seed the pool: 1 long token @ $2000 mints 2000 LP tokens (mt_price starts at $1).
         let seed_user = Address::generate(env);
-        StellarAssetClient::new(env, &w.long_tk).mint(&seed_user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&seed_user, &10_000_000_i128);
         set_prices(&w);
         let seed_key = hc.create_deposit(
             &seed_user,
@@ -891,7 +891,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -930,7 +930,7 @@ mod tests {
         // deposit_usd = 1 token * 2200 = 2200; mt_price = 2200 * TOKEN_PRECISION / 2e10 = 1.1
         // mint = 2200 / 1.1 = 2000 LP tokens (same count as the seed deposit, not diluted).
         let user = Address::generate(env);
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         let dep_key = hc.create_deposit(
             &user,
             &CreateDepositParams {
@@ -938,7 +938,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -964,7 +964,7 @@ mod tests {
         let hc = DepositHandlerClient::new(env, &w.handler);
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
         let dep_key = hc.create_deposit(
             &user,
@@ -973,7 +973,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -996,7 +996,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
 
         let handler_client = DepositHandlerClient::new(env, &w.handler);
@@ -1009,7 +1009,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 min_market_tokens: 1, // low threshold — will succeed
                 execution_fee: 0,
@@ -1034,7 +1034,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
 
         let handler_client = DepositHandlerClient::new(env, &w.handler);
@@ -1046,7 +1046,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 // demand more LP than can possibly be minted → must revert
                 min_market_tokens: i128::MAX,
@@ -1063,7 +1063,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
 
         let handler_client = DepositHandlerClient::new(env, &w.handler);
@@ -1075,7 +1075,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 min_market_tokens: 1, // very low threshold — minted will be well above this
                 execution_fee: 0,
@@ -1097,7 +1097,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
 
         let handler_client = DepositHandlerClient::new(env, &w.handler);
@@ -1110,7 +1110,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -1162,7 +1162,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         StellarAssetClient::new(env, &w.short_tk).mint(&user, &500_0000i128);
         set_prices(&w);
 
@@ -1175,7 +1175,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 500_0000i128,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -1191,7 +1191,7 @@ mod tests {
         // deposit_usd = long_usd + short_usd; mint = deposit_usd * TOKEN_PRECISION / FLOAT_PRECISION
         let fp = gmx_math::FLOAT_PRECISION;
         let tp = gmx_math::TOKEN_PRECISION;
-        let long_usd = gmx_math::mul_div_wide(env, 1_000_0000i128, 2000 * fp, tp);
+        let long_usd = gmx_math::mul_div_wide(env, 10_000_000_i128, 2000 * fp, tp);
         let short_usd = gmx_math::mul_div_wide(env, 500_0000i128, fp, tp);
         let expected_lp = gmx_math::mul_div_wide(env, long_usd + short_usd, tp, fp);
         assert_eq!(
@@ -1210,7 +1210,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         let hc = DepositHandlerClient::new(env, &w.handler);
         let ds_c = DsClient::new(env, &w.ds);
 
@@ -1221,7 +1221,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 min_market_tokens: 0,
                 execution_fee: 0,
@@ -1258,7 +1258,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
         let hc = DepositHandlerClient::new(env, &w.handler);
         let ds_c = DsClient::new(env, &w.ds);
@@ -1270,7 +1270,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -1306,8 +1306,8 @@ mod tests {
         let user1 = Address::generate(env);
         let user2 = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user1, &1_000_0000i128);
-        StellarAssetClient::new(env, &w.long_tk).mint(&user2, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user1, &10_000_000_i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user2, &10_000_000_i128);
         set_prices(&w);
 
         let hc = DepositHandlerClient::new(env, &w.handler);
@@ -1320,7 +1320,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000,
+                long_token_amount: 10_000_000,
                 short_token_amount: 0,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -1339,7 +1339,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000,
+                long_token_amount: 10_000_000,
                 short_token_amount: 0,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -1366,7 +1366,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
 
         let hc = DepositHandlerClient::new(env, &w.handler);
@@ -1379,7 +1379,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 // Demand more LP than can possibly be minted → InsufficientLpOut
                 min_market_tokens: i128::MAX,
@@ -1428,7 +1428,7 @@ mod tests {
         let user = Address::generate(env);
         let wrong_token = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
 
         let handler_client = DepositHandlerClient::new(env, &w.handler);
 
@@ -1440,7 +1440,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: wrong_token, // WRONG!
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 min_market_tokens: 0,
                 execution_fee: 0,
@@ -1484,7 +1484,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         StellarAssetClient::new(env, &w.short_tk).mint(&user, &500_0000i128);
 
         let handler_client = DepositHandlerClient::new(env, &w.handler);
@@ -1496,7 +1496,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 500_0000i128,
                 min_market_tokens: 0,
                 execution_fee: 0,
@@ -1504,7 +1504,7 @@ mod tests {
         );
 
         let dep = handler_client.get_deposit(&key).unwrap();
-        assert_eq!(dep.long_token_amount, 1_000_0000);
+        assert_eq!(dep.long_token_amount, 10_000_000);
         assert_eq!(dep.short_token_amount, 500_0000);
     }
 
@@ -1529,7 +1529,7 @@ mod tests {
         );
 
         // short_tk is priced at exactly $1, so 50 * 1e7 raw units = $50.
-        StellarAssetClient::new(env, &w.short_tk).mint(&user, &(50 * 1_000_0000i128));
+        StellarAssetClient::new(env, &w.short_tk).mint(&user, &(50 * 10_000_000_i128));
 
         let handler_client = DepositHandlerClient::new(env, &w.handler);
         handler_client.create_deposit(
@@ -1540,7 +1540,7 @@ mod tests {
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
                 long_token_amount: 0,
-                short_token_amount: 50 * 1_000_0000i128,
+                short_token_amount: 50 * 10_000_000_i128,
                 min_market_tokens: 0,
                 execution_fee: 0,
             },
@@ -1564,7 +1564,7 @@ mod tests {
         );
 
         // short_tk is priced at exactly $1, so 100 * 1e7 raw units = $100.
-        StellarAssetClient::new(env, &w.short_tk).mint(&user, &(100 * 1_000_0000i128));
+        StellarAssetClient::new(env, &w.short_tk).mint(&user, &(100 * 10_000_000_i128));
 
         let handler_client = DepositHandlerClient::new(env, &w.handler);
         let key = handler_client.create_deposit(
@@ -1575,14 +1575,14 @@ mod tests {
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
                 long_token_amount: 0,
-                short_token_amount: 100 * 1_000_0000i128,
+                short_token_amount: 100 * 10_000_000_i128,
                 min_market_tokens: 0,
                 execution_fee: 0,
             },
         );
 
         let dep = handler_client.get_deposit(&key).unwrap();
-        assert_eq!(dep.short_token_amount, 100 * 1_000_0000i128);
+        assert_eq!(dep.short_token_amount, 100 * 10_000_000_i128);
     }
 
     // ── Issue #42: Mixed deposit tests ─────────────────────────────────────────
@@ -1594,7 +1594,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
 
         let handler_client = DepositHandlerClient::new(env, &w.handler);
@@ -1606,7 +1606,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -1620,7 +1620,7 @@ mod tests {
         let short_pool = ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.short_tk));
 
         assert_eq!(
-            long_pool, 1_000_0000,
+            long_pool, 10_000_000,
             "long pool should increase by deposit amount"
         );
         assert_eq!(short_pool, 0, "short pool should remain 0");
@@ -1672,7 +1672,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         StellarAssetClient::new(env, &w.short_tk).mint(&user, &500_0000i128);
         set_prices(&w);
 
@@ -1685,7 +1685,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 500_0000i128,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -1699,7 +1699,7 @@ mod tests {
         let short_pool = ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.short_tk));
 
         assert_eq!(
-            long_pool, 1_000_0000,
+            long_pool, 10_000_000,
             "long pool should increase by long deposit amount"
         );
         assert_eq!(
@@ -1726,7 +1726,7 @@ mod tests {
         let user_c = Address::generate(env);
 
         for u in [&user_a, &user_b, &user_c] {
-            StellarAssetClient::new(env, &w.long_tk).mint(u, &1_000_0000i128);
+            StellarAssetClient::new(env, &w.long_tk).mint(u, &10_000_000_i128);
         }
 
         let hc = DepositHandlerClient::new(env, &w.handler);
@@ -1737,7 +1737,7 @@ mod tests {
             market: w.market_tk.clone(),
             initial_long_token: w.long_tk.clone(),
             initial_short_token: w.short_tk.clone(),
-            long_token_amount: 1_000_0000i128,
+            long_token_amount: 10_000_000_i128,
             short_token_amount: 0,
             min_market_tokens: 0,
             execution_fee: 0,
@@ -1834,7 +1834,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         StellarAssetClient::new(env, &w.short_tk).mint(&user, &500_0000i128);
         set_prices(&w);
 
@@ -1848,7 +1848,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 500_0000i128,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -1859,7 +1859,7 @@ mod tests {
         let vault_addr = w.vault.clone();
         let long_balance_before = token::Client::new(env, &w.long_tk).balance(&vault_addr);
         let short_balance_before = token::Client::new(env, &w.short_tk).balance(&vault_addr);
-        assert_eq!(long_balance_before, 1_000_0000);
+        assert_eq!(long_balance_before, 10_000_000);
         assert_eq!(short_balance_before, 500_0000);
 
         handler_client.execute_deposit(&w.keeper, &key);
@@ -1896,7 +1896,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         StellarAssetClient::new(env, &w.short_tk).mint(&user, &500_0000i128);
 
         let handler_client = DepositHandlerClient::new(env, &w.handler);
@@ -1909,7 +1909,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 500_0000i128,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -1919,7 +1919,7 @@ mod tests {
         // Before cancel: vault has tokens
         let vault_addr = w.vault.clone();
         let long_balance_before = token::Client::new(env, &w.long_tk).balance(&vault_addr);
-        assert_eq!(long_balance_before, 1_000_0000);
+        assert_eq!(long_balance_before, 10_000_000);
 
         handler_client.cancel_deposit(&user, &key);
 
@@ -1957,7 +1957,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
 
         let handler_client = DepositHandlerClient::new(env, &w.handler);
 
@@ -1969,7 +1969,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 min_market_tokens: 0,
                 execution_fee: 0,
@@ -1980,7 +1980,7 @@ mod tests {
         let dep = handler_client.get_deposit(&key).unwrap();
         assert_eq!(dep.account, user);
         assert_eq!(dep.market, w.market_tk);
-        assert_eq!(dep.long_token_amount, 1_000_0000);
+        assert_eq!(dep.long_token_amount, 10_000_000);
     }
 
     /// Verify that deposit execution event includes all required fields.
@@ -1990,7 +1990,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
 
         let handler_client = DepositHandlerClient::new(env, &w.handler);
@@ -2002,7 +2002,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -2024,7 +2024,7 @@ mod tests {
     fn execute_deposit_by_non_keeper_panics() {
         let w = setup();
         let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
 
         let key = DepositHandlerClient::new(&w.env, &w.handler).create_deposit(
@@ -2034,7 +2034,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000,
+                long_token_amount: 10_000_000,
                 short_token_amount: 0,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -2099,7 +2099,7 @@ mod tests {
     fn upgrade_preserves_deposit_storage() {
         let w = setup();
         let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
 
         let hc = DepositHandlerClient::new(&w.env, &w.handler);
@@ -2110,7 +2110,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000,
+                long_token_amount: 10_000_000,
                 short_token_amount: 0,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -2148,7 +2148,7 @@ mod tests {
         let user = Address::generate(env);
 
         // Mint 1 000 long tokens to user and create deposit
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
 
         let hc = DepositHandlerClient::new(env, &w.handler);
@@ -2159,7 +2159,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -2174,7 +2174,7 @@ mod tests {
             &w.admin,
             &w.long_tk,
             &drain_addr,
-            &1_000_0000i128,
+            &10_000_000_i128,
         );
 
         // execute_deposit must now revert: vault holds 0 but deposit recorded 1_000_0000
@@ -2189,7 +2189,7 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
 
         let hc = DepositHandlerClient::new(env, &w.handler);
@@ -2200,7 +2200,7 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 min_market_tokens: 1,
                 execution_fee: 0,
@@ -2301,7 +2301,7 @@ mod tests {
         let user = Address::generate(env);
         let unregistered_market = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
 
         let hc = DepositHandlerClient::new(env, &w.handler);
         let result = hc.try_create_deposit(
@@ -2311,7 +2311,7 @@ mod tests {
                 market: unregistered_market,
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 1_000_0000i128,
+                long_token_amount: 10_000_000_i128,
                 short_token_amount: 0,
                 min_market_tokens: 0,
                 execution_fee: 0,

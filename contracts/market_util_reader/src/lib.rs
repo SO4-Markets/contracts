@@ -312,11 +312,11 @@ mod tests {
         let user = Address::generate(&w.env);
 
         // Mint tokens for the user and seed the pool
-        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &10_000_0000i128);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &5_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &100_000_000_i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &50_000_000_i128);
         set_prices(&w, 2000 * fp, fp, 2000 * fp);
 
-        let lp = do_deposit(&w, &user, 10_000_0000, 5_000_0000);
+        let lp = do_deposit(&w, &user, 100_000_000, 50_000_000);
         assert!(lp > 0);
 
         let ds_c = DsClient::new(&w.env, &w.ds);
@@ -343,8 +343,8 @@ mod tests {
         // Pool value: 10_000 long tokens at $2000 + 5_000 short tokens at $1
         // = $20,000,000 + $5,000 = $20,005,000
         // In raw: 10_000_0000 * 2000 * fp / TOKEN_PRECISION + 5_000_0000 * fp / TOKEN_PRECISION
-        let long_usd = gmx_math::mul_div_wide(&w.env, 10_000_0000i128, 2000 * fp, gmx_math::TOKEN_PRECISION);
-        let short_usd = gmx_math::mul_div_wide(&w.env, 5_000_0000i128, fp, gmx_math::TOKEN_PRECISION);
+        let long_usd = gmx_math::mul_div_wide(&w.env, 100_000_000_i128, 2000 * fp, gmx_math::TOKEN_PRECISION);
+        let short_usd = gmx_math::mul_div_wide(&w.env, 50_000_000_i128, fp, gmx_math::TOKEN_PRECISION);
         let expected_pool = (long_usd + short_usd) as u128;
 
         assert_eq!(result.pool_value_usd, expected_pool);
@@ -372,11 +372,11 @@ mod tests {
         let fp = gmx_math::FLOAT_PRECISION;
         let user = Address::generate(&w.env);
 
-        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &10_000_0000i128);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &5_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &100_000_000_i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &50_000_000_i128);
         set_prices(&w, 2000 * fp, fp, 2000 * fp);
 
-        let _lp = do_deposit(&w, &user, 10_000_0000, 5_000_0000);
+        let _lp = do_deposit(&w, &user, 100_000_000, 50_000_000);
 
         let ds_c = DsClient::new(&w.env, &w.ds);
 

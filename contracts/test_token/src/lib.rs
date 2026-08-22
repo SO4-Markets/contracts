@@ -390,12 +390,12 @@ mod tests {
         let alice = Address::generate(&env);
         let bob = Address::generate(&env);
 
-        client.mint(&owner, &alice, &1_000_0000);
+        client.mint(&owner, &alice, &10_000_000);
         client.transfer(&alice, &bob, &250_0000);
 
         assert_eq!(client.balance(&alice), 750_0000);
         assert_eq!(client.balance(&bob), 250_0000);
-        assert_eq!(client.total_supply(), 1_000_0000);
+        assert_eq!(client.total_supply(), 10_000_000);
     }
 
     #[test]
