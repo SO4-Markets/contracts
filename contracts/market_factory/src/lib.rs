@@ -199,7 +199,7 @@ impl MarketFactory {
         // market_token uses the initialize() pattern, not __constructor, so we
         // use deploy() (no constructor call) followed by an explicit initialize.
         let deployer = env.deployer().with_address(factory, salt);
-        let market_token_address = deployer.deploy(wasm_hash);
+        let market_token_address = deployer.deploy_v2(wasm_hash, ());
 
         MarketTokenClient::new(&env, &market_token_address).initialize(
             &env.current_contract_address(),

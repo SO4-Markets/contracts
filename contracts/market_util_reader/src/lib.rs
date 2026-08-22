@@ -174,7 +174,7 @@ mod tests {
     fn setup() -> World {
         let env = Env::default();
         env.mock_all_auths();
-        env.budget().reset_unlimited();
+        env.cost_estimate().budget().reset_unlimited();
 
         let admin = Address::generate(&env);
         let keeper = Address::generate(&env);
@@ -337,7 +337,7 @@ mod tests {
         );
 
         // Call get_market_utilisation
-        let result = MarketUtilReaderClient::new(&w.env, &w.env.register_contract(None, MarketUtilReader))
+        let result = MarketUtilReaderClient::new(&w.env, &w.env.register(MarketUtilReader, ()))
             .get_market_utilisation(&w.ds, &w.oracle, &w.market_tk);
 
         // Pool value: 10_000 long tokens at $2000 + 5_000 short tokens at $1
@@ -394,7 +394,7 @@ mod tests {
             &oi_value,
         );
 
-        let result = MarketUtilReaderClient::new(&w.env, &w.env.register_contract(None, MarketUtilReader))
+        let result = MarketUtilReaderClient::new(&w.env, &w.env.register(MarketUtilReader, ()))
             .get_market_utilisation(&w.ds, &w.oracle, &w.market_tk);
 
         assert!(result.is_at_long_oi_cap, "long OI at cap should be true");
@@ -417,7 +417,7 @@ mod tests {
             &(5_000 * fp as u128),
         );
 
-        let result = MarketUtilReaderClient::new(&w.env, &w.env.register_contract(None, MarketUtilReader))
+        let result = MarketUtilReaderClient::new(&w.env, &w.env.register(MarketUtilReader, ()))
             .get_market_utilisation(&w.ds, &w.oracle, &w.market_tk);
 
         assert_eq!(result.pool_value_usd, 0);
