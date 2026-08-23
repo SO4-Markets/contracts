@@ -18,14 +18,8 @@ Each submitted price is valid for **exactly one ledger sequence window** (at mos
 
 Keepers submit both a `min_price` and a `max_price` for each token. The spread represents oracle uncertainty (bid/ask spread or aggregator confidence interval).
 
-| Scenario | Price used | Rationale |
-|---|---|---|
-| Long increase (open long) | `max_price` | Worst case for the buyer |
-| Long decrease (close long) | `min_price` | Worst case for the seller |
-| Short increase (open short) | `min_price` | Worst case for the buyer |
-| Short decrease (close short) | `max_price` | Worst case for the seller |
-
-This ensures users always trade at the price least favourable to themselves, preventing oracle-based front-running.
+- For market orders (`increase_position` / `decrease_position`), execution prices are derived from `mid_price()` (`(min_price + max_price) / 2`) and adjusted directionally by price impact (`get_execution_price`).
+- The `min_price` and `max_price` bounds are used for limit/stop trigger evaluation (`order_handler::execute_order`) and conservative PnL calculations (`pick_price_for_pnl`) to protect against oracle latency and manipulation.
 
 ---
 
@@ -131,7 +125,7 @@ stellar contract invoke \
 bash scripts/submit_prices.sh testnet my-keeper
 ```
 
-`submit_prices.sh` signs a test price bundle for the configured token and calls `oracle.set_prices`. If the signature or key lookup fails the invocation will revert.
+`submit_prices.sh` constructs a test price bundle for the configured token and calls `oracle.set_prices_simple` (the no-signature test path, gated by the `testutils` feature).
 
 ---
 
