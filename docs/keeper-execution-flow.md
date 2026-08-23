@@ -28,7 +28,7 @@ sequenceDiagram
 
   Note over Keeper: waits for new ledger
 
-  Keeper->>Oracle: set_primary_price(token, price)
+  Keeper->>Oracle: set_prices(prices)
   Keeper->>OrderHandler: execute_order(nonce)
   OrderHandler->>Oracle: get_price(token)
   OrderHandler->>DataStore: update(position, pool)
@@ -41,7 +41,7 @@ sequenceDiagram
 2. **ExchangeRouter → OrderVault**: transfers collateral from the user's wallet into the vault for increase/swap orders.
 3. **ExchangeRouter → DataStore**: stores `OrderProps` (pending state) and records the key in the global and per-account order sets.
 4. **Keeper**: detects the pending order event, fetches market prices from an external price source.
-5. **Keeper → Oracle**: `set_primary_price(token, price)` — commits the price on-chain.
+5. **Keeper → Oracle**: `set_prices(prices)` (or `set_prices_simple` in tests) — commits the price bundle on-chain.
 6. **Keeper → OrderHandler**: `execute_order(nonce)` — triggers dispatch.
 7. **OrderHandler → Oracle**: reads the committed price.
 8. **OrderHandler → DataStore**: updates position size, pool amounts, open interest, and funding trackers.
@@ -59,7 +59,7 @@ sequenceDiagram
 
 | Action | Required role |
 |---|---|
-| `set_primary_price` (Oracle) | `ORDER_KEEPER` |
+| `set_prices` / `set_prices_simple` (Oracle) | `ORDER_KEEPER` |
 | `execute_order` | `ORDER_KEEPER` |
 | `freeze_order` | `ORDER_KEEPER` |
 | `cancel_order` | account owner **or** `ORDER_KEEPER` |
