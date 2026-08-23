@@ -69,6 +69,10 @@ fn setup() -> World {
     let ord_vault = env.register(OrderVault, ());
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
+    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let index_tk = Address::generate(&env);
+
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
         &admin,
@@ -76,11 +80,9 @@ fn setup() -> World {
         &7u32,
         &soroban_sdk::String::from_str(&env, "GMX ETH/USD Market"),
         &soroban_sdk::String::from_str(&env, "GM"),
+        &long_tk,
+        &short_tk,
     );
-
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let index_tk = Address::generate(&env);
 
     let dep_handler = env.register(DepositHandler, ());
     DHClient::new(&env, &dep_handler).initialize(&admin, &rs, &ds, &oracle, &dep_vault);
@@ -162,8 +164,8 @@ fn funding_conserves_real_token_balances_between_two_opposite_side_positions() {
 
     // Alice opens a large long, collateralised in long_tk (matching the funding
     // accounting model: the long side's funding key is scoped to market.long_token).
-    StellarAssetClient::new(env, &w.long_tk).mint(&alice, &(1 * ONE_TOKEN));
-    StellarAssetClient::new(env, &w.long_tk).transfer(&alice, &w.ord_vault, &(1 * ONE_TOKEN));
+    StellarAssetClient::new(env, &w.long_tk).mint(&alice, &ONE_TOKEN);
+    StellarAssetClient::new(env, &w.long_tk).transfer(&alice, &w.ord_vault, &ONE_TOKEN);
     let alice_open = OHClient::new(env, &w.ord_handler).create_order(
         &alice,
         &CreateOrderParams {
@@ -172,7 +174,7 @@ fn funding_conserves_real_token_balances_between_two_opposite_side_positions() {
             initial_collateral_token: w.long_tk.clone(),
             swap_path: Vec::new(env),
             size_delta_usd: 8_000 * ONE_USD,
-            collateral_delta_amount: 1 * ONE_TOKEN,
+            collateral_delta_amount: ONE_TOKEN,
             trigger_price: 0,
             acceptable_price: 2_100 * ONE_USD,
             execution_fee: 0,
@@ -257,7 +259,7 @@ fn funding_conserves_real_token_balances_between_two_opposite_side_positions() {
     // Alice (paying side) must never receive back more than her full collateral —
     // any nonzero funding fee only ever reduces her payout, never inflates it.
     assert!(
-        alice_payout <= 1 * ONE_TOKEN,
+        alice_payout <= ONE_TOKEN,
         "Alice (paying side) must never receive more than her full collateral back: got {alice_payout}"
     );
 

@@ -24,6 +24,7 @@ use withdrawal_vault::{WithdrawalVault, WithdrawalVaultClient as WVClient};
 
 const ONE_TOKEN: i128 = 10_000_000;
 
+#[allow(dead_code)]
 struct World {
     env: Env,
     admin: Address,
@@ -75,6 +76,10 @@ fn setup() -> World {
     let ord_vault = env.register(OrderVault, ());
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
+    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let index_tk = Address::generate(&env);
+
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
         &admin,
@@ -82,11 +87,9 @@ fn setup() -> World {
         &7u32,
         &soroban_sdk::String::from_str(&env, "ETH/USD Market"),
         &soroban_sdk::String::from_str(&env, "GM-ETH"),
+        &long_tk,
+        &short_tk,
     );
-
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let index_tk = Address::generate(&env);
 
     let dep_handler = env.register(DepositHandler, ());
     DHClient::new(&env, &dep_handler).initialize(&admin, &rs, &ds, &oracle_addr, &dep_vault);
@@ -161,7 +164,12 @@ fn market_increase_with_zero_size_reverts() {
         },
     );
 
-    assert_eq!(result, Err(Ok(OrderError::ZeroSizeDelta)));
+    assert_eq!(
+        result,
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            OrderError::ZeroSizeDelta as u32
+        )))
+    );
 }
 
 #[test]
@@ -191,7 +199,12 @@ fn limit_increase_with_zero_size_reverts() {
         },
     );
 
-    assert_eq!(result, Err(Ok(OrderError::ZeroSizeDelta)));
+    assert_eq!(
+        result,
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            OrderError::ZeroSizeDelta as u32
+        )))
+    );
 }
 
 #[test]
@@ -218,7 +231,12 @@ fn market_decrease_with_zero_size_reverts() {
         },
     );
 
-    assert_eq!(result, Err(Ok(OrderError::ZeroSizeDelta)));
+    assert_eq!(
+        result,
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            OrderError::ZeroSizeDelta as u32
+        )))
+    );
 }
 
 #[test]
@@ -250,7 +268,13 @@ fn swap_order_with_zero_size_succeeds() {
     );
 
     // Should succeed (no ZeroSizeDelta) — may fail later for other reasons but not this check
-    assert!(result.is_ok() || !matches!(result, Err(Ok(OrderError::ZeroSizeDelta))));
+    assert!(
+        result.is_ok()
+            || !matches!(
+                result,
+                Err(Ok(e)) if e == soroban_sdk::Error::from_contract_error(OrderError::ZeroSizeDelta as u32)
+            )
+    );
 }
 
 // ── Issue #269: deposit with zero amounts → ZeroDeposit ───────────────────────

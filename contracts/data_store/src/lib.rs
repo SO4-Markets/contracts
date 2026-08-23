@@ -594,14 +594,9 @@ impl DataStore {
         let current_count = Self::get_u128(env.clone(), count_key.clone());
         Self::set_u128(env.clone(), caller.clone(), count_key, current_count + 1);
 
-        let variance = if executed_price >= expected_price {
-            executed_price - expected_price
-        } else {
-            expected_price - executed_price
-        };
+        let variance = executed_price.abs_diff(expected_price);
 
-        if expected_price > 0 {
-            let variance_bps = (variance * 10000) / expected_price;
+        if let Some(variance_bps) = (variance * 10000).checked_div(expected_price) {
             let total_var_key = gmx_keys::keeper_total_variance_key(&env, &keeper);
             let current_total_var = Self::get_u128(env.clone(), total_var_key.clone());
             Self::set_u128(env.clone(), caller.clone(), total_var_key, current_total_var + variance_bps);

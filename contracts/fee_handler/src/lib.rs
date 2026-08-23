@@ -553,6 +553,7 @@ mod tests {
 
     const ONE_TOKEN: i128 = 10_000_000;
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,
@@ -580,6 +581,10 @@ mod tests {
         let ds = env.register(DataStore, ());
         DsClient::new(&env, &ds).initialize(&admin, &rs);
 
+        let long_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+
         let market_tk = env.register(MarketToken, ());
         MtClient::new(&env, &market_tk).initialize(
             &admin,
@@ -587,12 +592,10 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(&env, "FH Test Market"),
             &soroban_sdk::String::from_str(&env, "FM"),
+            &long_tk,
+            &long_tk,
         );
         rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
-
-        let long_tk = env
-            .register_stellar_asset_contract_v2(admin.clone())
-            .address();
 
         let handler = env.register(FeeHandler, ());
         FeeHandlerClient::new(&env, &handler).initialize(&admin, &rs, &ds);
@@ -1032,6 +1035,10 @@ mod tests {
         let ds = env.register(DataStore, ());
         DsClient::new(&env, &ds).initialize(&admin, &rs);
 
+        let long_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+
         let market_tk = env.register(MarketToken, ());
         MtClient::new(&env, &market_tk).initialize(
             &admin,
@@ -1039,12 +1046,10 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(&env, "UI Test Market"),
             &soroban_sdk::String::from_str(&env, "UM"),
+            &long_tk,
+            &long_tk,
         );
         rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
-
-        let long_tk = env
-            .register_stellar_asset_contract_v2(admin.clone())
-            .address();
 
         let handler = env.register(FeeHandler, ());
         let fh = FeeHandlerClient::new(&env, &handler);

@@ -30,6 +30,7 @@ use soroban_sdk::{
 const ONE_TOKEN: i128 = 10_000_000; // 7-decimal Stellar precision
 const ONE_USD: i128 = FLOAT_PRECISION;
 
+#[allow(dead_code)]
 struct World {
     env: Env,
     admin: Address,
@@ -71,16 +72,6 @@ fn setup() -> World {
     let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
     OClient::new(&env, &oracle_addr).initialize(&admin, &rs, &ds, &passphrase);
 
-    // Market token
-    let market_tk = env.register(MarketToken, ());
-    MtClient::new(&env, &market_tk).initialize(
-        &admin,
-        &rs,
-        &7u32,
-        &soroban_sdk::String::from_str(&env, "GMX ETH/USD Market"),
-        &soroban_sdk::String::from_str(&env, "GM"),
-    );
-
     // Underlying tokens
     let long_tk = env
         .register_stellar_asset_contract_v2(admin.clone())
@@ -89,6 +80,18 @@ fn setup() -> World {
         .register_stellar_asset_contract_v2(admin.clone())
         .address();
     let index_tk = Address::generate(&env);
+
+    // Market token
+    let market_tk = env.register(MarketToken, ());
+    MtClient::new(&env, &market_tk).initialize(
+        &admin,
+        &rs,
+        &7u32,
+        &soroban_sdk::String::from_str(&env, "GMX ETH/USD Market"),
+        &soroban_sdk::String::from_str(&env, "GM"),
+        &long_tk,
+        &short_tk,
+    );
 
     // Vaults
     let dep_vault = env.register(DepositVault, ());
@@ -198,11 +201,11 @@ fn permissionless_cancel_expired_order_succeeds() {
     // Mint collateral to the user and fund the vault
     StellarAssetClient::new(env, &w.short_tk).mint(&user, &deposit);
 
-    set_prices(env, 2000);
+    set_prices(&w, 2000);
 
     // Create an order with expiry_ledger set to current sequence + 1 (will expire soon)
     let current_seq = env.ledger().sequence();
-    let expiry_ledger = current_seq + 1;
+    let expiry_ledger = (current_seq + 1) as u64;
 
     let hc = OHClient::new(env, &w.ord_handler);
     let key = hc.create_order(
@@ -229,7 +232,7 @@ fn permissionless_cancel_expired_order_succeeds() {
 
     // Advance ledger past the expiry_ledger so order_handler::cleanup_expired_order
     // considers the order expired (it checks ledger sequence > expiry_ledger).
-    env.ledger().set_sequence_number(expiry_ledger + 1);
+    env.ledger().set_sequence_number((expiry_ledger + 1) as u32);
 
     // Advance timestamp so order_cleanup's timestamp-based expiry check also passes.
     // order_cleanup uses DEFAULT_ORDER_EXPIRY (2880) as the default, meaning the order
@@ -241,7 +244,7 @@ fn permissionless_cancel_expired_order_succeeds() {
     let before_balance = StellarAssetClient::new(env, &w.short_tk).balance(&cleaner);
 
     let cc = OrderCleanupClient::new(env, &w.cleanup);
-    cc.cancel_expired_order(&cleaner, &w.ds, &w.ord_handler, &cleaner, &key);
+    cc.cancel_expired_order(&w.ds, &w.ord_handler, &cleaner, &key);
 
     let after_balance = StellarAssetClient::new(env, &w.short_tk).balance(&cleaner);
 
@@ -275,7 +278,7 @@ fn cancel_expired_order_reverts_if_not_yet_expired() {
     let deposit = 200 * ONE_TOKEN;
 
     StellarAssetClient::new(env, &w.short_tk).mint(&user, &deposit);
-    set_prices(env, 2000);
+    set_prices(&w, 2000);
 
     // Create an order with a far-future expiry
     let hc = OHClient::new(env, &w.ord_handler);
@@ -300,7 +303,7 @@ fn cancel_expired_order_reverts_if_not_yet_expired() {
 
     // Do NOT advance time — order is not yet expired
     let cc = OrderCleanupClient::new(env, &w.cleanup);
-    cc.cancel_expired_order(&cleaner, &w.ds, &w.ord_handler, &cleaner, &key);
+    cc.cancel_expired_order(&w.ds, &w.ord_handler, &cleaner, &key);
 }
 
 /// cancel_expired_order reverts if the order does not exist.
@@ -318,7 +321,7 @@ fn cancel_expired_order_reverts_if_order_not_found() {
     let fake_key = soroban_sdk::BytesN::<32>::from_array(env, &[0u8; 32]);
 
     let cc = OrderCleanupClient::new(env, &w.cleanup);
-    cc.cancel_expired_order(&cleaner, &w.ds, &w.ord_handler, &cleaner, &fake_key);
+    cc.cancel_expired_order(&w.ds, &w.ord_handler, &cleaner, &fake_key);
 }
 
 /// preview_expired_order returns correct metadata for an expired order.
@@ -333,10 +336,10 @@ fn preview_expired_order_reports_correctly() {
     let deposit = 200 * ONE_TOKEN;
 
     StellarAssetClient::new(env, &w.short_tk).mint(&user, &deposit);
-    set_prices(env, 2000);
+    set_prices(&w, 2000);
 
     let current_seq = env.ledger().sequence();
-    let expiry_ledger = current_seq + 1;
+    let expiry_ledger = (current_seq + 1) as u64;
 
     let hc = OHClient::new(env, &w.ord_handler);
     let key = hc.create_order(
@@ -368,7 +371,7 @@ fn preview_expired_order_reports_correctly() {
     // even before advancing time. This is a known limitation of the dual-expiry system.
 
     // Advance past both expiry mechanisms
-    env.ledger().set_sequence_number(expiry_ledger + 1);
+    env.ledger().set_sequence_number((expiry_ledger + 1) as u32);
     env.ledger().set_timestamp(100_000);
 
     let preview_after = cc.preview_expired_order(&w.ds, &w.ord_handler, &key);

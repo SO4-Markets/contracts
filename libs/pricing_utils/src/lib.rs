@@ -413,6 +413,7 @@ mod tests {
     }
 
     /// Seed pool amounts and impact factors in data_store.
+    #[allow(clippy::too_many_arguments)]
     fn seed_swap_market(
         env: &Env,
         ds: &Address,
@@ -1200,6 +1201,7 @@ mod tests {
 
     /// Seed both OI sides (via the long_token collateral key) and the three
     /// position impact parameters.  All OI values are in FLOAT_PRECISION units.
+    #[allow(clippy::too_many_arguments)]
     fn seed_position_market(
         env: &Env,
         ds: &Address,

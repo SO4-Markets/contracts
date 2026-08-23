@@ -1,4 +1,9 @@
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
@@ -197,6 +202,7 @@ pub fn get_pnl(
 /// `index_price` is the mid-market price used for pool valuation; `pnl_price`
 /// is the maximize-resolved price (`PriceProps::pick_price_for_pnl`) used for
 /// the PnL calculation itself (issue #377).
+#[allow(clippy::too_many_arguments)]
 pub fn is_adl_required(
     env: &Env,
     ds: &Address,

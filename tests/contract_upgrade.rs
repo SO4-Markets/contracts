@@ -24,12 +24,15 @@ use order_handler::{OrderHandler, OrderHandlerClient as OHClient};
 use order_vault::{OrderVault, OrderVaultClient as OVClient};
 use role_store::{RoleStore, RoleStoreClient as RsClient};
 use soroban_sdk::{
-    testutils::Address as _, token::StellarAssetClient, Address, BytesN, Env, Vec,
+    testutils::{Address as _, BytesN as _},
+    token::StellarAssetClient,
+    Address, BytesN, Env, Vec,
 };
 
 const ONE_TOKEN: i128 = 10_000_000;
 const ONE_USD: i128 = FLOAT_PRECISION;
 
+#[allow(dead_code)]
 struct World {
     env: Env,
     admin: Address,
@@ -70,6 +73,9 @@ fn setup() -> World {
     let ord_vault = env.register(OrderVault, ());
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
+    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let index_tk = Address::generate(&env);
+
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
         &admin,
@@ -77,10 +83,9 @@ fn setup() -> World {
         &7u32,
         &soroban_sdk::String::from_str(&env, "ETH/USD Market"),
         &soroban_sdk::String::from_str(&env, "GM-ETH"),
+        &long_tk,
+        &long_tk,
     );
-
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let index_tk = Address::generate(&env);
 
     let ord_handler = env.register(OrderHandler, ());
     OHClient::new(&env, &ord_handler).initialize(&admin, &rs, &ds, &oracle_addr, &ord_vault);

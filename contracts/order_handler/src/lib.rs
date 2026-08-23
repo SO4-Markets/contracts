@@ -14,15 +14,20 @@
 //!   update_order  → modify trigger_price / acceptable_price / size before execution
 //!   freeze_order  → mark order as frozen (keeper-side circuit breaker)
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_decrease_position_utils::{decrease_position, DecreasePositionParams};
 use gmx_increase_position_utils::{increase_position, IncreasePositionParams};
 use gmx_keys::{
     account_order_list_key, keeper_heartbeat_timeout_key, last_keeper_activity_key,
-    liquidation_execution_fee_key, min_execution_fee_key,
+    liquidation_execution_fee_key,
     market_index_token_key, market_long_token_key, market_short_token_key,
-    max_leverage_key, max_swap_path_length_key, order_key, order_list_key,
+    max_leverage_key, order_key, order_list_key,
     position_fee_factor_key, position_key,
     open_interest_key,
     saved_funding_factor_per_second_key,
@@ -30,7 +35,7 @@ use gmx_keys::{
     trader_volume_key, trader_volume_window_start_key,
     roles, DEFAULT_KEEPER_HEARTBEAT_TIMEOUT, is_market_paused_key,
 };
-use gmx_math::{mul_div_wide, FLOAT_PRECISION};
+use gmx_math::mul_div_wide;
 use gmx_swap_utils::{swap_with_path, MAX_SWAP_PATH_LENGTH};
 pub use gmx_types::CreateOrderParams;
 use gmx_types::PositionProps;
@@ -610,7 +615,7 @@ impl OrderHandler {
                 acceptable_price: params.acceptable_price,
                 execution_fee: params.execution_fee,
                 min_output_amount: params.min_output_amount,
-                order_type: params.order_type.clone(),
+                order_type: params.order_type,
                 is_long: params.is_long,
                 updated_at_time: env.ledger().timestamp(),
             };
@@ -631,7 +636,7 @@ impl OrderHandler {
                     params.market.clone(),
                     params.size_delta_usd,
                     collateral_delta_amount,
-                    params.order_type.clone(),
+                    params.order_type,
                 ),
             );
             keys.push_back(key);
@@ -852,7 +857,7 @@ impl OrderHandler {
                 order.market.clone(),
                 order.size_delta_usd,
                 order.collateral_delta_amount,
-                order.order_type.clone(),
+                order.order_type,
             ),
         );
         key
@@ -1901,7 +1906,6 @@ mod tests {
     use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
     use gmx_keys::{position_key, roles};
     use gmx_types::TokenPrice;
-    use soroban_sdk::testutils::Ledger as _;
     use market_token::{MarketToken, MarketTokenClient as MtClient};
     use oracle::{Oracle, OracleClient as OClient};
     use order_vault::{OrderVault, OrderVaultClient as OVClient};
@@ -1912,8 +1916,9 @@ mod tests {
         BytesN, Env, Vec,
     };
 
-    const COLLATERAL: i128 = 1_000_0000;
+    const COLLATERAL: i128 = 10_000_000;
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,
@@ -1935,7 +1940,7 @@ mod tests {
     fn setup() -> World {
         let env = Env::default();
         env.mock_all_auths();
-        env.budget().reset_unlimited();
+        env.cost_estimate().budget().reset_unlimited();
 
         let admin = Address::generate(&env);
         let keeper = Address::generate(&env);
@@ -1955,6 +1960,13 @@ mod tests {
         let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
         OClient::new(&env, &oracle_addr).initialize(&admin, &rs, &ds, &passphrase);
 
+        let long_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let short_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+
         let market_tk = env.register(MarketToken, ());
         MtClient::new(&env, &market_tk).initialize(
             &admin,
@@ -1962,6 +1974,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(&env, "GMX Market Token"),
             &soroban_sdk::String::from_str(&env, "GM"),
+            &long_tk,
+            &short_tk,
         );
         rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
 
@@ -1990,13 +2004,6 @@ mod tests {
             &ord_vault,
         );
         rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
-
-        let long_tk = env
-            .register_stellar_asset_contract_v2(admin.clone())
-            .address();
-        let short_tk = env
-            .register_stellar_asset_contract_v2(admin.clone())
-            .address();
         let index_tk = Address::generate(&env);
 
         let ds_c = DsClient::new(&env, &ds);
@@ -2064,8 +2071,8 @@ mod tests {
 
     fn seed_pool(w: &World) {
         let lp = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.long_tk).mint(&lp, &10_000_0000i128);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&lp, &5_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&lp, &100_000_000_i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&lp, &50_000_000_i128);
         set_prices(w, 2000 * gmx_math::FLOAT_PRECISION);
         let k = DepositHandlerClient::new(&w.env, &w.dep_handler).create_deposit(
             &lp,
@@ -2074,8 +2081,8 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 10_000_0000,
-                short_token_amount: 5_000_0000,
+                long_token_amount: 100_000_000,
+                short_token_amount: 50_000_000,
                 min_market_tokens: 1,
                 execution_fee: 0,
             },
@@ -2150,7 +2157,7 @@ mod tests {
         let w = setup();
         let fp = gmx_math::FLOAT_PRECISION;
         let user = Address::generate(&w.env);
-        let collateral = 1_000_0000i128;
+        let collateral = 10_000_000_i128;
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &collateral);
         let trigger = 2000 * fp;
         set_prices(&w, trigger);
@@ -2191,7 +2198,7 @@ mod tests {
         let w = setup();
         let fp = gmx_math::FLOAT_PRECISION;
         let user = Address::generate(&w.env);
-        let collateral = 1_000_0000i128;
+        let collateral = 10_000_000_i128;
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &collateral);
         let trigger = 2500 * fp;
         set_prices(&w, 2000 * fp);
@@ -2373,11 +2380,11 @@ mod tests {
         let w = setup();
         let env = &w.env;
         let user = Address::generate(env);
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         soroban_sdk::token::Client::new(env, &w.long_tk).transfer(
             &user,
             &w.ord_vault,
-            &1_000_0000i128,
+            &10_000_000_i128,
         );
         let hc = OrderHandlerClient::new(env, &w.ord_handler);
         let ds_c = DsClient::new(env, &w.ds);
@@ -2388,8 +2395,8 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_collateral_token: w.long_tk.clone(),
                 swap_path: Vec::new(env),
-                size_delta_usd: 500_000_0000i128,
-                collateral_delta_amount: 1_000_0000i128,
+                size_delta_usd: 5_000_000_000_i128,
+                collateral_delta_amount: 10_000_000_i128,
                 trigger_price: 0,
                 acceptable_price: i128::MAX,
                 execution_fee: 0,
@@ -2424,11 +2431,11 @@ mod tests {
         seed_pool(&w);
         set_prices(&w, 2000 * gmx_math::FLOAT_PRECISION);
         let user = Address::generate(env);
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         soroban_sdk::token::Client::new(env, &w.long_tk).transfer(
             &user,
             &w.ord_vault,
-            &1_000_0000i128,
+            &10_000_000_i128,
         );
         let hc = OrderHandlerClient::new(env, &w.ord_handler);
         let ds_c = DsClient::new(env, &w.ds);
@@ -2439,8 +2446,8 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_collateral_token: w.long_tk.clone(),
                 swap_path: Vec::new(env),
-                size_delta_usd: 500_000_0000i128,
-                collateral_delta_amount: 1_000_0000i128,
+                size_delta_usd: 5_000_000_000_i128,
+                collateral_delta_amount: 10_000_000_i128,
                 trigger_price: 0,
                 acceptable_price: i128::MAX,
                 execution_fee: 0,
@@ -2663,12 +2670,12 @@ mod tests {
         seed_pool(&w);
 
         let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &10_000_000_i128);
 
         // Current price = 2000; trigger = 1500 → 2000 > 1500 → should revert
         let trigger = 1500 * fp;
         set_prices(&w, 2000 * fp);
-        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, trigger, 0);
+        let key = create_limit_swap_order(&w, &user, 10_000_000, &w.short_tk, trigger, 0);
 
         // Price is still 2000, above the 1500 trigger → UnsatisfiedTrigger
         set_prices(&w, 2000 * fp);
@@ -2683,12 +2690,12 @@ mod tests {
         seed_pool(&w);
 
         let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &10_000_000_i128);
 
         // trigger = 2000; price = 2000 → condition: 2000 <= 2000 → must execute
         let trigger = 2000 * fp;
         set_prices(&w, trigger);
-        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, trigger, 0);
+        let key = create_limit_swap_order(&w, &user, 10_000_000, &w.short_tk, trigger, 0);
 
         set_prices(&w, trigger);
         OrderHandlerClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
@@ -2713,12 +2720,12 @@ mod tests {
         seed_pool(&w);
 
         let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &10_000_000_i128);
 
         // trigger = 2500; current price = 2000 → 2000 <= 2500 → favorable
         let trigger = 2500 * fp;
         set_prices(&w, 2000 * fp);
-        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, trigger, 0);
+        let key = create_limit_swap_order(&w, &user, 10_000_000, &w.short_tk, trigger, 0);
 
         set_prices(&w, 2000 * fp);
         OrderHandlerClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
@@ -2743,10 +2750,10 @@ mod tests {
         seed_pool(&w);
 
         let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &10_000_000_i128);
 
         set_prices(&w, 2000 * fp);
-        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, 0, 0);
+        let key = create_limit_swap_order(&w, &user, 10_000_000, &w.short_tk, 0, 0);
 
         set_prices(&w, 2000 * fp);
         OrderHandlerClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
@@ -2768,11 +2775,11 @@ mod tests {
         seed_pool(&w);
 
         let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &10_000_000_i128);
 
         set_prices(&w, 2000 * fp);
         // min_output_amount = i128::MAX → impossible to satisfy
-        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, 0, i128::MAX);
+        let key = create_limit_swap_order(&w, &user, 10_000_000, &w.short_tk, 0, i128::MAX);
 
         set_prices(&w, 2000 * fp);
         // Must revert with PriceTooLow because output < min_output_amount
@@ -2787,11 +2794,11 @@ mod tests {
         seed_pool(&w);
 
         let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &10_000_000_i128);
 
         set_prices(&w, 2000 * fp);
         // min_output_amount = 1 → easy to satisfy
-        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, 0, 1);
+        let key = create_limit_swap_order(&w, &user, 10_000_000, &w.short_tk, 0, 1);
 
         set_prices(&w, 2000 * fp);
         OrderHandlerClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
@@ -2821,7 +2828,7 @@ mod tests {
         seed_pool(&w);
 
         let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &10_000_000_i128);
 
         set_prices(&w, 2000 * fp);
         // A single smallest-unit of short_tk (worth $1) converted at a
@@ -2851,11 +2858,11 @@ mod tests {
         );
 
         let user = Address::generate(env);
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         soroban_sdk::token::Client::new(env, &w.long_tk).transfer(
             &user,
             &w.ord_vault,
-            &1_000_0000i128,
+            &10_000_000_i128,
         );
 
         let fake_market = Address::generate(env);
@@ -2868,7 +2875,7 @@ mod tests {
                 initial_collateral_token: w.long_tk.clone(),
                 swap_path: Vec::from_array(env, [w.market_tk.clone(), fake_market]),
                 size_delta_usd: 0,
-                collateral_delta_amount: 1_000_0000i128,
+                collateral_delta_amount: 10_000_000_i128,
                 trigger_price: 0,
                 acceptable_price: 0,
                 execution_fee: 0,
@@ -2895,11 +2902,11 @@ mod tests {
         );
 
         let user = Address::generate(env);
-        StellarAssetClient::new(env, &w.short_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.short_tk).mint(&user, &10_000_000_i128);
         soroban_sdk::token::Client::new(env, &w.short_tk).transfer(
             &user,
             &w.ord_vault,
-            &1_000_0000i128,
+            &10_000_000_i128,
         );
 
         let hc = OrderHandlerClient::new(env, &w.ord_handler);
@@ -2911,7 +2918,7 @@ mod tests {
                 initial_collateral_token: w.short_tk.clone(),
                 swap_path: Vec::from_array(env, [w.market_tk.clone()]),
                 size_delta_usd: 0,
-                collateral_delta_amount: 1_000_0000i128,
+                collateral_delta_amount: 10_000_000_i128,
                 trigger_price: 0,
                 acceptable_price: 0,
                 execution_fee: 0,
@@ -2950,6 +2957,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market1"),
             &soroban_sdk::String::from_str(env, "M1"),
+            &w.long_tk,
+            &mid_tk,
         );
         let market_tk2 = env.register(MarketToken, ());
         MtClient::new(env, &market_tk2).initialize(
@@ -2958,6 +2967,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market2"),
             &soroban_sdk::String::from_str(env, "M2"),
+            &mid_tk,
+            &w.short_tk,
         );
 
         let ds_c = DsClient::new(env, &w.ds);
@@ -3022,10 +3033,10 @@ mod tests {
             ),
         );
 
-        let pool1_long: u128 = 10_000_0000;
-        let pool1_mid: u128 = 5_000_0000;
-        let pool2_mid: u128 = 10_000_0000;
-        let pool2_short: u128 = 5_000_0000;
+        let pool1_long: u128 = 100_000_000;
+        let pool1_mid: u128 = 50_000_000;
+        let pool2_mid: u128 = 100_000_000;
+        let pool2_short: u128 = 50_000_000;
 
         StellarAssetClient::new(env, &w.long_tk).mint(&market_tk1, &(pool1_long as i128));
         StellarAssetClient::new(env, &mid_tk).mint(&market_tk1, &(pool1_mid as i128));
@@ -3130,6 +3141,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market1"),
             &soroban_sdk::String::from_str(env, "M1"),
+            &w.long_tk,
+            &mid_tk,
         );
         let market_tk2 = env.register(MarketToken, ());
         MtClient::new(env, &market_tk2).initialize(
@@ -3138,6 +3151,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market2"),
             &soroban_sdk::String::from_str(env, "M2"),
+            &mid_tk,
+            &w.short_tk,
         );
 
         let ds_c = DsClient::new(env, &w.ds);
@@ -3202,30 +3217,30 @@ mod tests {
             ),
         );
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&market_tk1, &10_000_0000i128);
-        StellarAssetClient::new(env, &mid_tk).mint(&market_tk1, &5_000_0000i128);
-        StellarAssetClient::new(env, &mid_tk).mint(&market_tk2, &10_000_0000i128);
-        StellarAssetClient::new(env, &w.short_tk).mint(&market_tk2, &5_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&market_tk1, &100_000_000_i128);
+        StellarAssetClient::new(env, &mid_tk).mint(&market_tk1, &50_000_000_i128);
+        StellarAssetClient::new(env, &mid_tk).mint(&market_tk2, &100_000_000_i128);
+        StellarAssetClient::new(env, &w.short_tk).mint(&market_tk2, &50_000_000_i128);
 
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::pool_amount_key(env, &market_tk1, &w.long_tk),
-            &10_000_0000u128,
+            &100_000_000_u128,
         );
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::pool_amount_key(env, &market_tk1, &mid_tk),
-            &5_000_0000u128,
+            &50_000_000_u128,
         );
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::pool_amount_key(env, &market_tk2, &mid_tk),
-            &10_000_0000u128,
+            &100_000_000_u128,
         );
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::pool_amount_key(env, &market_tk2, &w.short_tk),
-            &5_000_0000u128,
+            &50_000_000_u128,
         );
 
         let amount_in: i128 = 1_000;
@@ -3697,6 +3712,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market2"),
             &soroban_sdk::String::from_str(env, "M2"),
+            &w.long_tk,
+            &w.short_tk,
         );
         let hc = OrderHandlerClient::new(env, &w.ord_handler);
         hc.create_order(
@@ -3734,6 +3751,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market2"),
             &soroban_sdk::String::from_str(env, "M2"),
+            &w.long_tk,
+            &w.short_tk,
         );
         let market_tk3 = env.register(MarketToken, ());
         MtClient::new(env, &market_tk3).initialize(
@@ -3742,6 +3761,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market3"),
             &soroban_sdk::String::from_str(env, "M3"),
+            &w.long_tk,
+            &w.short_tk,
         );
         // MarketSwap requires vault collateral (is_increase_or_swap = true)
         StellarAssetClient::new(env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
@@ -4192,7 +4213,7 @@ mod tests {
     #[test]
     fn sequential_pool_amount_writes_both_accumulate() {
         let w = setup();
-        let fp = gmx_math::FLOAT_PRECISION;
+        let _fp = gmx_math::FLOAT_PRECISION;
         let tp = gmx_math::TOKEN_PRECISION;
         let ds_c = DsClient::new(&w.env, &w.ds);
         let pool_key = gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk);

@@ -56,7 +56,7 @@ struct World {
 fn setup() -> World {
     let env = Env::default();
     env.mock_all_auths();
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
 
     let admin = Address::generate(&env);
     let keeper = Address::generate(&env);
@@ -75,6 +75,9 @@ fn setup() -> World {
     let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
     OClient::new(&env, &oracle_addr).initialize(&admin, &rs, &ds, &passphrase);
 
+    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
         &admin,
@@ -82,6 +85,8 @@ fn setup() -> World {
         &7u32,
         &soroban_sdk::String::from_str(&env, "GMX Market Token"),
         &soroban_sdk::String::from_str(&env, "GM"),
+        &long_tk,
+        &short_tk,
     );
     rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
 
@@ -101,8 +106,6 @@ fn setup() -> World {
         .initialize(&admin, &rs, &ds, &oracle_addr, &ord_vault);
     rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
 
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
     let index_tk = Address::generate(&env);
 
     let ds_c = DsClient::new(&env, &ds);
@@ -217,10 +220,9 @@ fn validate_position_rejects_below_min_collateral() {
         increased_at_time: 0,
         decreased_at_time: 0,
         is_long: true,
-        expiry_ledger: None,
     };
 
-    let collateral_price = PriceProps { min: fp, max: fp }; // $1 USDC
+    let _collateral_price = PriceProps { min: fp, max: fp }; // $1 USDC
     let index_price = PriceProps { min: 100 * fp, max: 100 * fp };
 
     // Must panic: $9 collateral < $10 minimum (10% of $100 size)
@@ -395,9 +397,9 @@ fn insufficient_collateral_position_is_liquidatable() {
         short_token: w.short_tk.clone(),
     };
 
-    let collateral_amount = 20 * tp as i128; // $20
+    let collateral_amount = 20 * tp; // $20
     let size_in_usd = 1_000 * fp;            // $1 000 position
-    let size_in_tokens = 10 * tp as i128;    // 10 tokens at $100
+    let size_in_tokens = 10 * tp;    // 10 tokens at $100
 
     let position = PositionProps {
         account: w.user.clone(),
@@ -414,7 +416,6 @@ fn insufficient_collateral_position_is_liquidatable() {
         increased_at_time: 0,
         decreased_at_time: 0,
         is_long: true,
-        expiry_ledger: None,
     };
 
     let index_price = PriceProps { min: 100 * fp, max: 100 * fp }; // $100

@@ -44,7 +44,7 @@ struct World {
 fn setup() -> World {
     let env = Env::default();
     env.mock_all_auths();
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
 
     let admin = Address::generate(&env);
     let keeper = Address::generate(&env);
@@ -63,6 +63,9 @@ fn setup() -> World {
     let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
     OClient::new(&env, &oracle_addr).initialize(&admin, &rs, &ds, &passphrase);
 
+    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
         &admin,
@@ -70,6 +73,8 @@ fn setup() -> World {
         &7u32,
         &soroban_sdk::String::from_str(&env, "GMX Market Token"),
         &soroban_sdk::String::from_str(&env, "GM"),
+        &long_tk,
+        &short_tk,
     );
     rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
 
@@ -89,8 +94,6 @@ fn setup() -> World {
         .initialize(&admin, &rs, &ds, &oracle_addr, &ord_vault);
     rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
 
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
     let index_tk = Address::generate(&env);
 
     let ds_c = DsClient::new(&env, &ds);
@@ -380,7 +383,7 @@ fn pool_receives_borrowing_fee_on_position_decrease() {
     seed_pool(&w);
 
     let pool_key = gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk);
-    let pool_before = ds_c.get_u128(&pool_key);
+    let _pool_before = ds_c.get_u128(&pool_key);
 
     let collateral = 10 * TOKEN_PRECISION;
     StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &collateral);

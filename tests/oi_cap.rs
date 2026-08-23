@@ -41,6 +41,7 @@ use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, E
 const ONE_TOKEN: i128 = 10_000_000;
 const ONE_USD: i128 = FLOAT_PRECISION;
 
+#[allow(dead_code)]
 struct TestWorld {
     env: Env,
     admin: Address,
@@ -88,16 +89,6 @@ fn setup() -> TestWorld {
     let ord_vault = env.register(OrderVault, ());
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
-    // Market token
-    let market_tk = env.register(MarketToken, ());
-    MtClient::new(&env, &market_tk).initialize(
-        &admin,
-        &rs,
-        &7u32,
-        &soroban_sdk::String::from_str(&env, "ETH Market"),
-        &soroban_sdk::String::from_str(&env, "GM-ETH"),
-    );
-
     // Tokens
     let long_tk = env
         .register_stellar_asset_contract_v2(admin.clone())
@@ -109,6 +100,18 @@ fn setup() -> TestWorld {
         .register_stellar_asset_contract_v2(admin.clone())
         .address();
     let index_tk = Address::generate(&env);
+
+    // Market token
+    let market_tk = env.register(MarketToken, ());
+    MtClient::new(&env, &market_tk).initialize(
+        &admin,
+        &rs,
+        &7u32,
+        &soroban_sdk::String::from_str(&env, "ETH Market"),
+        &soroban_sdk::String::from_str(&env, "GM-ETH"),
+        &long_tk,
+        &short_tk,
+    );
 
     // Order handler
     let ord_handler = env.register(OrderHandler, ());
@@ -426,6 +429,6 @@ fn oi_cap_boundary_via_real_multi_trader_multi_collateral_orders_exact_boundary_
 
     // A further increase from either trader, in either collateral token, must
     // now revert — the aggregate is exactly at the cap.
-    let over = try_real_increase(&w, &w.trader1, &w.long_tk, 10 * ONE_TOKEN, 1 * ONE_USD, true);
+    let over = try_real_increase(&w, &w.trader1, &w.long_tk, 10 * ONE_TOKEN, ONE_USD, true);
     assert!(!over, "any further long increase once the aggregate cap is hit must fail");
 }

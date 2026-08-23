@@ -15,9 +15,8 @@
 #![cfg(test)]
 
 use data_store::{DataStore, DataStoreClient as DsClient};
-use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
 use gmx_keys::{
-    market_index_token_key, market_long_token_key, market_short_token_key, order_key,
+    market_index_token_key, market_long_token_key, market_short_token_key,
     position_key, roles,
 };
 use gmx_math::FLOAT_PRECISION;
@@ -27,11 +26,12 @@ use oracle::{Oracle, OracleClient as OClient};
 use order_handler::{OrderHandler, OrderHandlerClient as OHClient};
 use order_vault::{OrderVault, OrderVaultClient as OVClient};
 use role_store::{RoleStore, RoleStoreClient as RsClient};
-use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, BytesN, Env};
+use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env};
 
 const ONE_TOKEN: i128 = 10_000_000; // Stellar 7-decimal precision
 const ONE_USD: i128 = FLOAT_PRECISION; // 10^30
 
+#[allow(dead_code)]
 struct TestWorld {
     env: Env,
     admin: Address,
@@ -76,6 +76,12 @@ fn setup() -> TestWorld {
     let ord_vault = env.register(OrderVault, ());
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
+    // Tokens
+    let long_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let index_tk = Address::generate(&env);
+
     // Market token
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
@@ -84,13 +90,9 @@ fn setup() -> TestWorld {
         &7u32,
         &soroban_sdk::String::from_str(&env, "ETH Market"),
         &soroban_sdk::String::from_str(&env, "GM-ETH"),
+        &long_tk,
+        &long_tk,
     );
-
-    // Tokens
-    let long_tk = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
-    let index_tk = Address::generate(&env);
 
     // Order handler
     let ord_handler = env.register(OrderHandler, ());
@@ -139,7 +141,7 @@ fn stop_loss_not_triggered_above_trigger_price() {
     );
 
     // Step 2: Create stop-loss decrease order
-    let order_key = oh_c.create_order(&CreateOrderParams {
+    let order_key = oh_c.create_order(&w.trader, &CreateOrderParams {
         receiver: w.trader.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -156,21 +158,21 @@ fn stop_loss_not_triggered_above_trigger_price() {
     });
 
     // Step 3: Oracle submits price above trigger (1,950 USD)
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.index_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.index_tk.clone(),
             min: 1950 * ONE_USD,
             max: 1950 * ONE_USD,
-        },
+        }]),
     );
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.long_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.long_tk.clone(),
             min: ONE_USD,
             max: ONE_USD,
-        },
+        }]),
     );
 
     // Step 4: Try to execute - should fail (price not low enough)
@@ -183,7 +185,7 @@ fn stop_loss_triggers_at_exact_trigger_price() {
     let w = setup();
     let oh_c = OHClient::new(&w.env, &w.ord_handler);
     let oracle_c = OClient::new(&w.env, &w.oracle);
-    let ds_c = DsClient::new(&w.env, &w.ds);
+    let _ds_c = DsClient::new(&w.env, &w.ds);
 
     // Transfer collateral to vault
     StellarAssetClient::new(&w.env, &w.long_tk).transfer(
@@ -193,7 +195,7 @@ fn stop_loss_triggers_at_exact_trigger_price() {
     );
 
     // Create stop-loss decrease order
-    let order_key = oh_c.create_order(&CreateOrderParams {
+    let order_key = oh_c.create_order(&w.trader, &CreateOrderParams {
         receiver: w.trader.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -210,24 +212,24 @@ fn stop_loss_triggers_at_exact_trigger_price() {
     });
 
     // Create a mock position first (simplified)
-    let pos_key = position_key(&w.env, &w.trader, &w.market_tk, &w.long_tk, true);
+    let _pos_key = position_key(&w.env, &w.trader, &w.market_tk, &w.long_tk, true);
     
     // Oracle submits price at trigger (1,900 USD)
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.index_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.index_tk.clone(),
             min: 1900 * ONE_USD,
             max: 1900 * ONE_USD,
-        },
+        }]),
     );
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.long_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.long_tk.clone(),
             min: ONE_USD,
             max: ONE_USD,
-        },
+        }]),
     );
 
     // Execute order - should succeed
@@ -249,7 +251,7 @@ fn stop_loss_triggers_below_trigger_price() {
     );
 
     // Create stop-loss decrease order
-    let order_key = oh_c.create_order(&CreateOrderParams {
+    let order_key = oh_c.create_order(&w.trader, &CreateOrderParams {
         receiver: w.trader.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -266,21 +268,21 @@ fn stop_loss_triggers_below_trigger_price() {
     });
 
     // Oracle submits price below trigger (1,890 USD)
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.index_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.index_tk.clone(),
             min: 1890 * ONE_USD,
             max: 1890 * ONE_USD,
-        },
+        }]),
     );
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.long_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.long_tk.clone(),
             min: ONE_USD,
             max: ONE_USD,
-        },
+        }]),
     );
 
     // Execute order - should succeed
@@ -302,7 +304,7 @@ fn stop_loss_slippage_protection_rejects_worse_price() {
     );
 
     // Create stop-loss order with tight acceptable price
-    let order_key = oh_c.create_order(&CreateOrderParams {
+    let order_key = oh_c.create_order(&w.trader, &CreateOrderParams {
         receiver: w.trader.clone(),
         market: w.market_tk.clone(),
         initial_collateral_token: w.long_tk.clone(),
@@ -319,21 +321,21 @@ fn stop_loss_slippage_protection_rejects_worse_price() {
     });
 
     // Oracle submits price below acceptable (1,840 USD - worse than 1,850)
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.index_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.index_tk.clone(),
             min: 1840 * ONE_USD,
             max: 1840 * ONE_USD,
-        },
+        }]),
     );
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.keeper,
-        &w.long_tk,
-        &TokenPrice {
+        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
+            token: w.long_tk.clone(),
             min: ONE_USD,
             max: ONE_USD,
-        },
+        }]),
     );
 
     // Execute order - should fail due to slippage

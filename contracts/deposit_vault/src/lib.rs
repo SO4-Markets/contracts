@@ -196,15 +196,15 @@ mod tests {
         let token_client = TestTokenClient::new(&env, &token);
 
         // Transfer tokens into the vault
-        token_client.mint(&token_owner, &vault, &1_000_0000i128);
+        token_client.mint(&token_owner, &vault, &10_000_000_i128);
 
         // record_transfer_in should return the delta (1_000_0000)
         let delta = vault_client.record_transfer_in(&token);
-        assert_eq!(delta, 1_000_0000);
+        assert_eq!(delta, 10_000_000);
 
         // get_recorded_balance should now reflect the actual balance
         let recorded = vault_client.get_recorded_balance(&token);
-        assert_eq!(recorded, 1_000_0000);
+        assert_eq!(recorded, 10_000_000);
 
         // Second transfer: delta should be only the new amount
         token_client.mint(&token_owner, &vault, &500_0000i128);
@@ -212,7 +212,7 @@ mod tests {
         assert_eq!(delta2, 500_0000);
 
         let recorded2 = vault_client.get_recorded_balance(&token);
-        assert_eq!(recorded2, 1_500_0000);
+        assert_eq!(recorded2, 15_000_000);
     }
 
     #[test]
@@ -225,11 +225,11 @@ mod tests {
 
         let vault_client = DepositVaultClient::new(&env, &vault);
         let token_client = TestTokenClient::new(&env, &token);
-        token_client.mint(&token_owner, &vault, &1_000_0000i128);
+        token_client.mint(&token_owner, &vault, &10_000_000_i128);
         vault_client.record_transfer_in(&token);
 
         let non_controller = Address::generate(&env);
-        let result = vault_client.try_transfer_out(&non_controller, &token, &receiver, &1_000_0000);
+        let result = vault_client.try_transfer_out(&non_controller, &token, &receiver, &10_000_000);
         assert!(result.is_err());
     }
 
@@ -243,7 +243,7 @@ mod tests {
 
         let vault_client = DepositVaultClient::new(&env, &vault);
         let token_client = TestTokenClient::new(&env, &token);
-        token_client.mint(&token_owner, &vault, &1_000_0000i128);
+        token_client.mint(&token_owner, &vault, &10_000_000_i128);
         vault_client.record_transfer_in(&token);
 
         let result = vault_client.try_transfer_out(&admin, &token, &receiver, &0);
@@ -260,7 +260,7 @@ mod tests {
 
         let vault_client = DepositVaultClient::new(&env, &vault);
         let token_client = TestTokenClient::new(&env, &token);
-        token_client.mint(&token_owner, &vault, &1_000_0000i128);
+        token_client.mint(&token_owner, &vault, &10_000_000_i128);
         vault_client.record_transfer_in(&token);
 
         let result = vault_client.try_transfer_out(&admin, &token, &receiver, &(-1i128));
@@ -277,7 +277,7 @@ mod tests {
 
         let vault_client = DepositVaultClient::new(&env, &vault);
         let token_client = TestTokenClient::new(&env, &token);
-        token_client.mint(&token_owner, &vault, &1_000_0000i128);
+        token_client.mint(&token_owner, &vault, &10_000_000_i128);
         vault_client.record_transfer_in(&token);
 
         vault_client.transfer_out(&admin, &token, &receiver, &400_0000);

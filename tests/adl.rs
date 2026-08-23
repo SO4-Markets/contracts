@@ -61,6 +61,7 @@ const ONE_USD: i128 = FLOAT_PRECISION;
 
 // ─── Test world ────────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 struct TestWorld {
     env: Env,
     admin: Address,
@@ -113,16 +114,6 @@ fn setup() -> TestWorld {
     let ord_vault = env.register(OrderVault, ());
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
-    // Market token (LP token / pool custodian)
-    let market_tk = env.register(MarketToken, ());
-    MtClient::new(&env, &market_tk).initialize(
-        &admin,
-        &rs,
-        &7u32,
-        &soroban_sdk::String::from_str(&env, "ADL Test Market"),
-        &soroban_sdk::String::from_str(&env, "GM-ADL"),
-    );
-
     // Underlying tokens
     let long_tk = env
         .register_stellar_asset_contract_v2(admin.clone())
@@ -131,6 +122,18 @@ fn setup() -> TestWorld {
         .register_stellar_asset_contract_v2(admin.clone())
         .address();
     let index_tk = Address::generate(&env);
+
+    // Market token (LP token / pool custodian)
+    let market_tk = env.register(MarketToken, ());
+    MtClient::new(&env, &market_tk).initialize(
+        &admin,
+        &rs,
+        &7u32,
+        &soroban_sdk::String::from_str(&env, "ADL Test Market"),
+        &soroban_sdk::String::from_str(&env, "GM-ADL"),
+        &long_tk,
+        &short_tk,
+    );
 
     // Handlers
     let dep_handler = env.register(DepositHandler, ());

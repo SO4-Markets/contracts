@@ -86,6 +86,7 @@ trait IOrderHandler {
     fn get_order(env: Env, key: BytesN<32>) -> Option<OrderProps>;
 }
 
+#[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "MarketTokenClient")]
 trait IMarketToken {
     fn total_supply(env: Env) -> i128;
@@ -242,14 +243,6 @@ impl Reader {
             short_funding_amount_per_size,
         }
     }
-
-    /// Aggregate protocol-wide statistics across the supplied markets (issue #251).
-    ///
-    /// Returns total pool value (TVL), long/short open interest, and accumulated
-    /// (unclaimed) fees — all in USD at the current oracle prices — plus the
-    /// market count and the ledger the snapshot was taken at. Lets the frontend
-    /// fetch headline numbers in one call instead of N per-market round-trips.
-    ///
 
     /// Issue #207: per-hour funding rate view for the frontend.
     ///
@@ -419,6 +412,7 @@ impl Reader {
     ///
     /// Reads position from the canonical location (order_handler storage) via cross-contract call.
     /// This ensures all consumers (liquidation_handler, adl_handler, reader) agree on position state.
+    #[allow(clippy::too_many_arguments)]
     pub fn get_position_info(
         env: Env,
         data_store: Address,
@@ -434,10 +428,7 @@ impl Reader {
         // Bump TTL on read so monitoring via Reader keeps positions alive.
         OrderHandlerClient::new(&env, &order_handler).bump_position_ttl(&env.current_contract_address(), &pk);
         let position: PositionProps =
-            match OrderHandlerClient::new(&env, &order_handler).get_position(&pk) {
-                Some(p) => p,
-                None => return None,
-            };
+            OrderHandlerClient::new(&env, &order_handler).get_position(&pk)?;
 
         let market_props =
             Self::get_market(env.clone(), data_store.clone(), position.market.clone());
@@ -533,6 +524,7 @@ impl Reader {
     /// (claimable side) and `get_position_fees` (owed side) apply during a real
     /// decrease, so the returned amounts match what would actually be
     /// credited/debited if the position were decreased right now.
+    #[allow(clippy::too_many_arguments)]
     pub fn get_claimable_funding_amount(
         env: Env,
         data_store: Address,
@@ -629,6 +621,7 @@ impl Reader {
     /// Return whether a position is currently liquidatable at oracle prices.
     ///
     /// Reads position from the canonical location (order_handler storage) via cross-contract call.
+    #[allow(clippy::too_many_arguments)]
     pub fn is_position_liquidatable(
         env: Env,
         data_store: Address,
@@ -756,10 +749,7 @@ impl Reader {
     ) -> Option<PositionInfo> {
         OrderHandlerClient::new(&env, &order_handler).bump_position_ttl(&env.current_contract_address(), &position_key);
         let position: PositionProps =
-            match OrderHandlerClient::new(&env, &order_handler).get_position(&position_key) {
-                Some(p) => p,
-                None => return None,
-            };
+            OrderHandlerClient::new(&env, &order_handler).get_position(&position_key)?;
 
         let market_props =
             Self::get_market(env.clone(), data_store.clone(), position.market.clone());
@@ -1032,10 +1022,7 @@ impl Reader {
         position_key: BytesN<32>,
     ) -> Option<PositionLeverage> {
         let position: PositionProps =
-            match OrderHandlerClient::new(&env, &order_handler).get_position(&position_key) {
-                Some(p) => p,
-                None => return None,
-            };
+            OrderHandlerClient::new(&env, &order_handler).get_position(&position_key)?;
 
         let market_props =
             Self::get_market(env.clone(), data_store.clone(), position.market.clone());
@@ -1105,6 +1092,7 @@ impl Reader {
     ///
     /// Pagination: the `offset` first matching entries are skipped; at most `limit`
     /// entries are returned. No state is written.
+    #[allow(clippy::too_many_arguments)]
     pub fn get_liquidatable_positions(
         env: Env,
         data_store: Address,
@@ -1245,7 +1233,7 @@ impl Reader {
         let mut candidates: Vec<AdlCandidate> = Vec::new(&env);
 
         let mut i = 0u32;
-        while i < pos_count && (candidates.len() as u32) < limit {
+        while i < pos_count && candidates.len() < limit {
             let batch_end = if i + 100 > pos_count { pos_count } else { i + 100 };
             let position_keys = ds.get_bytes32_set_at(&pos_list_key, &i, &batch_end);
 
@@ -1345,7 +1333,7 @@ impl Reader {
     ) -> SwapEstimate {
         let oracle_client = OracleClient::new(&env, &oracle);
 
-        if swap_path.len() == 0 {
+        if swap_path.is_empty() {
             return SwapEstimate {
                 token_out: token_in.clone(),
                 amount_out: amount_in,
@@ -1637,7 +1625,7 @@ mod tests {
         let w = setup();
         let fp = FLOAT_PRECISION;
         let oi = 500 * fp as u128;
-        let price = 1 * fp;
+        let price = fp;
 
         let m1 = seed_market(&w, 50, 50, oi, oi, 0, 0, price);
         let m2 = seed_market(&w, 70, 70, oi, oi, 0, 0, price);
@@ -1826,7 +1814,7 @@ mod tests {
         //   collateral_amount = 500 tokens (long_tk at $1 each = $500)
         //   No fees (all fee factors and per-size trackers are zero)
         //   Expected: 10_000 * 100 / 500 = 2000 bps (20×)
-        let tk_prec = TOKEN_PRECISION as i128;
+        let tk_prec = TOKEN_PRECISION;
         let position = PositionProps {
             account: trader.clone(),
             market: market_tk.clone(),
@@ -1952,7 +1940,7 @@ mod tests {
         RsClient::new(&env, &rs).grant_role(&admin, &ord_handler, &roles::controller(&env));
 
         // Synthetic long position: size=10k @ $1 entry, now index=$2 → $10k profit.
-        let tk_prec = TOKEN_PRECISION as i128;
+        let tk_prec = TOKEN_PRECISION;
         let position = PositionProps {
             account: trader.clone(),
             market: market_tk.clone(),
@@ -2039,7 +2027,7 @@ mod tests {
         OHClient::new(&env, &ord_handler).initialize(&admin, &rs, &ds, &oracle, &dummy_vault);
         RsClient::new(&env, &rs).grant_role(&admin, &ord_handler, &roles::controller(&env));
 
-        let tk_prec = TOKEN_PRECISION as i128;
+        let tk_prec = TOKEN_PRECISION;
         let position = PositionProps {
             account: trader.clone(),
             market: market_tk.clone(),

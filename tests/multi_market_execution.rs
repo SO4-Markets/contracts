@@ -31,6 +31,7 @@ use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, E
 const ONE_TOKEN: i128 = 10_000_000; // 7-decimal Stellar precision
 const ONE_USD: i128 = FLOAT_PRECISION;
 
+#[allow(dead_code)]
 struct World {
     env: Env,
     admin: Address,
@@ -86,6 +87,10 @@ fn setup() -> World {
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
     // ── ETH/USD market ────────────────────────────────────────────────────────
+    let weth = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let usdc = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let eth_idx = Address::generate(&env);
+
     let eth_market = env.register(MarketToken, ());
     MtClient::new(&env, &eth_market).initialize(
         &admin,
@@ -93,13 +98,15 @@ fn setup() -> World {
         &7u32,
         &soroban_sdk::String::from_str(&env, "ETH/USD Market"),
         &soroban_sdk::String::from_str(&env, "GM-ETH"),
+        &weth,
+        &usdc,
     );
 
-    let weth = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let usdc = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let eth_idx = Address::generate(&env);
-
     // ── BTC/USD market ────────────────────────────────────────────────────────
+    let wbtc = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    // BTC/USD also uses usdc as its short token
+    let btc_idx = Address::generate(&env);
+
     let btc_market = env.register(MarketToken, ());
     MtClient::new(&env, &btc_market).initialize(
         &admin,
@@ -107,11 +114,9 @@ fn setup() -> World {
         &7u32,
         &soroban_sdk::String::from_str(&env, "BTC/USD Market"),
         &soroban_sdk::String::from_str(&env, "GM-BTC"),
+        &wbtc,
+        &usdc,
     );
-
-    let wbtc = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    // BTC/USD also uses usdc as its short token
-    let btc_idx = Address::generate(&env);
 
     // Handlers
     let dep_handler = env.register(DepositHandler, ());

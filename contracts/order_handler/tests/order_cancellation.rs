@@ -27,6 +27,7 @@ use soroban_sdk::{
     Address, Env, Vec,
 };
 
+#[allow(dead_code)]
 struct World {
     env: Env,
     admin: Address,
@@ -46,7 +47,7 @@ struct World {
 fn setup() -> World {
     let env = Env::default();
     env.mock_all_auths();
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
 
     let admin = Address::generate(&env);
     let keeper = Address::generate(&env);
@@ -65,6 +66,9 @@ fn setup() -> World {
     let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
     OClient::new(&env, &oracle_addr).initialize(&admin, &rs, &ds, &passphrase);
 
+    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
         &admin,
@@ -72,6 +76,8 @@ fn setup() -> World {
         &7u32,
         &soroban_sdk::String::from_str(&env, "GMX Market Token"),
         &soroban_sdk::String::from_str(&env, "GM"),
+        &long_tk,
+        &short_tk,
     );
     rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
 
@@ -91,8 +97,6 @@ fn setup() -> World {
         .initialize(&admin, &rs, &ds, &oracle_addr, &ord_vault);
     rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
 
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
     let index_tk = Address::generate(&env);
 
     let ds_c = DsClient::new(&env, &ds);
@@ -117,6 +121,7 @@ fn setup() -> World {
     }
 }
 
+#[allow(dead_code)]
 fn seed_pool(w: &World) {
     let lp = Address::generate(&w.env);
     StellarAssetClient::new(&w.env, &w.long_tk).mint(&lp, &(10_000 * TOKEN_PRECISION));

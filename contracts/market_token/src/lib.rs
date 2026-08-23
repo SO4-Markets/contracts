@@ -4,6 +4,11 @@
 //! by `market_factory`. Mint and burn are gated to CONTROLLER role (held by
 //! deposit_handler / withdrawal_handler). All other SEP-41 methods are public.
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 
 use gmx_keys::roles;
 use soroban_sdk::{
@@ -73,6 +78,7 @@ impl MarketToken {
     // ── Initializer ──────────────────────────────────────────────────────────
 
     /// Called once by market_factory immediately after deploying this contract.
+    #[allow(clippy::too_many_arguments)]
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -451,9 +457,9 @@ mod tests {
         let user = Address::generate(&env);
 
         assert_eq!(client.balance(&user), 0);
-        client.mint(&admin, &user, &1_000_0000i128); // 1000.0000000 tokens
-        assert_eq!(client.balance(&user), 1_000_0000);
-        assert_eq!(client.total_supply(), 1_000_0000);
+        client.mint(&admin, &user, &10_000_000_i128); // 1000.0000000 tokens
+        assert_eq!(client.balance(&user), 10_000_000);
+        assert_eq!(client.total_supply(), 10_000_000);
     }
 
     #[test]
@@ -573,7 +579,7 @@ mod tests {
             .register_stellar_asset_contract_v2(admin.clone())
             .address();
 
-        client.mint(&admin, &receiver, &1_000_0000i128);
+        client.mint(&admin, &receiver, &10_000_000_i128);
         client.withdraw_from_pool(&admin, &unregistered, &receiver, &100_0000i128);
     }
 
@@ -584,15 +590,15 @@ mod tests {
         let user = Address::generate(&env);
         let client = MarketTokenClient::new(&env, &mt_id);
 
-        client.mint(&admin, &user, &5_000_0000i128);
+        client.mint(&admin, &user, &50_000_000_i128);
         assert_eq!(
             client.balance(&user),
-            5_000_0000,
+            50_000_000,
             "balance must reflect minted amount"
         );
         assert_eq!(
             client.total_supply(),
-            5_000_0000,
+            50_000_000,
             "total supply must grow by minted amount"
         );
     }
@@ -604,10 +610,10 @@ mod tests {
         let user = Address::generate(&env);
         let client = MarketTokenClient::new(&env, &mt_id);
 
-        client.mint(&admin, &user, &1_000_0000i128);
-        assert_eq!(client.total_supply(), 1_000_0000);
+        client.mint(&admin, &user, &10_000_000_i128);
+        assert_eq!(client.total_supply(), 10_000_000);
 
-        client.burn(&user, &1_000_0000i128);
+        client.burn(&user, &10_000_000_i128);
         assert_eq!(
             client.balance(&user),
             0,

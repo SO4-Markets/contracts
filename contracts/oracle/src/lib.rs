@@ -18,9 +18,14 @@
 //!   Keys are stored as: keeper_public_key_prefix ‖ sha256(pubkey_bytes) → BytesN<32> pubkey prefix.
 //!   We use a simple approach: keepers are registered by index (u32), stored directly.
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use gmx_keys::{keeper_public_key_prefix, stable_price_key, market_list_key, market_index_token_key, market_long_token_key, market_short_token_key};
+use gmx_keys::{keeper_public_key_prefix, stable_price_key};
 use gmx_types::{PriceProps, TokenPrice};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
@@ -449,7 +454,7 @@ impl Oracle {
     /// After registration, `check_circuit_breaker` uses this index instead of
     /// scanning every market. Call this once per (token, market) pair when a
     /// market is deployed.
-    pub fn register_market_for_circuit_breaker(
+    pub fn register_market_for_breaker(
         env: Env,
         caller: Address,
         token: Address,
@@ -708,7 +713,10 @@ mod tests {
     use data_store::{DataStore, DataStoreClient as DsClient};
     use gmx_keys::roles;
     use role_store::{RoleStore, RoleStoreClient as RsClient};
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, Events as _},
+        Env, IntoVal, Val,
+    };
 
     fn setup(env: &Env) -> (Address, Address, Address, Address) {
         let admin = Address::generate(env);
@@ -937,14 +945,23 @@ mod tests {
         client.rotate_signer(&admin, &1u32, &pubkey_b);
 
         let events = env.events().all();
-        let rotation_event = events
-            .iter()
-            .find(|(_, topics, _)| topics.contains(&soroban_sdk::Val::from(symbol_short!("sig_rot"))))
-            .expect("sig_rot event must be emitted");
-        let payload: OracleSignerRotated = soroban_sdk::FromVal::from_val(&env, &rotation_event.2);
-        assert_eq!(payload.keeper_index, 1);
-        assert_eq!(payload.old_signer, pubkey_a);
-        assert_eq!(payload.new_signer, pubkey_b);
+        let expected_topics: Vec<Val> = (symbol_short!("sig_rot"),).into_val(&env);
+        let expected_payload = OracleSignerRotated {
+            keeper_index: 1,
+            old_signer: pubkey_a.clone(),
+            new_signer: pubkey_b.clone(),
+        };
+        assert_eq!(
+            events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    oracle_id.clone(),
+                    expected_topics,
+                    expected_payload.into_val(&env)
+                )
+            ]
+        );
     }
 
     /// rotate_signer called by a non-admin must panic with Unauthorized.

@@ -10,13 +10,18 @@
 //!   6. Validate leverage and OI limits.
 //!   7. Persist updated position.
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{account_position_list_key, collateral_sum_key, max_position_size_usd_key, pool_amount_key, claimable_fee_amount_key, position_key, position_list_key};
 use gmx_market_utils::{
     apply_delta_to_open_interest, apply_delta_to_open_interest_in_tokens,
 };
-use gmx_math::{mul_div_wide, FLOAT_PRECISION, TOKEN_PRECISION};
+use gmx_math::{mul_div_wide, TOKEN_PRECISION};
 use gmx_position_utils::get_position_fees;
 use gmx_pricing_utils::get_execution_price;
 use gmx_types::{MarketProps, PositionProps, PriceProps};
@@ -251,6 +256,7 @@ mod tests {
     /// 1 whole token at 7-decimal Stellar precision.
     const ONE_TOKEN: i128 = 10_000_000; // 10^7
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,
@@ -298,19 +304,6 @@ mod tests {
         let vault = env.register(OrderVault, ());
         OVClient::new(&env, &vault).initialize(&admin, &rs);
 
-        // Market token (LP + pool custodian)
-        let market_tk = env.register(MarketToken, ());
-        MtClient::new(&env, &market_tk).initialize(
-            &admin,
-            &rs,
-            &7u32,
-            &soroban_sdk::String::from_str(&env, "SO4 Market"),
-            &soroban_sdk::String::from_str(&env, "GM"),
-        );
-
-        // Grant market_token CONTROLLER so it can be used as pool custodian
-        rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
-
         // Underlying tokens
         let long_tk = env
             .register_stellar_asset_contract_v2(admin.clone())
@@ -319,6 +312,21 @@ mod tests {
             .register_stellar_asset_contract_v2(admin.clone())
             .address();
         let index_tk = Address::generate(&env);
+
+        // Market token (LP + pool custodian)
+        let market_tk = env.register(MarketToken, ());
+        MtClient::new(&env, &market_tk).initialize(
+            &admin,
+            &rs,
+            &7u32,
+            &soroban_sdk::String::from_str(&env, "SO4 Market"),
+            &soroban_sdk::String::from_str(&env, "GM"),
+            &long_tk,
+            &short_tk,
+        );
+
+        // Grant market_token CONTROLLER so it can be used as pool custodian
+        rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
 
         // Register market in DataStore
         let ds_c = DsClient::new(&env, &ds);

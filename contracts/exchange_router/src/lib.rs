@@ -11,6 +11,11 @@
 //!   CreateOrder, UpdateOrder, CancelOrder,
 //!   ClaimFundingFees
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{global_pause_key, is_market_paused_key, scheduled_unpause_ledger_key};
@@ -665,6 +670,7 @@ mod tests {
 
     // ── Issue #101: shared full-protocol harness ──────────────────────────────
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,
@@ -722,16 +728,6 @@ mod tests {
         let ord_vault = env.register(OrderVault, ());
         OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
-        // Market token (LP token + pool custodian)
-        let market_tk = env.register(MarketToken, ());
-        MtClient::new(&env, &market_tk).initialize(
-            &admin,
-            &rs,
-            &7u32,
-            &soroban_sdk::String::from_str(&env, "SO4 Market"),
-            &soroban_sdk::String::from_str(&env, "GM"),
-        );
-
         // Underlying tokens
         let long_tk = env
             .register_stellar_asset_contract_v2(admin.clone())
@@ -740,6 +736,18 @@ mod tests {
             .register_stellar_asset_contract_v2(admin.clone())
             .address();
         let index_tk = Address::generate(&env);
+
+        // Market token (LP token + pool custodian)
+        let market_tk = env.register(MarketToken, ());
+        MtClient::new(&env, &market_tk).initialize(
+            &admin,
+            &rs,
+            &7u32,
+            &soroban_sdk::String::from_str(&env, "SO4 Market"),
+            &soroban_sdk::String::from_str(&env, "GM"),
+            &long_tk,
+            &short_tk,
+        );
 
         // Handlers
         let dep_handler = env.register(DepositHandler, ());

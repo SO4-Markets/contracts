@@ -156,6 +156,7 @@ mod tests {
     use role_store::{RoleStore, RoleStoreClient as RsClient};
     use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Env, Vec};
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,
@@ -174,7 +175,7 @@ mod tests {
     fn setup() -> World {
         let env = Env::default();
         env.mock_all_auths();
-        env.budget().reset_unlimited();
+        env.cost_estimate().budget().reset_unlimited();
 
         let admin = Address::generate(&env);
         let keeper = Address::generate(&env);
@@ -195,6 +196,14 @@ mod tests {
         let vault = env.register(DepositVault, ());
         DVClient::new(&env, &vault).initialize(&admin, &rs);
 
+        let long_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let short_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let index_tk = Address::generate(&env);
+
         let market_tk = env.register(MarketToken, ());
         MtClient::new(&env, &market_tk).initialize(
             &admin,
@@ -202,6 +211,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(&env, "GMX Market Token"),
             &soroban_sdk::String::from_str(&env, "GM"),
+            &long_tk,
+            &short_tk,
         );
 
         let dep_handler = env.register(DepositHandler, ());
@@ -213,14 +224,6 @@ mod tests {
             &vault,
         );
         rs_c.grant_role(&admin, &dep_handler, &roles::controller(&env));
-
-        let long_tk = env
-            .register_stellar_asset_contract_v2(admin.clone())
-            .address();
-        let short_tk = env
-            .register_stellar_asset_contract_v2(admin.clone())
-            .address();
-        let index_tk = Address::generate(&env);
 
         let ds_c = DsClient::new(&env, &ds);
         ds_c.set_address(
@@ -310,11 +313,11 @@ mod tests {
         let user = Address::generate(&w.env);
 
         // Mint tokens for the user and seed the pool
-        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &10_000_0000i128);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &5_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &100_000_000_i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &50_000_000_i128);
         set_prices(&w, 2000 * fp, fp, 2000 * fp);
 
-        let lp = do_deposit(&w, &user, 10_000_0000, 5_000_0000);
+        let lp = do_deposit(&w, &user, 100_000_000, 50_000_000);
         assert!(lp > 0);
 
         let ds_c = DsClient::new(&w.env, &w.ds);
@@ -325,24 +328,24 @@ mod tests {
         let short_cap: u128 = 20_000 * fp as u128; // $20,000
         ds_c.set_u128(
             &w.admin,
-            &gmx_keys::max_open_interest_key(&w.env, &w.market_tk, &true),
+            &gmx_keys::max_open_interest_key(&w.env, &w.market_tk, true),
             &long_cap,
         );
         ds_c.set_u128(
             &w.admin,
-            &gmx_keys::max_open_interest_key(&w.env, &w.market_tk, &false),
+            &gmx_keys::max_open_interest_key(&w.env, &w.market_tk, false),
             &short_cap,
         );
 
         // Call get_market_utilisation
-        let result = MarketUtilReaderClient::new(&w.env, &w.env.register_contract(None, MarketUtilReader))
+        let result = MarketUtilReaderClient::new(&w.env, &w.env.register(MarketUtilReader, ()))
             .get_market_utilisation(&w.ds, &w.oracle, &w.market_tk);
 
         // Pool value: 10_000 long tokens at $2000 + 5_000 short tokens at $1
         // = $20,000,000 + $5,000 = $20,005,000
         // In raw: 10_000_0000 * 2000 * fp / TOKEN_PRECISION + 5_000_0000 * fp / TOKEN_PRECISION
-        let long_usd = gmx_math::mul_div_wide(&w.env, 10_000_0000i128, 2000 * fp, gmx_math::TOKEN_PRECISION);
-        let short_usd = gmx_math::mul_div_wide(&w.env, 5_000_0000i128, fp, gmx_math::TOKEN_PRECISION);
+        let long_usd = gmx_math::mul_div_wide(&w.env, 100_000_000_i128, 2000 * fp, gmx_math::TOKEN_PRECISION);
+        let short_usd = gmx_math::mul_div_wide(&w.env, 50_000_000_i128, fp, gmx_math::TOKEN_PRECISION);
         let expected_pool = (long_usd + short_usd) as u128;
 
         assert_eq!(result.pool_value_usd, expected_pool);
@@ -370,11 +373,11 @@ mod tests {
         let fp = gmx_math::FLOAT_PRECISION;
         let user = Address::generate(&w.env);
 
-        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &10_000_0000i128);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &5_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &100_000_000_i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &50_000_000_i128);
         set_prices(&w, 2000 * fp, fp, 2000 * fp);
 
-        let _lp = do_deposit(&w, &user, 10_000_0000, 5_000_0000);
+        let _lp = do_deposit(&w, &user, 100_000_000, 50_000_000);
 
         let ds_c = DsClient::new(&w.env, &w.ds);
 
@@ -382,17 +385,17 @@ mod tests {
         let oi_value: u128 = 10_000 * fp as u128;
         ds_c.set_u128(
             &w.admin,
-            &gmx_keys::max_open_interest_key(&w.env, &w.market_tk, &true),
+            &gmx_keys::max_open_interest_key(&w.env, &w.market_tk, true),
             &oi_value,
         );
         // Write open interest directly (simulating a position being opened)
         ds_c.set_u128(
             &w.admin,
-            &gmx_keys::open_interest_key(&w.env, &w.market_tk, &w.long_tk, &true),
+            &gmx_keys::open_interest_key(&w.env, &w.market_tk, &w.long_tk, true),
             &oi_value,
         );
 
-        let result = MarketUtilReaderClient::new(&w.env, &w.env.register_contract(None, MarketUtilReader))
+        let result = MarketUtilReaderClient::new(&w.env, &w.env.register(MarketUtilReader, ()))
             .get_market_utilisation(&w.ds, &w.oracle, &w.market_tk);
 
         assert!(result.is_at_long_oi_cap, "long OI at cap should be true");
@@ -411,11 +414,11 @@ mod tests {
         let ds_c = DsClient::new(&w.env, &w.ds);
         ds_c.set_u128(
             &w.admin,
-            &gmx_keys::open_interest_key(&w.env, &w.market_tk, &w.long_tk, &true),
+            &gmx_keys::open_interest_key(&w.env, &w.market_tk, &w.long_tk, true),
             &(5_000 * fp as u128),
         );
 
-        let result = MarketUtilReaderClient::new(&w.env, &w.env.register_contract(None, MarketUtilReader))
+        let result = MarketUtilReaderClient::new(&w.env, &w.env.register(MarketUtilReader, ()))
             .get_market_utilisation(&w.ds, &w.oracle, &w.market_tk);
 
         assert_eq!(result.pool_value_usd, 0);
