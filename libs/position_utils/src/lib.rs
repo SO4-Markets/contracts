@@ -320,9 +320,10 @@ pub fn is_liquidatable(
         collateral_token_price,
         TOKEN_PRECISION,
     );
-    // net_collateral excludes PnL — used for the min_collateral_factor adequacy check.
-    // PnL should not mask a collateral shortfall: a profitable unrealised gain does
-    // not mean the deposited collateral is sufficient to absorb liquidation costs.
+    // net_collateral (fees deducted, PnL not yet applied) feeds `remaining` below,
+    // which folds pnl_usd back in before either liquidation comparison (#406):
+    // an adverse index-price move must not be able to hide insolvency behind an
+    // unrealised loss that was excluded from the check.
     let net_collateral = collateral_usd - fees_usd;
     let remaining = net_collateral + pnl_usd;
 
