@@ -388,6 +388,12 @@ impl ReferralStorage {
         if tier == 0 || tier > 2 {
             panic_with_error!(&env, Error::InvalidTier);
         }
+        // Issue #636: a zero threshold would make increment_referrer_volume's
+        // `cumulative_volume >= threshold` check trivially true for any nonzero
+        // (unsigned) volume, instantly qualifying every referrer for this tier.
+        if threshold_usd == 0 {
+            panic_with_error!(&env, Error::InvalidInput);
+        }
         env.storage()
             .persistent()
             .set(&ReferralKey::TierUpgradeThreshold(tier), &threshold_usd);
@@ -1051,6 +1057,16 @@ mod tests {
         client(&w).set_trader_referral_code(&trader, &code);
         // discount = 3_000 * 5_000 / 10_000 = 1_500
         assert_eq!(client(&w).get_trader_discount_bps(&trader), 1_500);
+    }
+
+    /// Issue #636: a zero threshold would make `cumulative_volume >= threshold`
+    /// trivially true for any nonzero (unsigned) volume, instantly qualifying
+    /// every referrer for that tier at their very first trade.
+    #[test]
+    #[should_panic]
+    fn set_tier_upgrade_threshold_rejects_zero() {
+        let w = setup();
+        client(&w).set_tier_upgrade_threshold(&w.admin, &1u32, &0u128);
     }
 
     /// Volume never resets; tier only goes up.
