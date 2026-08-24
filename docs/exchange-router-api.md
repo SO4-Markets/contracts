@@ -72,12 +72,14 @@ soroban contract invoke \
 
 Submit a new trading order (market/limit increase, decrease, swap, or stop-loss).
 
-**Signature**
+**Not a standalone entrypoint.** `create_order` exists only as `RouterAction::CreateOrder(CreateOrderParams)`, dispatched inside `multicall` — there is no top-level `create_order` function on `exchange_router` to invoke directly (see the Overview).
+
+**Signature** (as dispatched inside `multicall`)
 ```
-create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32>
+RouterAction::CreateOrder(CreateOrderParams) -> BytesN<32>
 ```
 
-**Auth:** `caller` (position owner or any address on behalf of the account).
+**Auth:** `caller` (position owner or any address on behalf of the account) — via `multicall`'s single auth covering the whole batch.
 
 **Pre-conditions**
 - Collateral must have been transferred to `order_vault` **before** this call for increase/swap orders (use `send_tokens` in the same multicall).
@@ -112,29 +114,31 @@ create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32>
 | `Unauthorized` | Caller lacks required role |
 | `ZeroCollateral` | Increase/swap order with no collateral in vault |
 | `SwapPathTooLong` | `swap_path.len() > max` |
-| `DuplicateMarketInPath` | Repeated market address in path |
+| `CyclicSwapPath` | Repeated market address in path |
 
-**Example**
+**Example** (via `multicall`, not a standalone `create_order` call)
 ```bash
 soroban contract invoke \
   --id $EXCHANGE_ROUTER \
   --source alice \
-  -- create_order \
+  -- multicall \
   --caller alice \
-  --params '{
-    "receiver": "alice",
-    "market": "$MARKET_TOKEN",
-    "initial_collateral_token": "$USDC",
-    "swap_path": [],
-    "size_delta_usd": "100000000000000000000000000000000",
-    "collateral_delta_amount": "0",
-    "trigger_price": "0",
-    "acceptable_price": "0",
-    "execution_fee": "0",
-    "min_output_amount": "0",
-    "order_type": "MarketIncrease",
-    "is_long": true
-  }'
+  --actions '[
+    {"CreateOrder": {
+      "receiver": "alice",
+      "market": "$MARKET_TOKEN",
+      "initial_collateral_token": "$USDC",
+      "swap_path": [],
+      "size_delta_usd": "100000000000000000000000000000000",
+      "collateral_delta_amount": "0",
+      "trigger_price": "0",
+      "acceptable_price": "0",
+      "execution_fee": "0",
+      "min_output_amount": "0",
+      "order_type": "MarketIncrease",
+      "is_long": true
+    }}
+  ]'
 ```
 
 ---
@@ -340,12 +344,14 @@ soroban contract invoke \
 
 Transfer tokens from caller to a receiver (typically a vault).
 
-**Signature**
+**Not a standalone entrypoint.** `send_tokens` exists only as `RouterAction::SendTokens(SendTokensParams)`, dispatched inside `multicall` — there is no top-level `send_tokens` function on `exchange_router` to invoke directly (see the Overview).
+
+**Signature** (as dispatched inside `multicall`)
 ```
-send_tokens(env: Env, caller: Address, token: Address, receiver: Address, amount: i128)
+RouterAction::SendTokens(SendTokensParams { token: Address, receiver: Address, amount: i128 })
 ```
 
-**Auth:** `caller`.
+**Auth:** `caller` — via `multicall`'s single auth covering the whole batch.
 
 **Pre-conditions:** Caller must have approved the exchange router for at least `amount` of `token` via the SEP-41 `approve` function.
 
@@ -353,17 +359,17 @@ send_tokens(env: Env, caller: Address, token: Address, receiver: Address, amount
 
 **Errors:** Any SEP-41 transfer error (insufficient balance, insufficient allowance).
 
-**Example**
+**Example** (via `multicall`, not a standalone `send_tokens` call)
 ```bash
 # Fund the order vault before creating an order
 soroban contract invoke \
   --id $EXCHANGE_ROUTER \
   --source alice \
-  -- send_tokens \
+  -- multicall \
   --caller alice \
-  --token $USDC \
-  --receiver $ORDER_VAULT \
-  --amount 1000000
+  --actions '[
+    {"SendTokens": {"token": "$USDC", "receiver": "$ORDER_VAULT", "amount": "1000000"}}
+  ]'
 ```
 
 ---
