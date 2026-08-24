@@ -125,6 +125,9 @@ pub enum Error {
     /// Position increase would push the market/side's open interest above the
     /// configured `max_open_interest` cap (issue #450).
     MaxOpenInterestExceeded = 24,
+    /// set_keeper_heartbeat_timeout called with timeout_ledgers = 0 (issue #634)
+    /// — would make every keeper on the role appear stale after a single ledger.
+    InvalidHeartbeatTimeout = 25,
 }
 
 
@@ -392,6 +395,9 @@ impl OrderHandler {
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         if caller != admin {
             panic_with_error!(&env, Error::Unauthorized);
+        }
+        if timeout_ledgers == 0 {
+            panic_with_error!(&env, Error::InvalidHeartbeatTimeout);
         }
         let data_store: Address = env
             .storage()

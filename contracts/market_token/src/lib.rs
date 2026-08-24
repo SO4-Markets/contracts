@@ -89,6 +89,7 @@ impl MarketToken {
         long_token: Address,
         short_token: Address,
     ) {
+        admin.require_auth();
         if env.storage().instance().has(&InstanceKey::Admin) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }

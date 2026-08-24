@@ -41,6 +41,12 @@ use soroban_sdk::{
 const PERSISTENT_BUMP_TARGET: u32 = 518_400;
 const MIN_BUMP_THRESHOLD: u32 = 259_200;
 
+// Sane ceiling on the liquidation keeper-reimbursement fee (issue #633): 1,000
+// tokens at Stellar's 7-decimal precision. Well above any realistic keeper gas
+// reimbursement, but low enough that a misconfigured value can no longer seize
+// a liquidated position's entire collateral.
+const MAX_LIQUIDATION_EXECUTION_FEE: u128 = 1_000 * 10_000_000;
+
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
 #[contracterror]
@@ -51,6 +57,9 @@ pub enum Error {
     AlreadyInitialized = 2,
     Unauthorized = 3,
     Underflow = 4, // apply_delta would cause underflow
+    /// set_liquidation_execution_fee called with a fee above MAX_LIQUIDATION_EXECUTION_FEE
+    /// (issue #633) — an unbounded fee can seize a liquidated position's entire collateral.
+    LiquidationExecutionFeeTooHigh = 5,
 }
 
 // ─── Instance storage keys ────────────────────────────────────────────────────
@@ -664,10 +673,15 @@ impl DataStore {
         env.storage().persistent().get(&key).unwrap_or(0u128)
     }
 
-    /// Set the liquidation execution fee for a given market (admin-only).
+    /// Set the liquidation execution fee for a given market (admin-only). Capped at
+    /// MAX_LIQUIDATION_EXECUTION_FEE so a fat-fingered/misused value can't seize a
+    /// liquidated position's entire collateral as keeper fee (issue #633).
     pub fn set_liquidation_execution_fee(env: Env, caller: Address, market: Address, fee: u128) -> u128 {
         caller.require_auth();
         require_controller(&env, &caller);
+        if fee > MAX_LIQUIDATION_EXECUTION_FEE {
+            panic_with_error!(&env, Error::LiquidationExecutionFeeTooHigh);
+        }
         use gmx_keys::liquidation_execution_fee_key;
         let key = DataKey::U128(liquidation_execution_fee_key(&env, &market));
         env.storage().persistent().set(&key, &fee);
