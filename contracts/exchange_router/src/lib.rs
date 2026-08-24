@@ -95,6 +95,11 @@ pub enum Error {
     TimelockNotExpired = 6,
     /// `execute_unpause` was called without a prior `schedule_unpause` (issue #282).
     UnpauseNotScheduled = 7,
+    /// `update_withdrawal_handler` was called with a `new_handler` that matches
+    /// the router itself or one of its other registered handlers (issue #635) —
+    /// almost certainly a copy-paste mistake that would silently misroute
+    /// withdrawal calls to a contract with a different interface.
+    InvalidWithdrawalHandler = 8,
 }
 
 // ─── External handler clients ─────────────────────────────────────────────────
@@ -208,6 +213,8 @@ impl ExchangeRouter {
     }
 
     /// Update the withdrawal_handler address. Only the stored admin may call this.
+    /// Rejects the router's own address and its other registered handler addresses
+    /// as a basic sanity check against copy-paste misconfiguration (issue #635).
     pub fn update_withdrawal_handler(env: Env, caller: Address, new_handler: Address) {
         caller.require_auth();
         let admin: Address = env
@@ -217,6 +224,20 @@ impl ExchangeRouter {
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         if caller != admin {
             panic_with_error!(&env, Error::Unauthorized);
+        }
+        if new_handler == env.current_contract_address() {
+            panic_with_error!(&env, Error::InvalidWithdrawalHandler);
+        }
+        for key in [
+            InstanceKey::DepositHandler,
+            InstanceKey::OrderHandler,
+            InstanceKey::FeeHandler,
+        ] {
+            if let Some(other) = env.storage().instance().get::<_, Address>(&key) {
+                if other == new_handler {
+                    panic_with_error!(&env, Error::InvalidWithdrawalHandler);
+                }
+            }
         }
         env.storage()
             .instance()
