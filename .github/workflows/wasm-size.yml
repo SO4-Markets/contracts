@@ -24,7 +24,7 @@ jobs:
       - name: Install Rust stable + wasm32 target
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32v1-none
 
       - name: Cache Cargo registry
         uses: actions/cache@v4
@@ -47,11 +47,11 @@ jobs:
       # ── Build HEAD (PR branch) ────────────────────────────────────────────
 
       - name: Build contracts (PR)
-        run: cargo build --target wasm32-unknown-unknown --release
+        run: cargo build --target wasm32v1-none --release
 
       - name: Optimise WASM files (PR)
         run: |
-          for f in target/wasm32-unknown-unknown/release/*.wasm; do
+          for f in target/wasm32v1-none/release/*.wasm; do
             wasm-opt -O3 -o "$f" "$f"
           done
 
@@ -59,7 +59,7 @@ jobs:
         id: pr_sizes
         run: |
           mkdir -p /tmp/wasm-sizes
-          for f in target/wasm32-unknown-unknown/release/*.wasm; do
+          for f in target/wasm32v1-none/release/*.wasm; do
             name=$(basename "$f" .wasm)
             size=$(wc -c < "$f")
             echo "$size" > "/tmp/wasm-sizes/pr_${name}"
@@ -71,17 +71,17 @@ jobs:
         run: git checkout "${{ github.base_ref }}"
 
       - name: Build contracts (base)
-        run: cargo build --target wasm32-unknown-unknown --release
+        run: cargo build --target wasm32v1-none --release
 
       - name: Optimise WASM files (base)
         run: |
-          for f in target/wasm32-unknown-unknown/release/*.wasm; do
+          for f in target/wasm32v1-none/release/*.wasm; do
             wasm-opt -O3 -o "$f" "$f"
           done
 
       - name: Record base sizes
         run: |
-          for f in target/wasm32-unknown-unknown/release/*.wasm; do
+          for f in target/wasm32v1-none/release/*.wasm; do
             name=$(basename "$f" .wasm)
             size=$(wc -c < "$f")
             echo "$size" > "/tmp/wasm-sizes/base_${name}"

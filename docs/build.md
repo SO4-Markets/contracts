@@ -6,7 +6,7 @@
 
 ```bash
 # Install the wasm32 target
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32v1-none
 
 # Install wasm-opt (part of the Binaryen toolchain)
 # macOS
@@ -20,10 +20,10 @@ apt-get install binaryen
 
 ```bash
 # Build all contracts for release
-cargo build --target wasm32-unknown-unknown --release
+cargo build --target wasm32v1-none --release
 
 # Optimise with wasm-opt (required step before measuring size or deploying)
-for f in target/wasm32-unknown-unknown/release/*.wasm; do
+for f in target/wasm32v1-none/release/*.wasm; do
   wasm-opt -O3 -o "$f" "$f"
 done
 ```
@@ -94,15 +94,15 @@ description if it trips the warning/block threshold so reviewers have context.
 ```makefile
 wasm-sizes:
 	@echo "Contract\tSize (bytes)"
-	@for f in target/wasm32-unknown-unknown/release/*.wasm; do \
+	@for f in target/wasm32v1-none/release/*.wasm; do \
 	  name=$$(basename $$f .wasm); \
 	  size=$$(wc -c < $$f); \
 	  echo "$$name\t$$size"; \
 	done
 
 wasm-baseline:
-	@cargo build --target wasm32-unknown-unknown --release 2>/dev/null
-	@for f in target/wasm32-unknown-unknown/release/*.wasm; do \
+	@cargo build --target wasm32v1-none --release 2>/dev/null
+	@for f in target/wasm32v1-none/release/*.wasm; do \
 	  wasm-opt -O3 -o "$$f" "$$f"; \
 	done
 	@python3 scripts/gen_baseline.py > docs/build-baseline.json
