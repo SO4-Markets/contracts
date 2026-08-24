@@ -22,6 +22,7 @@
 use gmx_keys::{
     account_position_list_key, claimable_fee_amount_key, collateral_sum_key,
     cumulative_borrowing_factor_key, funding_amount_per_size_key, position_key, position_list_key,
+    MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET,
 };
 use gmx_market_utils::{
     apply_delta_to_open_interest, apply_delta_to_open_interest_in_tokens,
@@ -345,6 +346,13 @@ pub fn decrease_position(env: &Env, p: &DecreasePositionParams) -> DecreasePosit
             p.index_token_price,
         );
         env.storage().persistent().set(&storage_key, &position);
+        // Issue #658: renew the position's own TTL on every touch, matching
+        // the account/global position-list indexes that already do so via
+        // remove_bytes32_from_set, so the index can't outlive the entry it
+        // points to.
+        env.storage()
+            .persistent()
+            .extend_ttl(&storage_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
     }
 
     // 14. Transfer output to receiver, optionally swapping to requested token
