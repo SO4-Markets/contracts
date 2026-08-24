@@ -24,7 +24,7 @@
 //! privileged over all of DataStore's state**, not just the keys it "owns"
 //! by convention.  See `docs/roles.md` for the full role reference.
 
-use gmx_keys::roles;
+use gmx_keys::{roles, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
     BytesN, Env, Vec,
@@ -38,8 +38,7 @@ use soroban_sdk::{
 //   MIN_BUMP_THRESHOLD     ≈ 15 days   (259 200 ledgers)
 //
 // Only extend when current TTL < MIN_BUMP_THRESHOLD; target PERSISTENT_BUMP_TARGET.
-const PERSISTENT_BUMP_TARGET: u32 = 518_400;
-const MIN_BUMP_THRESHOLD: u32 = 259_200;
+// Values shared via gmx_keys (issue #659).
 
 // Sane ceiling on the liquidation keeper-reimbursement fee (issue #633): 1,000
 // tokens at Stellar's 7-decimal precision. Well above any realistic keeper gas

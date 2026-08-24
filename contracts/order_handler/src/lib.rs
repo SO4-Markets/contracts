@@ -34,6 +34,7 @@ use gmx_keys::{
     fee_tier_position_fee_factor_key, fee_tier_volume_threshold_key,
     trader_volume_key, trader_volume_window_start_key,
     roles, DEFAULT_KEEPER_HEARTBEAT_TIMEOUT, is_market_paused_key,
+    MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET,
 };
 use gmx_math::mul_div_wide;
 use gmx_swap_utils::{swap_with_path, MAX_SWAP_PATH_LENGTH};
@@ -54,8 +55,7 @@ use soroban_sdk::{
 //
 // Only extend when current TTL < MIN_BUMP_THRESHOLD; target PERSISTENT_BUMP_TARGET.
 // This halves unnecessary rent payments on busy markets (issue #297).
-const PERSISTENT_BUMP_TARGET: u32 = 518_400;
-const MIN_BUMP_THRESHOLD: u32 = 259_200;
+// Values shared via gmx_keys (issue #659).
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
