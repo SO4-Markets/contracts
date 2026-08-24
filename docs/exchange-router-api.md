@@ -10,7 +10,7 @@
 
 Users call `multicall` with a `Vec<RouterAction>` to execute one or more actions atomically. A single `caller.require_auth()` covers the entire batch. Any panic inside a sub-action reverts the whole transaction.
 
-Direct single-action helpers (`create_order`, `cancel_order`, …) are also exposed; they are the same functions called by `multicall` internally.
+Direct single-action helpers (`cancel_order`, `create_deposit`, …) are also exposed; they are the same functions called by `multicall` internally. Exceptions: `create_order` and `send_tokens` have no standalone entrypoint — they exist only as `RouterAction` variants dispatched inside `multicall`. (`claim_funding_fees` is also worth calling out: it is standalone, but isn't part of a create/cancel pair like the other helpers.)
 
 ---
 
@@ -100,7 +100,7 @@ create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32>
 
 **Storage written:** `OrderStorageKey::Order(key)` in `order_handler` persistent storage; order key added to global and per-account index sets in `data_store`.
 
-**Events emitted:** `ord_crt` → `(key, caller, market)`
+**Events emitted:** `ord_crt` → `(key, caller, market, size_delta_usd, collateral_delta_amount, order_type)`
 
 **Errors** (from `order_handler`)
 | Code | Condition |
@@ -193,7 +193,7 @@ create_deposit(env: Env, caller: Address, params: CreateDepositParams) -> BytesN
 
 **Returns:** `BytesN<32>` — the new deposit key.
 
-**Events emitted:** `dep_crt` → `(key, caller, market)`
+**Events emitted:** `dep_crt` → `(key, caller, market, long_token_amount, short_token_amount)`
 
 **Errors**
 | Code | Condition |
@@ -253,7 +253,7 @@ create_withdrawal(env: Env, caller: Address, params: CreateWithdrawalParams) -> 
 
 **Returns:** `BytesN<32>` — the new withdrawal key.
 
-**Events emitted:** `wth_crt` → `(key, caller, market)`
+**Events emitted:** `wth_crt` → `(key, caller, market, market_token_amount)`
 
 **Errors**
 | Code | Condition |
@@ -312,7 +312,7 @@ claim_funding_fees(
 
 **Side effects:** For each pair, transfers the claimable funding fee from the market pool to `caller`. Zeroes the claimable balance in `fee_handler`.
 
-**Events emitted:** One `fee_clm` event per market/token pair (emitted by `fee_handler`).
+**Events emitted:** One `fnd_clm` (`FundingFeeClaimed`) event per market/token pair (emitted by `fee_handler`).
 
 **Errors**
 | Code | Condition |

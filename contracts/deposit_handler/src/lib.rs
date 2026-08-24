@@ -60,6 +60,11 @@ pub enum Error {
     MaxPoolAmountExceeded = 11,
     /// Issue #366: market is paused due to oracle circuit breaker.
     MarketPaused = 12,
+    /// Issue #661: initial_long_token/initial_short_token doesn't match the
+    /// market's configured tokens. Distinct from Unauthorized, which means
+    /// the caller lacks permission — this means the tokens themselves are
+    /// wrong regardless of who's calling.
+    TokenMismatch = 13,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -227,10 +232,10 @@ impl DepositHandler {
         }
 
         if params.long_token_amount > 0 && params.initial_long_token != market.long_token {
-            panic_with_error!(&env, Error::Unauthorized); // Wrong long token
+            panic_with_error!(&env, Error::TokenMismatch); // Wrong long token
         }
         if params.short_token_amount > 0 && params.initial_short_token != market.short_token {
-            panic_with_error!(&env, Error::Unauthorized); // Wrong short token
+            panic_with_error!(&env, Error::TokenMismatch); // Wrong short token
         }
 
         // Issue #279: reject dust deposits below the market's configured minimum
