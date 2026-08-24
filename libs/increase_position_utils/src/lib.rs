@@ -17,7 +17,7 @@
 #![allow(deprecated)]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use gmx_keys::{account_position_list_key, collateral_sum_key, max_position_size_usd_key, pool_amount_key, claimable_fee_amount_key, position_key, position_list_key};
+use gmx_keys::{account_position_list_key, collateral_sum_key, max_position_size_usd_key, pool_amount_key, claimable_fee_amount_key, position_key, position_list_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET};
 use gmx_market_utils::{
     apply_delta_to_open_interest, apply_delta_to_open_interest_in_tokens,
 };
@@ -209,6 +209,12 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
 
     // 14. Persist
     env.storage().persistent().set(&storage_key, &position);
+    // Issue #658: renew the position's own TTL on every touch, matching the
+    // account/global position-list indexes that already do so via
+    // add_bytes32_to_set, so the index can't outlive the entry it points to.
+    env.storage()
+        .persistent()
+        .extend_ttl(&storage_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
 
     // If brand-new position, add to the tracking sets
     if is_new {

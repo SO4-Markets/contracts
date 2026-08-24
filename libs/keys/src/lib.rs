@@ -2,6 +2,17 @@
 
 use soroban_sdk::{Address, Bytes, BytesN, Env};
 
+// ─── TTL bump policy (#659) ────────────────────────────────────────────────────
+//
+// Shared persistent-entry TTL policy, previously redeclared identically in
+// order_handler, data_store, and referral_storage.
+
+/// Target TTL (in ledgers) to bump a persistent entry to on renewal (~30 days
+/// at 5s/ledger).
+pub const PERSISTENT_BUMP_TARGET: u32 = 518_400;
+/// Renew an entry's TTL once its remaining TTL drops below this threshold.
+pub const MIN_BUMP_THRESHOLD: u32 = 259_200;
+
 // ─── Internal key builder ─────────────────────────────────────────────────────
 //
 // Each component is length-prefixed (2-byte BE length + bytes) so that

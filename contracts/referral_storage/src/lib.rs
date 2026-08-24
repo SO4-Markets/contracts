@@ -3,6 +3,7 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
+use gmx_keys::{MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
     Bytes, BytesN, Env,
@@ -11,8 +12,7 @@ use soroban_sdk::{
 // ─── TTL constants (#297) ─────────────────────────────────────────────────────
 // Referral codes and trader links are long-lived; bump only when TTL < 15 days.
 // At 5 s/ledger: PERSISTENT_BUMP_TARGET ≈ 30 days, MIN_BUMP_THRESHOLD ≈ 15 days.
-const PERSISTENT_BUMP_TARGET: u32 = 518_400;
-const MIN_BUMP_THRESHOLD: u32 = 259_200;
+// Values shared via gmx_keys (issue #659).
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum number of bytes in a referral code.
