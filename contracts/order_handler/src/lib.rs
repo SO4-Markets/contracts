@@ -601,7 +601,13 @@ impl OrderHandler {
                 if received <= 0 {
                     panic_with_error!(&env, Error::ZeroCollateral);
                 }
-                received
+                // Issue #630/#631: see create_order's identical fix — received
+                // includes execution_fee from the same combined deposit.
+                let net = received - params.execution_fee;
+                if net <= 0 {
+                    panic_with_error!(&env, Error::ZeroCollateral);
+                }
+                net
             } else {
                 params.collateral_delta_amount
             };
@@ -801,7 +807,19 @@ impl OrderHandler {
             if received <= 0 {
                 panic_with_error!(&env, Error::ZeroCollateral);
             }
-            received
+            // Issue #630/#631: `received` is the entire router-pushed deposit for
+            // this order (one record_transfer_in snapshot covers both collateral
+            // and execution_fee pushed together). Subtract the fee out here so
+            // collateral_delta_amount and execution_fee are mutually exclusive
+            // portions of that single deposit — otherwise cancel_order's separate
+            // collateral + fee refund double-refunds the fee, and execute_order
+            // would fold the fee into position collateral / swap input instead
+            // of paying it to the keeper.
+            let net = received - params.execution_fee;
+            if net <= 0 {
+                panic_with_error!(&env, Error::ZeroCollateral);
+            }
+            net
         } else {
             // Decrease/liquidation orders: no collateral deposit required.
             params.collateral_delta_amount
@@ -1223,6 +1241,22 @@ impl OrderHandler {
             }
         }
 
+        // Issue #631: pay the keeper's execution_fee now that dispatch succeeded.
+        // Previously nothing referenced order.execution_fee here — it was either
+        // silently folded into position collateral / swap input (via the
+        // now-fixed collateral_delta_amount, see create_order/create_orders) or,
+        // for decrease/liquidation orders, never paid out at all. order_vault
+        // holds the fee regardless of order type, same as cancel_order and
+        // cleanup_expired_order's existing execution_fee handling.
+        if order.execution_fee > 0 {
+            OrderVaultClient::new(&env, &order_vault).transfer_out(
+                &handler,
+                &order.initial_collateral_token,
+                &keeper,
+                &order.execution_fee,
+            );
+        }
+
         // Issue #286: emit funding rate snapshot after position order execution.
         // Swap orders do not update funding state, so they are excluded.
         let is_position_order = matches!(
@@ -1607,6 +1641,19 @@ impl OrderHandler {
                     &collateral_token,
                     &keeper,
                     &fee_to_transfer,
+                );
+                // Issue #629: withdraw_from_pool only moves real tokens — it has no
+                // knowledge of data_store's pool_amount ledger. Every other real
+                // withdrawal out of the pool in this codebase pairs the transfer
+                // with a matching apply_delta_to_pool_amount; this one didn't,
+                // permanently drifting pool_amount above the pool's real balance.
+                gmx_market_utils::apply_delta_to_pool_amount(
+                    &env,
+                    &data_store,
+                    &handler,
+                    &market_props,
+                    &collateral_token,
+                    -fee_to_transfer,
                 );
             }
         }
@@ -3365,6 +3412,53 @@ mod tests {
         let keeper_balance_after =
             soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.keeper);
         assert_eq!(keeper_balance_after - keeper_balance_before, keeper_fee);
+    }
+
+    /// Issue #629: withdraw_from_pool moves the keeper's liquidation_execution_fee
+    /// out of the market's real token balance, but that alone never touches
+    /// data_store's pool_amount ledger. Confirm liquidation with a nonzero keeper
+    /// fee leaves pool_amount exactly `keeper_fee` lower than an otherwise
+    /// identical liquidation with no keeper fee configured — i.e. the fee
+    /// withdrawal is now paired with a matching apply_delta_to_pool_amount call.
+    #[test]
+    fn liquidate_position_keeper_fee_decrements_pool_amount() {
+        let fp = gmx_math::FLOAT_PRECISION;
+        let keeper_fee = 1_000i128;
+
+        let pool_amount_after = |configure_fee: bool| -> u128 {
+            let w = setup();
+            set_prices(&w, 2_000 * fp);
+            seed_pool(&w);
+            set_prices(&w, 2_000 * fp);
+
+            let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+            hc.execute_order(&w.keeper, &key);
+
+            if configure_fee {
+                DsClient::new(&w.env, &w.ds).set_u128(
+                    &w.admin,
+                    &gmx_keys::liquidation_execution_fee_key(&w.env, &w.market_tk),
+                    &(keeper_fee as u128),
+                );
+            }
+
+            // Crash price so the position is liquidatable.
+            set_prices(&w, 100 * fp);
+
+            hc.liquidate_position(&w.keeper, &w.user, &w.market_tk, &w.long_tk, &true);
+
+            DsClient::new(&w.env, &w.ds)
+                .get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk))
+        };
+
+        let pool_amount_without_fee = pool_amount_after(false);
+        let pool_amount_with_fee = pool_amount_after(true);
+
+        assert_eq!(
+            pool_amount_with_fee,
+            pool_amount_without_fee - keeper_fee as u128,
+            "pool_amount must drop by exactly the keeper's liquidation_execution_fee"
+        );
     }
 
     /// execute_adl must reject a caller that does not hold ADL_KEEPER.
