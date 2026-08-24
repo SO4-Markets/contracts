@@ -21,6 +21,10 @@ Direct single-action helpers (`cancel_order`, `create_deposit`, …) are also ex
 | 1 | `AlreadyInitialized` | `initialize` called after first-time setup |
 | 2 | `NotInitialized` | Any function called before `initialize` |
 | 3 | `Unauthorized` | `upgrade` or admin function called by non-admin |
+| 4 | `Paused` | A non-cancel action is called while the protocol is paused |
+| 5 | `BatchSizeLimitExceeded` | Reserved for a batch-size limit on `multicall`; not currently raised by any `exchange_router` function |
+| 6 | `TimelockNotExpired` | `execute_unpause` called before the scheduled unpause ledger |
+| 7 | `UnpauseNotScheduled` | `execute_unpause` called without a prior `schedule_unpause` |
 
 ---
 
