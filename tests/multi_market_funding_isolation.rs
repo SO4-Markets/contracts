@@ -81,8 +81,8 @@ fn eth_funding_accumulates_while_btc_funding_stays_near_zero() {
 
     // ── Advance 100 ledgers, update funding state for both markets ─────────────
     let current_time: u64 = 100;
-    update_funding_state(&env, &ds, &admin, &eth_props, 0, 0, current_time);
-    update_funding_state(&env, &ds, &admin, &btc_props, 0, 0, current_time);
+    update_funding_state(&env, &ds, &admin, &eth_props, current_time);
+    update_funding_state(&env, &ds, &admin, &btc_props, current_time);
 
     let eth_long_fnd = ds_c.get_i128(&funding_amount_per_size_key(&env, &eth_market, &eth_long, true));
     let btc_long_fnd = ds_c.get_i128(&funding_amount_per_size_key(&env, &btc_market, &btc_long, true));

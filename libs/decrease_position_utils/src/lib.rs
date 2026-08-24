@@ -122,8 +122,6 @@ pub fn decrease_position(env: &Env, p: &DecreasePositionParams) -> DecreasePosit
         p.data_store,
         p.caller,
         p.market,
-        index_price_mid,
-        index_price_mid,
         p.current_time,
     );
     update_cumulative_borrowing_factor(

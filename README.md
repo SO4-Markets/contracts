@@ -155,18 +155,19 @@ impact = factor × (diff ^ exponent)
 ### Funding Rate
 ```
 funding_factor_per_second = funding_factor × (|long_oi - short_oi| / total_oi) ^ exponent
-funding_amount_per_size  += factor_per_second × dt × index_token_price
+funding_amount_per_size  += factor_per_second × dt
 ```
+(open interest is already USD-denominated, so no separate price term is applied)
 
 ### Borrowing Fee
 ```
-cumulative_borrowing_factor += borrowing_factor × dt × (open_interest / pool_amount)
+cumulative_borrowing_factor += borrowing_factor × dt × (open_interest / pool_amount) ^ exponent
 position_borrow_fee          = (cumulative_factor_now - factor_at_open) × size_in_tokens
 ```
 
 ### Liquidation
 ```
-remaining   = collateral_usd - borrowing_fees - funding_fees + unrealised_pnl
+remaining   = collateral_usd - borrowing_fees - funding_fees - position_fee + unrealised_pnl
 liquidatable when: remaining < min_collateral_factor × position_size_usd
 ```
 
