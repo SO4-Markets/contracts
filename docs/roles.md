@@ -101,7 +101,7 @@ On a fresh deployment, initialise roles in this order:
 1. **Deploy `role_store`** — call `initialize(admin)`. The admin address can now grant all other roles.
 2. **Deploy `data_store`** — call `initialize(admin, role_store)`.
 3. **Deploy core contracts** — oracle, order_handler, liquidation_handler, adl_handler, etc.
-4. **Grant `CONTROLLER`** to oracle and order_handler (they write to `data_store`).
+4. **Grant `CONTROLLER`** to every state-changing handler that writes to `data_store`: `market_factory`, `deposit_handler`, `withdrawal_handler`, `order_handler`, `liquidation_handler`, `adl_handler`, `fee_handler`, `exchange_router`, and `oracle` (its circuit-breaker writes a market-pause flag). See `docs/deployment.md`'s "Grant `CONTROLLER`" section for the authoritative, up-to-date grant list — reference it rather than duplicating it here so the two docs can't drift out of sync again.
 5. **Grant `ORDER_KEEPER`** to keeper bot accounts.
 6. **Grant `LIQUIDATION_KEEPER`** and **`ADL_KEEPER`** to their respective bots.
 7. **Grant `FEE_KEEPER`** to the fee distribution account.

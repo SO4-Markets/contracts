@@ -11,30 +11,33 @@ A position becomes eligible for liquidation when its health factor drops below 1
 A position is liquidatable when (in the normal, configured case):
 
 ```
-net_collateral_usd < size_in_usd × min_collateral_factor
+remaining_usd < size_in_usd × min_collateral_factor
 ```
 
-where `net_collateral_usd = collateral_usd - fees_usd` — current fees (borrowing +
-funding + position fee, computed worst-case) are subtracted from collateral
-**before** the comparison. Unrealised PnL is deliberately excluded from this
-comparison: a profitable unrealised gain must not mask a genuine collateral
-shortfall.
+where `remaining_usd = (collateral_usd - fees_usd) + pnl_usd` — current fees
+(borrowing + funding + position fee, computed worst-case) are subtracted from
+collateral, and unrealised PnL is then folded back in, **before** the
+comparison (#406). PnL enters this primary comparison unconditionally, not
+just the fallback below: an adverse index-price move must not be able to hide
+insolvency behind an unrealised loss that was excluded from the check.
 
 Where:
 - `collateral_usd` — current mark-to-market value of the position's collateral, in USD at `FLOAT_PRECISION`
 - `fees_usd` — all currently-accrued fees on the position, in USD
+- `pnl_usd` — the position's current unrealised profit/loss, in USD
 - `size_in_usd` — total notional size of the position
 - `min_collateral_factor` — per-market configuration stored under `min_collateral_factor_key(market)` in `data_store`
 
-If `min_collateral_factor` is unset (0, the fallback case only), the check instead
-uses `net_collateral_usd + pnl_usd < 0` — unrealised PnL only enters the
-liquidation check in this fallback branch, never in the primary comparison above.
+If `min_collateral_factor` is unset (0, the fallback case), the check instead
+uses `remaining_usd < 0` — the same PnL-inclusive `remaining_usd` as the
+primary comparison, just against a flat zero threshold instead of
+`size_in_usd × min_collateral_factor`.
 
 The `is_liquidatable` helper in `libs/position_utils` encodes this check and is the sole gate called by `LiquidationHandler::check_liquidatable`. If the check passes (position is healthy) the liquidation reverts with `NotLiquidatable`.
 
 ### Why the factor matters
 
-`min_collateral_factor` is typically 1% (`FLOAT_PRECISION / 100`). A $10,000 notional position needs at least $100 of net collateral (after fees). As fees accrue (and, in the fallback case only, as unrealised PnL moves against the position), available collateral erodes — once it falls below this threshold the position can be forcibly closed to prevent bad debt from accumulating in the pool.
+`min_collateral_factor` is typically 1% (`FLOAT_PRECISION / 100`). A $10,000 notional position needs at least $100 of net collateral (after fees, with unrealised PnL applied). As fees accrue and unrealised PnL moves against the position, available collateral erodes — once it falls below this threshold the position can be forcibly closed to prevent bad debt from accumulating in the pool.
 
 ---
 
@@ -110,8 +113,8 @@ If `gross_collateral < keeper_fee + liquidation_fee` the fees are capped at the 
 - Position size: $10,000 notional
 - Collateral: 2 tokens of long_token @ $100 each = $200
 - `min_collateral_factor` = 1%
-- Liquidation fee factor = 5% of gross collateral
-- Keeper fee factor = 20% of liquidation fee
+- `liquidation_execution_fee_key(market)` = $5 flat, paid to the keeper (the
+  only fee actually charged today — see §3's disclaimer)
 
 **Health check before price move:**
 ```
@@ -127,12 +130,11 @@ required_collateral = $10,000 × 0.01 = $100
 $90 < $100  →  position is liquidatable
 ```
 
-**Collateral distribution:**
+**Collateral distribution** (flat fee only, capped at the position's collateral):
 ```
 gross_collateral = $90.00
-liquidation_fee  = $90.00 × 5%  = $4.50   → insurance fund
-keeper_fee       = $4.50  × 20% = $0.90   → keeper wallet
-remainder        = $90.00 - $4.50 = $85.50 → position owner
+keeper_fee       = min($5.00, $90.00) = $5.00   → keeper wallet
+remainder        = $90.00 - $5.00 = $85.00      → position owner
 ```
 
 ---
@@ -144,7 +146,7 @@ remainder        = $90.00 - $4.50 = $85.50 → position owner
 | **Trigger** | Individual position health factor < 1 | `total trader PnL / pool_value` (FLOAT_PRECISION-scaled ratio) exceeds the per-market-per-side threshold stored under `max_pnl_factor_for_adl_key(market, is_long)` |
 | **Executor role** | `LIQUIDATION_KEEPER` | `ADL_KEEPER` |
 | **Position selection** | Any single position below the health threshold | Highest-profit positions first (most impact on pool) |
-| **Fee charged** | Keeper fee + insurance fee | None |
+| **Fee charged** | Flat keeper execution fee only (`liquidation_execution_fee_key`) | None |
 | **Outcome** | Position fully closed | Position partially or fully reduced |
 | **Primary purpose** | Prevent bad debt on under-collateralised positions | Rebalance pool PnL when profitable OI grows too large |
 
