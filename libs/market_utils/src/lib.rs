@@ -326,8 +326,6 @@ pub fn update_funding_state(
     ds: &Address,
     caller: &Address,
     market: &MarketProps,
-    _long_token_price: i128,
-    _short_token_price: i128,
     current_time: u64,
 ) -> FundingResult {
     let ds_client = DataStoreClient::new(env, ds);
@@ -1205,7 +1203,7 @@ mod tests {
         );
 
         let market = make_market_props(&mt, &it, &lt, &st);
-        let result = update_funding_state(&env, &ds, &admin, &market, 0, 0, 1);
+        let result = update_funding_state(&env, &ds, &admin, &market, 1);
 
         // Rate crossed zero (was 100, now negative) → fnd_flip event fires exactly here.
         assert!(
@@ -1240,7 +1238,7 @@ mod tests {
         );
 
         let market = make_market_props(&mt, &it, &lt, &st);
-        let result = update_funding_state(&env, &ds, &admin, &market, 0, 0, 1);
+        let result = update_funding_state(&env, &ds, &admin, &market, 1);
 
         // Rate stayed positive (magnitude increased but no sign change) → no fnd_flip event.
         assert!(
@@ -1276,7 +1274,7 @@ mod tests {
         ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &st, false), &(8_000_000 * FLOAT_PRECISION));
 
         let market = make_market_props(&mt, &it, &lt, &st);
-        let result = update_funding_state(&env, &ds, &admin, &market, 0, 0, 100);
+        let result = update_funding_state(&env, &ds, &admin, &market, 100);
 
         assert!(
             result.funding_factor_per_second < 0,
@@ -1312,7 +1310,7 @@ mod tests {
         ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &st, false), &(2_000_000 * FLOAT_PRECISION));
 
         let market = make_market_props(&mt, &it, &lt, &st);
-        let result = update_funding_state(&env, &ds, &admin, &market, 0, 0, 100);
+        let result = update_funding_state(&env, &ds, &admin, &market, 100);
 
         assert!(
             result.funding_factor_per_second > 0,
@@ -1349,7 +1347,7 @@ mod tests {
         ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &st, false), &short_oi);
 
         let market = make_market_props(&mt, &it, &lt, &st);
-        let result = update_funding_state(&env, &ds, &admin, &market, 0, 0, 100);
+        let result = update_funding_state(&env, &ds, &admin, &market, 100);
 
         // The deltas must actually be nonzero, or the sum-to-zero check below would
         // trivially (and vacuously) pass.

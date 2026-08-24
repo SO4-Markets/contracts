@@ -24,7 +24,7 @@ SO4.market uses a role-based access control system managed by the `role_store` c
 
 ## Key Derivation
 
-Role keys are computed in `libs/gmx_keys/src/lib.rs` under the `roles` module:
+Role keys are computed in `libs/keys/src/lib.rs` under the `roles` module:
 
 ```rust
 pub fn order_keeper(env: &Env) -> BytesN<32> {

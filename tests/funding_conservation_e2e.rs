@@ -227,7 +227,7 @@ fn funding_conserves_real_token_balances_between_two_opposite_side_positions() {
     ds_c.set_i128_instance(&w.admin, &gmx_keys::min_funding_factor_per_second_key(env, &w.market_tk), &(-bound));
     ds_c.set_i128_instance(&w.admin, &gmx_keys::max_funding_factor_per_second_key(env, &w.market_tk), &bound);
 
-    update_funding_state(env, &w.ds, &w.admin, &market_props, 0, 0, 100_000);
+    update_funding_state(env, &w.ds, &w.admin, &market_props, 100_000);
 
     set_prices(&w, 2000);
 

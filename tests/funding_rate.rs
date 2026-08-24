@@ -903,8 +903,6 @@ fn test_funding_rate_accumulation_and_settlement_integration() {
         &w.ds,
         &w.admin,
         &market_props,
-        2_000 * ONE_USD, // long_token_price
-        2_000 * ONE_USD, // short_token_price
         dt,
     );
 
