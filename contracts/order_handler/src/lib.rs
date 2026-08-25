@@ -612,12 +612,36 @@ impl OrderHandler {
                 params.collateral_delta_amount
             };
 
+            // Issue #620: apply the same position-manager owner/receiver
+            // redirection create_order applies, so the two order-creation
+            // entrypoints agree on who owns an order created on someone else's
+            // behalf. (The lookup direction itself is reversed per #385/#535 —
+            // that is a separate, already-tracked defect; this mirrors
+            // create_order's current behavior as-is, not a fix for #385.)
+            let is_position_order = matches!(
+                params.order_type,
+                OrderType::MarketIncrease
+                    | OrderType::LimitIncrease
+                    | OrderType::StopIncrease
+                    | OrderType::MarketDecrease
+                    | OrderType::LimitDecrease
+                    | OrderType::StopLossDecrease
+            );
+            let (actual_owner, actual_receiver) = if is_position_order {
+                match ds.get_position_manager(&caller, &params.market) {
+                    Some(owner) => (owner.clone(), owner),
+                    None => (caller.clone(), params.receiver.clone()),
+                }
+            } else {
+                (caller.clone(), params.receiver.clone())
+            };
+
             let nonce = ds.increment_nonce(&handler);
             let key = order_key(&env, nonce);
 
             let order = OrderProps {
-                account: caller.clone(),
-                receiver: params.receiver.clone(),
+                account: actual_owner.clone(),
+                receiver: actual_receiver,
                 market: params.market.clone(),
                 initial_collateral_token: params.initial_collateral_token.clone(),
                 swap_path: params.swap_path.clone(),
@@ -636,7 +660,7 @@ impl OrderHandler {
                 .persistent()
                 .set(&OrderStorageKey::Order(key.clone()), &order);
             ds.add_bytes32_to_set(&handler, &order_list_key(&env), &key);
-            ds.add_bytes32_to_set(&handler, &account_order_list_key(&env, &caller), &key);
+            ds.add_bytes32_to_set(&handler, &account_order_list_key(&env, &actual_owner), &key);
 
             // Issue #442: include size/collateral/order_type so pending orders can
             // be displayed from the creation event without an extra RPC round-trip.
@@ -644,7 +668,7 @@ impl OrderHandler {
                 (symbol_short!("ord_crt"),),
                 (
                     key.clone(),
-                    caller.clone(),
+                    actual_owner,
                     params.market.clone(),
                     params.size_delta_usd,
                     collateral_delta_amount,
@@ -3737,6 +3761,56 @@ mod tests {
         assert!(matches!(tp.order_type, OrderType::LimitDecrease));
         assert_eq!(sl.trigger_price, 1800 * fp);
         assert_eq!(tp.trigger_price, 2500 * fp);
+    }
+
+    /// Issue #620: create_orders must apply the same position-manager
+    /// owner/receiver redirection create_order applies, so a position order
+    /// created through the batch entrypoint is attributed the same way as one
+    /// created through the singular entrypoint. (The redirection direction
+    /// itself is the separately-tracked #385/#535 bug — this only confirms
+    /// create_orders mirrors create_order's current behavior, not that the
+    /// lookup direction is correct.)
+    #[test]
+    fn create_orders_applies_position_manager_redirection() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        let ds_c = DsClient::new(&w.env, &w.ds);
+
+        let redirected_to = Address::generate(&w.env);
+        // Mirrors create_order's current (pre-#385-fix) lookup direction:
+        // ds.get_position_manager(&caller, &market).
+        ds_c.set_position_manager(&w.user, &w.market_tk, &redirected_to);
+
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let requests = Vec::from_array(
+            &w.env,
+            [CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                size_delta_usd: 2000 * fp,
+                collateral_delta_amount: COLLATERAL,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketIncrease,
+                is_long: true,
+                expiry_ledger: None,
+            }],
+        );
+
+        let keys = hc.create_orders(&w.user, &requests);
+        let order = hc.get_order(&keys.get_unchecked(0)).unwrap();
+
+        assert_eq!(
+            order.account, redirected_to,
+            "create_orders must redirect account the same way create_order does"
+        );
+        assert_eq!(order.receiver, redirected_to);
     }
 
     /// Issue #454: two MarketIncrease legs sharing the same collateral token in one
