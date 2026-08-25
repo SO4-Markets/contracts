@@ -46,6 +46,8 @@ pub enum Error {
     PriceNotFound = 6,
     InvalidSignature = 7,
     NoKeepers = 8,
+    /// clear_prices called with more than MAX_CLEAR_PRICES_BATCH_SIZE tokens (issue #619).
+    BatchSizeLimitExceeded = 9,
 }
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
@@ -71,6 +73,10 @@ const PRICE_TTL_LEDGERS: u32 = 120;
 /// 60-ledger window so `get_primary_price` rejects prices that were valid at
 /// submission but have since drifted past the documented freshness window (#379).
 const PRICE_FRESHNESS_LEDGERS: u32 = 60;
+
+/// Maximum tokens per `clear_prices` call (issue #619), matching the batch-cap
+/// pattern used elsewhere in the workspace (fee_batch_sweeper::MAX_BATCH_CLAIM_SIZE).
+const MAX_CLEAR_PRICES_BATCH_SIZE: u32 = 20;
 
 // ─── Signed price submitted by keeper ────────────────────────────────────────
 
@@ -407,6 +413,14 @@ impl Oracle {
     pub fn clear_prices(env: Env, caller: Address, tokens: Vec<Address>) {
         caller.require_auth();
         require_order_keeper(&env, &caller);
+        // Issue #619: cap batch size, matching every other batch entrypoint in
+        // this workspace (fee_batch_sweeper::MAX_BATCH_CLAIM_SIZE,
+        // order_handler::create_orders's cap of 5) — an unbounded Vec here can
+        // be built large enough to exceed the ledger's per-transaction resource
+        // budget, failing with an opaque resource error instead of this typed one.
+        if tokens.len() > MAX_CLEAR_PRICES_BATCH_SIZE {
+            panic_with_error!(&env, Error::BatchSizeLimitExceeded);
+        }
         for i in 0..tokens.len() {
             let token = tokens.get(i).unwrap();
             env.storage().temporary().remove(&TempKey::Price(token));
@@ -830,6 +844,45 @@ mod tests {
 
         client.clear_price(&admin, &token);
         assert!(client.try_get_price(&token).is_none());
+    }
+
+    /// Issue #619: clear_prices must reject a batch larger than
+    /// MAX_CLEAR_PRICES_BATCH_SIZE, matching the cap pattern already applied
+    /// to every other batch entrypoint in the workspace.
+    #[test]
+    #[should_panic]
+    fn clear_prices_over_max_batch_size_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let mut tokens = Vec::new(&env);
+        let mut i = 0u32;
+        while i < MAX_CLEAR_PRICES_BATCH_SIZE + 1 {
+            tokens.push_back(Address::generate(&env));
+            i += 1;
+        }
+
+        client.clear_prices(&admin, &tokens);
+    }
+
+    /// A batch exactly at the cap must still succeed.
+    #[test]
+    fn clear_prices_at_max_batch_size_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let mut tokens = Vec::new(&env);
+        let mut i = 0u32;
+        while i < MAX_CLEAR_PRICES_BATCH_SIZE {
+            tokens.push_back(Address::generate(&env));
+            i += 1;
+        }
+
+        client.clear_prices(&admin, &tokens);
     }
 
     // ── Issue #172: ledger sequence wrap-around staleness ─────────────────────
