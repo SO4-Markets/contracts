@@ -26,6 +26,11 @@ fee-handler = { path = "../contracts/fee_handler" }
 market-token = { path = "../contracts/market_token" }
 reader = { path = "../contracts/reader" }
 order-cleanup = { path = "../contracts/order_cleanup" }
+exchange-router = { path = "../contracts/exchange_router" }
+market-factory = { path = "../contracts/market_factory" }
+insurance-fund-router = { path = "../contracts/insurance_fund_router" }
+fee-batch-sweeper = { path = "../contracts/fee_batch_sweeper" }
+referral-storage = { path = "../contracts/referral_storage" }
 
 [lib]
 path = "lib.rs"
@@ -98,3 +103,7 @@ path = "funding_conservation_e2e.rs"
 [[test]]
 name = "order_cleanup"
 path = "order_cleanup.rs"
+
+[[test]]
+name = "router_and_factory_coverage"
+path = "router_and_factory_coverage.rs"
