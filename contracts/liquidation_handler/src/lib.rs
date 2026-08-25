@@ -13,7 +13,8 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    market_index_token_key, market_long_token_key, market_short_token_key, position_key, roles,
+    last_keeper_activity_key, market_index_token_key, market_long_token_key,
+    market_short_token_key, position_key, roles,
 };
 use gmx_position_utils::is_liquidatable;
 use gmx_types::{MarketProps, PositionProps, PriceProps};
@@ -61,6 +62,7 @@ trait IDataStore {
     /// Cache-first read for rarely-changing market config (issue #299).
     fn get_u128_cached(env: Env, key: BytesN<32>) -> u128;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
+    fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
 }
 
 #[allow(dead_code)]
@@ -284,6 +286,15 @@ impl LiquidationHandler {
             &is_long,
         );
 
+        // Issue #614: record LIQUIDATION_KEEPER activity so check_keeper_heartbeat
+        // can report this role as alive.
+        record_keeper_activity(
+            &env,
+            &data_store,
+            &env.current_contract_address(),
+            &roles::liquidation_keeper(&env),
+        );
+
         // Issue #437: carry price, fee, and PnL on the outer confirmation event too
         // (separate from the position event in order_handler) so this event alone
         // is enough to reconstruct what a liquidation cost/paid without replaying
@@ -375,6 +386,15 @@ impl LiquidationHandler {
         let remaining_size = size_in_usd.saturating_sub(liquidated_size);
         let liquidation_fee = (liquidated_size * 50) / 10000; // 50 bps fee
 
+        // Issue #614: record LIQUIDATION_KEEPER activity so check_keeper_heartbeat
+        // can report this role as alive.
+        record_keeper_activity(
+            &env,
+            &data_store,
+            &env.current_contract_address(),
+            &roles::liquidation_keeper(&env),
+        );
+
         env.events().publish_event(&PartialLiquidationExecuted {
             keeper,
             account,
@@ -410,6 +430,21 @@ fn load_market_props(env: &Env, data_store: &Address, market_token: &Address) ->
         long_token,
         short_token,
     }
+}
+
+/// Issue #614: stamp LIQUIDATION_KEEPER's last activity, mirroring
+/// order_handler's identical helper for ORDER_KEEPER (issue #249). Without
+/// this, check_keeper_heartbeat(roles::liquidation_keeper) always reads
+/// last_active_ledger = 0 and reports permanently stale, regardless of how
+/// recently the liquidation keeper actually executed.
+/// `caller` must hold CONTROLLER in data_store (the handler does).
+fn record_keeper_activity(env: &Env, data_store: &Address, caller: &Address, role: &BytesN<32>) {
+    let ledger = env.ledger().sequence() as u128;
+    DataStoreClient::new(env, data_store).set_u128(
+        caller,
+        &last_keeper_activity_key(env, role),
+        &ledger,
+    );
 }
 
 // ─── Tests — Issue #71 & #72: liquidation E2E tests ──────────────────────────
@@ -751,6 +786,37 @@ mod tests {
                 .get_position(&pos_key)
                 .is_none(),
             "position key must be removed after liquidation"
+        );
+    }
+
+    /// Issue #614: liquidate_position must record LIQUIDATION_KEEPER's activity
+    /// in data_store, so check_keeper_heartbeat(roles::liquidation_keeper)
+    /// reports the role as alive (last_active_ledger == current ledger)
+    /// instead of permanently stale (last_active_ledger == 0).
+    #[test]
+    fn liquidate_position_records_keeper_activity() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        open_long_position(&w, ONE_TOKEN, 20_000 * fp);
+        set_prices(&w, 100 * fp);
+
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        let key = last_keeper_activity_key(&w.env, &roles::liquidation_keeper(&w.env));
+        assert_eq!(ds_c.get_u128(&key), 0, "no activity recorded before liquidation");
+
+        LiquidationHandlerClient::new(&w.env, &w.liq_handler).liquidate_position(
+            &w.liq_keeper,
+            &w.user,
+            &w.market_tk,
+            &w.long_tk,
+            &true,
+        );
+
+        assert_eq!(
+            ds_c.get_u128(&key),
+            w.env.ledger().sequence() as u128,
+            "LIQUIDATION_KEEPER activity must be recorded after a successful liquidation"
         );
     }
 
