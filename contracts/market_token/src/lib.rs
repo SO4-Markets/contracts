@@ -30,6 +30,10 @@ pub enum Error {
     NegativeAmount = 6,
     AllowanceExpired = 7,
     InvalidPoolToken = 8,
+    /// approve() called with amount > 0 and an expiration_ledger already in
+    /// the past (issue #616) — matches the standard SEP-41 token contract's
+    /// validation, which panics on this input rather than silently accepting it.
+    InvalidExpirationLedger = 9,
 }
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
@@ -186,6 +190,13 @@ impl MarketToken {
         if amount == 0 {
             env.storage().temporary().remove(&key);
         } else {
+            // Issue #616: reject an already-past expiration_ledger, matching
+            // the standard SEP-41 token contract's validation. Without this,
+            // ledger_gap silently saturates to 0 and the call succeeds while
+            // storing an allowance that is already expired.
+            if expiration_ledger < env.ledger().sequence() {
+                panic_with_error!(&env, Error::InvalidExpirationLedger);
+            }
             let ledger_gap = expiration_ledger.saturating_sub(env.ledger().sequence());
             env.storage().temporary().set(
                 &key,
@@ -509,6 +520,23 @@ mod tests {
         assert_eq!(client.balance(&alice), 700_0000);
         assert_eq!(client.balance(&bob), 300_0000);
         assert_eq!(client.allowance(&alice, &spender), 200_0000);
+    }
+
+    /// Issue #616: approve() with amount > 0 and an already-past
+    /// expiration_ledger must revert, matching standard SEP-41 behavior,
+    /// instead of silently storing an already-expired allowance.
+    #[test]
+    #[should_panic]
+    fn test_approve_rejects_past_expiration_ledger() {
+        let (env, admin, _, mt_id, _, _) = setup();
+        let client = MarketTokenClient::new(&env, &mt_id);
+        let alice = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        client.mint(&admin, &alice, &1000_0000i128);
+        // Advance the ledger so sequence 1 is already in the past.
+        env.ledger().with_mut(|li| li.sequence_number = 2);
+        client.approve(&alice, &spender, &500_0000i128, &1u32);
     }
 
     #[test]
