@@ -1,8 +1,10 @@
-//! Order vault — holds collateral and LP tokens during order lifecycle.
+//! Order vault — holds collateral during order lifecycle.
 //! Mirrors GMX's OrderVault pattern (same balance-snapshot pattern as deposit/withdrawal vaults).
 //!
-//! Collateral for market/limit increase orders and LP tokens for decrease orders
-//! are held here between create_order and execute_order.
+//! Collateral for market/limit increase orders and swaps is held here between
+//! create_order and execute_order. Decrease and liquidation orders never
+//! transfer funds through this vault — the position's own collateral is paid
+//! out directly on close.
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 

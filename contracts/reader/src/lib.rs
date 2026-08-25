@@ -1624,6 +1624,23 @@ mod tests {
         assert!(stats.total_pool_value_usd > 0);
     }
 
+    /// get_open_interest returns (long, short) open interest in USD for a
+    /// single market, matching the seeded values in that order (issue #638).
+    #[test]
+    fn get_open_interest_returns_long_and_short_in_order() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let long_oi = 1_000 * fp as u128;
+        let short_oi = 400 * fp as u128;
+
+        let m = seed_market(&w, 100, 100, long_oi, short_oi, 0, 0, 2 * fp);
+        let (long, short) =
+            ReaderClient::new(&w.env, &w.reader).get_open_interest(&w.ds, &m);
+
+        assert_eq!(long, long_oi as i128, "long open interest must come first");
+        assert_eq!(short, short_oi as i128, "short open interest must come second");
+    }
+
     /// Two markets: totals are the sum of the per-market contributions.
     #[test]
     fn protocol_stats_two_markets_sum() {
