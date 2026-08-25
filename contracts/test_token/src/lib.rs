@@ -66,6 +66,11 @@ pub struct TestToken;
 impl TestToken {
     pub fn initialize(env: Env, owner: Address, decimal: u32, name: String, symbol: String) {
         require_not_mainnet(&env);
+        // Issue #612: require the owner's own auth so a front-runner who
+        // observes the deploy transaction (or predicts the deterministic
+        // contract address) can't call initialize first with themselves as
+        // owner, matching every other initialize in the workspace.
+        owner.require_auth();
         if env.storage().instance().has(&InstanceKey::Owner) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
@@ -407,6 +412,25 @@ mod tests {
         assert_eq!(client.balance(&alice), 750_0000);
         assert_eq!(client.balance(&bob), 250_0000);
         assert_eq!(client.total_supply(), 10_000_000);
+    }
+
+    /// Issue #612: initialize must require the owner's own auth, not just
+    /// guard against re-initialization — otherwise a front-runner who
+    /// observes the deploy transaction could call initialize first with
+    /// themselves as owner.
+    #[test]
+    #[should_panic]
+    fn initialize_requires_owner_auth() {
+        let env = Env::default();
+        // No mock_all_auths() — any require_auth() call must panic.
+        let owner = Address::generate(&env);
+        let id = env.register(TestToken, ());
+        TestTokenClient::new(&env, &id).initialize(
+            &owner,
+            &7,
+            &String::from_str(&env, "Test Wrapped Bitcoin"),
+            &String::from_str(&env, "TWBTC"),
+        );
     }
 
     /// Issue #616: approve() with amount > 0 and an already-past

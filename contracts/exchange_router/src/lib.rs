@@ -100,6 +100,11 @@ pub enum Error {
     /// almost certainly a copy-paste mistake that would silently misroute
     /// withdrawal calls to a contract with a different interface.
     InvalidWithdrawalHandler = 8,
+    /// claim_funding_fees (or multicall's ClaimFundingFees action) was called
+    /// with markets.len() != tokens.len() (issue #611) — indexing would
+    /// otherwise panic with a raw Option::unwrap() on None rather than a
+    /// typed error.
+    MismatchedBatchLength = 9,
 }
 
 // ─── External handler clients ─────────────────────────────────────────────────
@@ -472,6 +477,9 @@ impl ExchangeRouter {
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::ClaimFundingFees(p) => {
+                    if p.markets.len() != p.tokens.len() {
+                        panic_with_error!(&env, Error::MismatchedBatchLength);
+                    }
                     let fee_client = FeeHandlerClient::new(&env, &fee_handler);
                     let mlen = p.markets.len();
                     let mut mi = 0u32;
@@ -593,6 +601,9 @@ impl ExchangeRouter {
         tokens: Vec<Address>,
     ) {
         caller.require_auth();
+        if markets.len() != tokens.len() {
+            panic_with_error!(&env, Error::MismatchedBatchLength);
+        }
         let fee_handler: Address = env
             .storage()
             .instance()
@@ -1615,5 +1626,40 @@ mod tests {
             vault_bal, 0,
             "order_vault must hold nothing after multicall reverts"
         );
+    }
+
+    // ── Issue #611: claim_funding_fees mismatched batch lengths ───────────────
+
+    /// claim_funding_fees must reject mismatched markets/tokens lengths with a
+    /// typed error instead of panicking on a raw Option::unwrap().
+    #[test]
+    #[should_panic]
+    fn claim_funding_fees_rejects_mismatched_lengths() {
+        let w = setup();
+        let trader = Address::generate(&w.env);
+        let router_client = ExchangeRouterClient::new(&w.env, &w.router);
+        router_client.claim_funding_fees(
+            &trader,
+            &Vec::from_array(&w.env, [w.market_tk.clone(), w.market_tk.clone()]),
+            &Vec::from_array(&w.env, [w.long_tk.clone()]),
+        );
+    }
+
+    /// multicall's ClaimFundingFees action must reject mismatched
+    /// markets/tokens lengths the same way the standalone function does.
+    #[test]
+    #[should_panic]
+    fn multicall_claim_funding_fees_rejects_mismatched_lengths() {
+        let w = setup();
+        let trader = Address::generate(&w.env);
+        let router_client = ExchangeRouterClient::new(&w.env, &w.router);
+        let actions = soroban_sdk::vec![
+            &w.env,
+            RouterAction::ClaimFundingFees(ClaimFundingFeesParams {
+                markets: Vec::from_array(&w.env, [w.market_tk.clone(), w.market_tk.clone()]),
+                tokens: Vec::from_array(&w.env, [w.long_tk.clone()]),
+            }),
+        ];
+        router_client.multicall(&trader, &actions);
     }
 }

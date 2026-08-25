@@ -23,6 +23,10 @@ trait ITestToken {
     fn mint(env: Env, caller: Address, account: Address, amount: i128);
 }
 
+/// Maximum tokens per `claim_many` call (issue #609), matching the batch-cap
+/// pattern used elsewhere in the workspace (fee_batch_sweeper::MAX_BATCH_CLAIM_SIZE).
+const MAX_CLAIM_BATCH_SIZE: u32 = 20;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -34,6 +38,8 @@ pub enum Error {
     InvalidAmount = 5,
     ClaimTooSoon = 6,
     MainnetNotAllowed = 7,
+    /// claim_many called with more than MAX_CLAIM_BATCH_SIZE tokens (issue #609).
+    BatchSizeLimitExceeded = 8,
 }
 
 #[contracttype]
@@ -55,6 +61,11 @@ pub struct TestFaucet;
 impl TestFaucet {
     pub fn initialize(env: Env, admin: Address, cooldown_ledgers: u32) {
         require_not_mainnet(&env);
+        // Issue #612: require the admin's own auth so a front-runner who
+        // observes the deploy transaction (or predicts the deterministic
+        // contract address) can't call initialize first with themselves as
+        // admin, matching every other initialize in the workspace.
+        admin.require_auth();
         if env.storage().instance().has(&InstanceKey::Admin) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
@@ -133,6 +144,13 @@ impl TestFaucet {
     /// which hit a Soroban auth-reuse bug and failed for real signed transactions.
     pub fn claim_many(env: Env, account: Address, tokens: Vec<Address>) -> Vec<i128> {
         account.require_auth();
+        // Issue #609: cap batch size, matching every other batch entrypoint
+        // in the codebase (fee_batch_sweeper::MAX_BATCH_CLAIM_SIZE,
+        // order_handler::create_orders). do_claim performs a storage
+        // read/write and a cross-contract mint call per entry.
+        if tokens.len() > MAX_CLAIM_BATCH_SIZE {
+            panic_with_error!(&env, Error::BatchSizeLimitExceeded);
+        }
         let mut amounts = Vec::new(&env);
         for token in tokens.iter() {
             amounts.push_back(do_claim(&env, &account, token));
@@ -281,6 +299,39 @@ mod tests {
         assert_eq!(amounts, Vec::from_array(&env, [100_0000000, 50_0000000]));
         assert_eq!(TokenClient::new(&env, &token_a_id).balance(&user), 100_0000000);
         assert_eq!(token_b.balance(&user), 50_0000000);
+    }
+
+    /// Issue #609: claim_many must reject a batch larger than
+    /// MAX_CLAIM_BATCH_SIZE, matching the cap pattern used elsewhere in the
+    /// workspace.
+    #[test]
+    #[should_panic]
+    fn claim_many_over_max_batch_size_reverts() {
+        let (env, _admin, token_id, faucet) = setup();
+        let user = Address::generate(&env);
+
+        let mut tokens = Vec::new(&env);
+        let mut i = 0u32;
+        while i < MAX_CLAIM_BATCH_SIZE + 1 {
+            tokens.push_back(token_id.clone());
+            i += 1;
+        }
+
+        faucet.claim_many(&user, &tokens);
+    }
+
+    /// Issue #612: initialize must require the admin's own auth, not just
+    /// guard against re-initialization — otherwise a front-runner who
+    /// observes the deploy transaction could call initialize first with
+    /// themselves as admin.
+    #[test]
+    #[should_panic]
+    fn initialize_requires_admin_auth() {
+        let env = Env::default();
+        // No mock_all_auths() — any require_auth() call must panic.
+        let admin = Address::generate(&env);
+        let faucet_id = env.register(TestFaucet, ());
+        TestFaucetClient::new(&env, &faucet_id).initialize(&admin, &10);
     }
 
     #[test]
