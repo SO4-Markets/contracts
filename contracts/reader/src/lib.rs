@@ -1233,7 +1233,7 @@ impl Reader {
         let mut candidates: Vec<AdlCandidate> = Vec::new(&env);
 
         let mut i = 0u32;
-        while i < pos_count && candidates.len() < limit {
+        while i < pos_count {
             let batch_end = if i + 100 > pos_count { pos_count } else { i + 100 };
             let position_keys = ds.get_bytes32_set_at(&pos_list_key, &i, &batch_end);
 
@@ -1972,6 +1972,119 @@ mod tests {
         let c = result.get(0).unwrap();
         assert_eq!(c.owner, trader);
         assert!(c.pnl_to_size_ratio_bps > 0);
+    }
+
+    /// Issue #617: with more eligible positions than `limit`, the scan must
+    /// collect every candidate before sorting, so a later-encountered,
+    /// higher-ratio position is returned in preference to an earlier,
+    /// lower-ratio one — not whichever `limit` positions happened to be
+    /// scanned first in storage order.
+    #[test]
+    fn get_adl_eligible_positions_returns_highest_ratio_not_scan_order() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let admin = Address::generate(&env);
+
+        let rs = env.register(RoleStore, ());
+        RsClient::new(&env, &rs).initialize(&admin);
+        RsClient::new(&env, &rs).grant_role(&admin, &admin, &roles::controller(&env));
+        RsClient::new(&env, &rs).grant_role(&admin, &admin, &roles::order_keeper(&env));
+
+        let ds = env.register(DataStore, ());
+        DsClient::new(&env, &ds).initialize(&admin, &rs);
+
+        let oracle = env.register(Oracle, ());
+        let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
+        OClient::new(&env, &oracle).initialize(&admin, &rs, &ds, &passphrase);
+
+        let reader = env.register(Reader, ());
+        ReaderClient::new(&env, &reader).initialize(&admin);
+
+        let index_tk = Address::generate(&env);
+        let long_tk = Address::generate(&env);
+        let short_tk = Address::generate(&env);
+        let market_tk = Address::generate(&env);
+
+        let ds_c = DsClient::new(&env, &ds);
+        ds_c.set_address(&admin, &market_index_token_key(&env, &market_tk), &index_tk);
+        ds_c.set_address(&admin, &market_long_token_key(&env, &market_tk), &long_tk);
+        ds_c.set_address(&admin, &market_short_token_key(&env, &market_tk), &short_tk);
+
+        let fp = FLOAT_PRECISION;
+        OClient::new(&env, &oracle).set_prices_simple(
+            &admin,
+            &SdkVec::from_array(
+                &env,
+                [
+                    TokenPrice { token: index_tk.clone(), min: 2 * fp, max: 2 * fp },
+                    TokenPrice { token: long_tk.clone(), min: fp, max: fp },
+                    TokenPrice { token: short_tk.clone(), min: fp, max: fp },
+                ],
+            ),
+        );
+
+        let dummy_vault = env.register(OrderVault, ());
+        OVClient::new(&env, &dummy_vault).initialize(&admin, &rs);
+        let ord_handler = env.register(OrderHandler, ());
+        OHClient::new(&env, &ord_handler).initialize(&admin, &rs, &ds, &oracle, &dummy_vault);
+        RsClient::new(&env, &rs).grant_role(&admin, &ord_handler, &roles::controller(&env));
+
+        let tk_prec = TOKEN_PRECISION;
+        let pos_list = position_list_key(&env);
+
+        // Three long positions, all profitable at index=$2, entered in storage
+        // order low-ratio -> low-ratio -> high-ratio. Entry price is encoded via
+        // size_in_tokens (higher size_in_tokens per size_in_usd = cheaper entry =
+        // bigger profit ratio at the same $2 exit price).
+        let ratios_entry_price = [(2i128 * fp / 3, "low_a"), (fp / 2, "low_b"), (fp / 5, "high")];
+        let mut traders = SdkVec::new(&env);
+        for (entry_price, _label) in ratios_entry_price.iter() {
+            let trader = Address::generate(&env);
+            traders.push_back(trader.clone());
+            let size_in_tokens = mul_div_wide(&env, 10_000i128 * fp, tk_prec, *entry_price);
+            let position = PositionProps {
+                account: trader.clone(),
+                market: market_tk.clone(),
+                collateral_token: long_tk.clone(),
+                size_in_usd: 10_000i128 * fp,
+                size_in_tokens,
+                collateral_amount: 500i128 * tk_prec,
+                pending_impact_amount: 0,
+                borrowing_factor: 0,
+                funding_fee_amount_per_size: 0,
+                long_claim_fnd_per_size: 0,
+                short_claim_fnd_per_size: 0,
+                increased_at_time: 0,
+                decreased_at_time: 0,
+                is_long: true,
+            };
+            let pk = position_key(&env, &trader, &market_tk, &long_tk, true);
+            env.as_contract(&ord_handler, || {
+                env.storage()
+                    .persistent()
+                    .set(&PositionStorageKey::Position(pk.clone()), &position);
+            });
+            ds_c.add_bytes32_to_set(&admin, &pos_list, &pk);
+        }
+
+        // limit = 2 forces the old buggy scan to stop after the first two
+        // (both low-ratio) positions, before ever reaching the third,
+        // highest-ratio one.
+        let result = ReaderClient::new(&env, &reader)
+            .get_adl_eligible_positions(&ds, &oracle, &ord_handler, &market_tk, &true, &2);
+
+        assert_eq!(result.len(), 2);
+        let owners: SdkVec<Address> =
+            SdkVec::from_array(&env, [result.get(0).unwrap().owner, result.get(1).unwrap().owner]);
+        assert!(
+            owners.contains(&traders.get(2).unwrap()),
+            "the highest-ratio position (scanned last) must be included"
+        );
+        assert!(
+            !owners.contains(&traders.get(0).unwrap()),
+            "the lowest-ratio position must be excluded once the top 2 by ratio are kept"
+        );
     }
 
     /// A losing position (negative PnL) must not appear as an ADL candidate.
