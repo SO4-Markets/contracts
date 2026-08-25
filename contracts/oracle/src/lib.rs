@@ -128,6 +128,7 @@ trait IDataStore {
     fn set_bool(env: Env, caller: Address, key: BytesN<32>, value: bool) -> bool;
     fn set_bytes32(env: Env, caller: Address, key: BytesN<32>, value: BytesN<32>);
     fn add_address_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: Address);
+    fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
 }
 
 #[contracttype]
@@ -498,6 +499,33 @@ impl Oracle {
         let key = token_circuit_markets_key(&env, &token);
         DataStoreClient::new(&env, &data_store)
             .add_address_to_set(&env.current_contract_address(), &key, &market);
+    }
+
+    /// Configure the circuit-breaker deviation threshold for a market, in
+    /// basis points (issue #637).
+    ///
+    /// `check_circuit_breaker` reads this via `circuit_breaker_factor_key` to
+    /// decide whether a submitted price trips the breaker for the market.
+    /// Previously the only way to set this was a raw `data_store::set_u128`
+    /// call, which required the caller to hold data_store's own CONTROLLER
+    /// role directly — a broader grant than "manage this one oracle
+    /// parameter." This mirrors rotate_signer/register_market_for_breaker's
+    /// admin-gated pattern, writing through the oracle's own CONTROLLER-held
+    /// reference instead.
+    pub fn set_circuit_breaker_factor(env: Env, caller: Address, market: Address, factor_bps: u128) {
+        caller.require_auth();
+        require_admin(&env, &caller);
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let key = gmx_keys::circuit_breaker_factor_key(&env, &market);
+        DataStoreClient::new(&env, &data_store).set_u128(
+            &env.current_contract_address(),
+            &key,
+            &factor_bps,
+        );
     }
 }
 
