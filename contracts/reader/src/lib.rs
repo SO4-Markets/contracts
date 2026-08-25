@@ -1012,7 +1012,7 @@ impl Reader {
     ///
     /// Net collateral = gross collateral − pending borrowing fee − pending funding fee.
     /// Returns `None` when the position key does not exist.
-    /// Returns `effective_leverage_bps = u32::MAX` when net collateral has been fully
+    /// Returns `effective_leverage_x100 = u32::MAX` when net collateral has been fully
     /// consumed by fees (net ≤ 0), signalling imminent liquidation.
     pub fn get_position_leverage(
         env: Env,
@@ -1058,7 +1058,7 @@ impl Reader {
             0u128
         };
 
-        let effective_leverage_bps = if net_collateral_usd == 0 {
+        let effective_leverage_x100 = if net_collateral_usd == 0 {
             u32::MAX
         } else {
             mul_div_wide(&env, position.size_in_usd, 100, net_signed) as u32
@@ -1074,7 +1074,7 @@ impl Reader {
         );
 
         Some(PositionLeverage {
-            effective_leverage_bps,
+            effective_leverage_x100,
             net_collateral_usd,
             position_size_usd,
             is_liquidatable: is_liq,
@@ -1754,9 +1754,9 @@ mod tests {
     // ── Issue #218: get_position_leverage ────────────────────────────────────
 
     /// A position with 10,000 USD size and 500 USD net collateral (no fees) should
-    /// report effective_leverage_bps = 2000 (i.e. 20×).
+    /// report effective_leverage_x100 = 2000 (i.e. 20×).
     #[test]
-    fn get_position_leverage_2000_bps() {
+    fn get_position_leverage_2000_x100() {
         let env = Env::default();
         env.mock_all_auths();
         env.cost_estimate().budget().reset_unlimited();
@@ -1843,7 +1843,7 @@ mod tests {
             .get_position_leverage(&ds, &oracle, &ord_handler, &pk);
 
         let lev = result.unwrap();
-        assert_eq!(lev.effective_leverage_bps, 2000);
+        assert_eq!(lev.effective_leverage_x100, 2000);
         assert_eq!(lev.position_size_usd, (10_000u128 * fp as u128));
         assert_eq!(lev.net_collateral_usd, (500u128 * fp as u128));
         assert!(!lev.is_liquidatable);
@@ -2073,5 +2073,23 @@ mod tests {
         assert_eq!(result.token_out, token);
         assert_eq!(result.amount_out, 1_000u128);
         assert!(result.reverts_if_executed);
+    }
+
+    /// The stored admin address (reader's only persistent state) survives an
+    /// upgrade — checked by confirming a second admin-gated upgrade call still
+    /// authorizes against the same admin afterward.
+    /// Requires a compiled WASM binary to invoke update_current_contract_wasm;
+    /// not runnable in unit-test mode. Auth is covered by upgrade_non_admin_reverts.
+    #[test]
+    #[ignore]
+    fn upgrade_preserves_admin_storage() {
+        let w = setup();
+        let rc = ReaderClient::new(&w.env, &w.reader);
+
+        rc.upgrade(&BytesN::from_array(&w.env, &[0u8; 32]));
+
+        // If Admin storage hadn't survived, this second call would panic with
+        // NotInitialized instead of authorizing against the original admin.
+        rc.upgrade(&BytesN::from_array(&w.env, &[0u8; 32]));
     }
 }
