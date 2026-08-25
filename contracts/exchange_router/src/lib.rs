@@ -699,6 +699,7 @@ mod tests {
     use data_store::{DataStore, DataStoreClient as DsClient};
     use deposit_handler::{DepositHandler, DepositHandlerClient};
     use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
+    use fee_handler::{FeeHandler, FeeHandlerClient as FhClient};
     use gmx_keys::roles;
     use gmx_math::FLOAT_PRECISION;
     use gmx_types::{
@@ -1677,5 +1678,136 @@ mod tests {
             }),
         ];
         router_client.multicall(&trader, &actions);
+    }
+
+    // ── Issue #639: position_manager / ui_fee_factor pass-through coverage ─────
+
+    /// set_position_manager/get_position_manager round-trip through the
+    /// router to data_store, mirroring data_store's own storage.
+    #[test]
+    fn position_manager_round_trips_through_router() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let rs = env.register(RoleStore, ());
+        RsClient::new(&env, &rs).initialize(&admin);
+        let ds = env.register(DataStore, ());
+        DsClient::new(&env, &ds).initialize(&admin, &rs);
+
+        let dep_handler = Address::generate(&env);
+        let wth_handler = Address::generate(&env);
+        let ord_handler = Address::generate(&env);
+        let fee_handler = Address::generate(&env);
+        let router = env.register(ExchangeRouter, ());
+        ExchangeRouterClient::new(&env, &router).initialize(
+            &admin,
+            &rs,
+            &ds,
+            &dep_handler,
+            &wth_handler,
+            &ord_handler,
+            &fee_handler,
+        );
+
+        let owner = Address::generate(&env);
+        let market = Address::generate(&env);
+        let manager = Address::generate(&env);
+        let router_client = ExchangeRouterClient::new(&env, &router);
+
+        assert_eq!(
+            router_client.get_position_manager(&owner, &market),
+            None,
+            "no manager set yet"
+        );
+        router_client.set_position_manager(&owner, &market, &manager);
+        assert_eq!(
+            router_client.get_position_manager(&owner, &market),
+            Some(manager),
+            "router must forward to the same data_store entry get_position_manager reads"
+        );
+    }
+
+    /// set_ui_fee_factor forwards to fee_handler and the value is readable back.
+    #[test]
+    fn set_ui_fee_factor_forwards_to_fee_handler() {
+        let env = Env::default();
+        // The router forwards to fee_handler without itself requiring the
+        // caller's auth, so fee_handler's admin.require_auth() is a non-root
+        // authorization from the router call's perspective.
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let admin = Address::generate(&env);
+        let rs = env.register(RoleStore, ());
+        let rs_c = RsClient::new(&env, &rs);
+        rs_c.initialize(&admin);
+        let ds = env.register(DataStore, ());
+        DsClient::new(&env, &ds).initialize(&admin, &rs);
+        let fh = env.register(FeeHandler, ());
+        FhClient::new(&env, &fh).initialize(&admin, &rs, &ds);
+        // fee_handler writes the factor into data_store as itself, so it
+        // needs CONTROLLER (mirrors every other handler's own test setup).
+        rs_c.grant_role(&admin, &fh, &roles::controller(&env));
+
+        let dep_handler = Address::generate(&env);
+        let wth_handler = Address::generate(&env);
+        let ord_handler = Address::generate(&env);
+        let router = env.register(ExchangeRouter, ());
+        ExchangeRouterClient::new(&env, &router).initialize(
+            &admin,
+            &rs,
+            &ds,
+            &dep_handler,
+            &wth_handler,
+            &ord_handler,
+            &fh,
+        );
+
+        let ui_recv = Address::generate(&env);
+        let factor: u128 = FLOAT_PRECISION as u128 / 100; // 1%
+        ExchangeRouterClient::new(&env, &router).set_ui_fee_factor(&ui_recv, &factor);
+
+        assert_eq!(
+            FhClient::new(&env, &fh).get_ui_fee_factor(&ui_recv),
+            factor,
+            "router's set_ui_fee_factor must reach fee_handler's stored factor"
+        );
+    }
+
+    /// set_ui_fee_factor reverts for a non-admin caller — the router forwards
+    /// the call, but fee_handler's own stored-admin check still applies.
+    #[test]
+    #[should_panic]
+    fn set_ui_fee_factor_non_admin_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let rs = env.register(RoleStore, ());
+        RsClient::new(&env, &rs).initialize(&admin);
+        let ds = env.register(DataStore, ());
+        DsClient::new(&env, &ds).initialize(&admin, &rs);
+        let fh = env.register(FeeHandler, ());
+        FhClient::new(&env, &fh).initialize(&admin, &rs, &ds);
+
+        let dep_handler = Address::generate(&env);
+        let wth_handler = Address::generate(&env);
+        let ord_handler = Address::generate(&env);
+        let router = env.register(ExchangeRouter, ());
+        ExchangeRouterClient::new(&env, &router).initialize(
+            &admin,
+            &rs,
+            &ds,
+            &dep_handler,
+            &wth_handler,
+            &ord_handler,
+            &fh,
+        );
+
+        // Disable auth mocking for the call under test: with no authorization
+        // entries provided, fee_handler's admin.require_auth() must reject it.
+        env.set_auths(&[]);
+        let ui_recv = Address::generate(&env);
+        ExchangeRouterClient::new(&env, &router).set_ui_fee_factor(&ui_recv, &100u128);
     }
 }

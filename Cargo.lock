@@ -844,6 +844,7 @@ dependencies = [
  "data-store",
  "deposit-handler",
  "deposit-vault",
+ "fee-handler",
  "gmx-keys",
  "gmx-math",
  "gmx-types",

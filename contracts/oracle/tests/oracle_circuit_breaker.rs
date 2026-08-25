@@ -245,3 +245,52 @@ fn only_matching_market_is_paused() {
         "unrelated market must remain unpaused"
     );
 }
+
+// ── Issue #637: oracle-scoped circuit_breaker_factor setter ────────────────────
+
+/// set_circuit_breaker_factor must write the same key check_circuit_breaker
+/// reads: a deviation at the configured threshold must not trip the breaker.
+#[test]
+fn set_circuit_breaker_factor_at_threshold_does_not_trip() {
+    let w = setup();
+    let fp = FLOAT_PRECISION;
+
+    OClient::new(&w.env, &w.oracle).set_circuit_breaker_factor(&w.admin, &w.market, &1500u128);
+
+    let base = 10_000 * fp;
+    set_initial_price(&w, base);
+    w.env.ledger().set_sequence_number(10);
+
+    let at_threshold = base + (base * 1500) / 10_000;
+    set_price(&w, at_threshold);
+    assert!(!is_paused(&w), "deviation at threshold must not trip the breaker");
+}
+
+/// set_circuit_breaker_factor must write the same key check_circuit_breaker
+/// reads: a deviation one bps over the configured threshold must trip,
+/// proving the setter's value is the one actually enforced (rather than the
+/// caller needing raw data_store::set_u128 CONTROLLER access as before).
+#[test]
+fn set_circuit_breaker_factor_over_threshold_trips() {
+    let w = setup();
+    let fp = FLOAT_PRECISION;
+
+    OClient::new(&w.env, &w.oracle).set_circuit_breaker_factor(&w.admin, &w.market, &1500u128);
+
+    let base = 10_000 * fp;
+    set_initial_price(&w, base);
+    w.env.ledger().set_sequence_number(10);
+
+    let over_threshold = base + (base * 1501) / 10_000;
+    set_price(&w, over_threshold);
+    assert!(is_paused(&w), "deviation one bps over the configured threshold must trip");
+}
+
+/// set_circuit_breaker_factor must reject a non-admin caller.
+#[test]
+#[should_panic]
+fn set_circuit_breaker_factor_rejects_non_admin() {
+    let w = setup();
+    let impostor = Address::generate(&w.env);
+    OClient::new(&w.env, &w.oracle).set_circuit_breaker_factor(&impostor, &w.market, &1500u128);
+}

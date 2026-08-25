@@ -27,3 +27,4 @@ withdrawal-handler  = { path = "../withdrawal_handler" }
 order-handler       = { path = "../order_handler" }
 liquidation-handler = { path = "../liquidation_handler" }
 market-token        = { path = "../market_token" }
+fee-handler         = { path = "../fee_handler" }
