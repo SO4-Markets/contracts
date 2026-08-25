@@ -1275,6 +1275,19 @@ impl OrderHandler {
             | OrderType::StopLossDecrease
             | OrderType::Liquidation => {
                 let pos_key = position_key(&env, &order.account, &market.market_token, &order.initial_collateral_token, order.is_long);
+                // Issue #601: decrease_position's own storage lookup panics with
+                // a raw string on a missing position. Check existence here so a
+                // decrease-type order for a position that never existed (or was
+                // already fully closed) reverts with a typed, matchable error
+                // instead, mirroring liquidate_position/execute_adl's own
+                // PositionNotFound checks above.
+                if !env
+                    .storage()
+                    .persistent()
+                    .has(&PositionStorageKey::Position(pos_key.clone()))
+                {
+                    panic_with_error!(&env, Error::PositionNotFound);
+                }
                 let result = decrease_position(
                     &env,
                     &DecreasePositionParams {
@@ -4357,6 +4370,39 @@ mod tests {
             hc.get_position(&pk).is_some(),
             "position must exist after boundary-price execution"
         );
+    }
+
+    // ── Issue #601: decrease-type orders for a nonexistent position ───────────
+
+    /// Executing a MarketDecrease for an account/market/collateral/side with no
+    /// existing position must revert with the typed PositionNotFound error
+    /// (previously this reached decrease_position's raw `.expect()` panic).
+    #[test]
+    #[should_panic]
+    fn market_decrease_for_nonexistent_position_reverts() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2000 * fp);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let key = hc.create_order(
+            &w.user,
+            &CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                size_delta_usd: 100 * fp,
+                collateral_delta_amount: 0,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketDecrease,
+                is_long: true,
+                expiry_ledger: None,
+            },
+        );
+        hc.execute_order(&w.keeper, &key);
     }
 
     /// LimitDecrease (long take-profit) must execute when oracle price equals
