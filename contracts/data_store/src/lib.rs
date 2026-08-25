@@ -114,6 +114,32 @@ pub struct KeeperSlashed {
     pub penalty_amount: u128,
 }
 
+/// Issue #607: set_position_manager, set_liquidation_execution_fee, and
+/// set_min_execution_fee previously had no event anywhere in the call chain
+/// (including exchange_router::set_position_manager's pass-through, which
+/// calls this same function — one event here covers both entry points).
+
+#[contractevent(topics = ["pos_mgr_set"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PositionManagerSet {
+    pub owner: Address,
+    pub market: Address,
+    pub manager: Address,
+}
+
+#[contractevent(topics = ["liq_fee_set"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiquidationExecutionFeeSet {
+    pub market: Address,
+    pub fee: u128,
+}
+
+#[contractevent(topics = ["min_fee_set"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MinExecutionFeeSet {
+    pub fee: u128,
+}
+
 // ─── Contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -659,6 +685,11 @@ impl DataStore {
         use gmx_keys::position_manager_key;
         let key = DataKey::Addr(position_manager_key(&env, &owner, &market));
         env.storage().persistent().set(&key, &manager);
+        env.events().publish_event(&PositionManagerSet {
+            owner,
+            market,
+            manager: manager.clone(),
+        });
         manager
     }
 
@@ -684,6 +715,8 @@ impl DataStore {
         use gmx_keys::liquidation_execution_fee_key;
         let key = DataKey::U128(liquidation_execution_fee_key(&env, &market));
         env.storage().persistent().set(&key, &fee);
+        env.events()
+            .publish_event(&LiquidationExecutionFeeSet { market, fee });
         fee
     }
 
@@ -702,6 +735,7 @@ impl DataStore {
         use gmx_keys::min_execution_fee_key;
         let key = DataKey::U128(min_execution_fee_key(&env));
         env.storage().persistent().set(&key, &fee);
+        env.events().publish_event(&MinExecutionFeeSet { fee });
         fee
     }
 }
