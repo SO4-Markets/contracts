@@ -247,6 +247,13 @@ impl ExchangeRouter {
         env.storage()
             .instance()
             .set(&InstanceKey::WithdrawalHandler, &new_handler);
+        // Issue #606: re-pointing the withdrawal handler is a high-impact
+        // admin action — emit an event so off-chain monitoring has an audit
+        // trail, matching schedule_unpause's existing pattern in this file.
+        env.events().publish(
+            (soroban_sdk::symbol_short!("wth_hdlr"),),
+            new_handler,
+        );
     }
 
     /// Default timelock for unpausing: ~4 hours at 5 s/ledger (issue #282).
@@ -275,13 +282,22 @@ impl ExchangeRouter {
             &paused,
         );
         // Clear any pending unpause schedule when re-pausing.
+        let mut cleared_schedule = false;
         if paused {
             ds.set_u128(
                 &env.current_contract_address(),
                 &scheduled_unpause_ledger_key(&env),
                 &0,
             );
+            cleared_schedule = true;
         }
+        // Issue #606: pausing the entire protocol is one of the highest-impact
+        // admin actions available — emit an event so off-chain monitoring has
+        // an audit trail, matching schedule_unpause's existing pattern below.
+        env.events().publish(
+            (soroban_sdk::symbol_short!("paused"),),
+            (paused, cleared_schedule),
+        );
     }
 
     /// Schedule an unpause after `UNPAUSE_TIMELOCK_LEDGERS` ledgers (issue #282).

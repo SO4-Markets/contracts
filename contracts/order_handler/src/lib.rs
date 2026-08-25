@@ -404,7 +404,15 @@ impl OrderHandler {
                 }
             }
         }
+        let old_oracle: Address = env.storage().instance().get(&InstanceKey::Oracle).unwrap();
         env.storage().instance().set(&InstanceKey::Oracle, &new_oracle);
+        // Issue #605: the oracle address every subsequent price validation
+        // relies on just changed — emit an event so off-chain monitoring has
+        // an audit trail for this admin action.
+        env.events().publish(
+            (symbol_short!("orcl_set"),),
+            (old_oracle, new_oracle),
+        );
     }
 
     /// Admin-configurable heartbeat timeout for a keeper `role`, in ledgers

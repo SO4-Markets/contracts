@@ -3,7 +3,12 @@
 //!
 //! Aggregates data across data_store, oracle, and position/market utils
 //! into rich structs the frontend consumes without needing multiple calls.
-//! All functions are view-only — no writes, no auth.
+//! All functions are read-only from the caller's perspective and require no
+//! auth. Exception: `get_position_info` and `is_position_liquidatable`
+//! additionally call `order_handler::bump_position_ttl` as a side effect, to
+//! keep an actively-monitored position's underlying storage entry alive on
+//! `order_handler` — a real state-changing cross-contract call, not a pure
+//! read (issue #608).
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
