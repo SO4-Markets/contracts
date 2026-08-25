@@ -1193,13 +1193,33 @@ impl OrderHandler {
                 ds_client.set_u128(&handler, &fee_key_pos, &original_fee_pos);
                 ds_client.set_u128(&handler, &fee_key_neg, &original_fee_neg);
 
-                // Issue #206: enforce max leverage
+                // Issue #206: enforce max leverage. max_leverage_key is stored
+                // FLOAT_PRECISION-scaled (issue #625) — every configuration
+                // site in the repo (exchange_router, liquidation_handler,
+                // benches, and every integration test suite) sets it to
+                // `N * FLOAT_PRECISION` for an intended Nx cap, matching
+                // position_utils::validate_position's own comparison, which
+                // also values collateral in USD (not raw token units) before
+                // dividing.
                 let max_lev_key = max_leverage_key(&env, &market.market_token);
-                let max_leverage_bps = ds_client.get_u128(&max_lev_key);
-                if max_leverage_bps > 0 && updated.collateral_amount > 0 {
-                    let effective_bps = (updated.size_in_usd * 100 / updated.collateral_amount) as u128;
-                    if effective_bps > max_leverage_bps {
-                        panic_with_error!(&env, Error::MaxLeverageExceeded);
+                let max_leverage = ds_client.get_u128(&max_lev_key) as i128;
+                if max_leverage > 0 && updated.collateral_amount > 0 {
+                    let collateral_usd = mul_div_wide(
+                        &env,
+                        updated.collateral_amount,
+                        collateral_price,
+                        gmx_math::TOKEN_PRECISION,
+                    );
+                    if collateral_usd > 0 {
+                        let effective_leverage = mul_div_wide(
+                            &env,
+                            updated.size_in_usd,
+                            gmx_math::FLOAT_PRECISION,
+                            collateral_usd,
+                        );
+                        if effective_leverage > max_leverage {
+                            panic_with_error!(&env, Error::MaxLeverageExceeded);
+                        }
                     }
                 }
 
@@ -2486,6 +2506,74 @@ mod tests {
             long_oi > 0,
             "long open interest must increase after limit increase execution"
         );
+    }
+
+    // ── Issue #625: max_leverage_key must be read at the same FLOAT_PRECISION
+    //    scale every configuration site in the repo writes it at ─────────────
+
+    /// A position opened within the configured max-leverage cap must succeed.
+    #[test]
+    fn increase_within_max_leverage_cap_succeeds() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        // Cap at 2x, in the same scale every real config site uses.
+        DsClient::new(&w.env, &w.ds).set_u128(
+            &w.admin,
+            &gmx_keys::max_leverage_key(&w.env, &w.market_tk),
+            &((2u128) * fp as u128),
+        );
+        set_prices(&w, 2000 * fp);
+        // create_increase_order: size_delta_usd = 2000*fp against COLLATERAL
+        // (1 token @ $2000) → exactly 1x, within the 2x cap.
+        let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+        let pk = position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true);
+        assert!(
+            hc.get_position(&pk).is_some(),
+            "position must be created when leverage is within the configured cap"
+        );
+    }
+
+    /// A position opened beyond the configured max-leverage cap must revert —
+    /// regression test for the FLOAT_PRECISION scale bug (issue #625): before
+    /// the fix, this cap was silently inert against every real configuration
+    /// in the repo (`N * FLOAT_PRECISION`) because the check compared it
+    /// against a raw `size * 100 / collateral` value many orders of magnitude
+    /// smaller.
+    #[test]
+    #[should_panic]
+    fn increase_beyond_max_leverage_cap_reverts() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        // Cap at 2x, in the same scale every real config site uses.
+        DsClient::new(&w.env, &w.ds).set_u128(
+            &w.admin,
+            &gmx_keys::max_leverage_key(&w.env, &w.market_tk),
+            &((2u128) * fp as u128),
+        );
+        set_prices(&w, 2000 * fp);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let key = hc.create_order(
+            &w.user,
+            &CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                // 1 token ($2000) of collateral backing a $10,000 position = 5x.
+                size_delta_usd: 10_000 * fp,
+                collateral_delta_amount: COLLATERAL,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketIncrease,
+                is_long: true,
+                expiry_ledger: None,
+            },
+        );
+        hc.execute_order(&w.keeper, &key);
     }
 
     // ── Issue #32: order storage cleanup tests ────────────────────────────────
