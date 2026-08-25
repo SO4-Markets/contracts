@@ -403,6 +403,23 @@ impl WithdrawalHandler {
         // a re-entrant callback on the receiving contract cannot replay this execution.
         remove_withdrawal(&env, &data_store, &handler, &key, &withdrawal.account);
 
+        // Issue #618: pay keeper incentive from execution_fee, mirroring
+        // deposit_handler::execute_deposit's #370 fix (this half of #370 was
+        // never implemented for withdrawal_handler). Incentive = 10% of
+        // execution_fee. Paid in the market (LP) token from withdrawal_vault,
+        // the same token execution_fee was collected in at create_withdrawal.
+        if withdrawal.execution_fee > 0 {
+            let incentive = withdrawal.execution_fee / 10;
+            if incentive > 0 {
+                WithdrawalVaultClient::new(&env, &withdrawal_vault).transfer_out(
+                    &handler,
+                    &market.market_token,
+                    &keeper,
+                    &incentive,
+                );
+            }
+        }
+
         // Transfer pool tokens from market_token contract → receiver
         if long_out > 0 {
             apply_delta_to_pool_amount(
@@ -1357,6 +1374,47 @@ mod tests {
         assert!(
             hc.get_withdrawal(&key).is_some(),
             "withdrawal must survive upgrade"
+        );
+    }
+
+    /// Issue #618 (closed #370 partially unfixed): execute_withdrawal must pay
+    /// the keeper 10% of a nonzero execution_fee, mirroring
+    /// deposit_handler::execute_deposit's #370 fix. execution_fee is collected
+    /// in the market (LP) token at create_withdrawal, separately from
+    /// market_token_amount.
+    #[test]
+    fn execute_withdrawal_pays_keeper_execution_fee_incentive() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &10_000_000_i128);
+        set_prices(&w);
+        let lp = do_deposit(&w, &user, 10_000_000, 0);
+
+        let fee: i128 = 1_000;
+        let market_token_amount = lp - fee;
+
+        let hc = WithdrawalHandlerClient::new(&w.env, &w.wth_handler);
+        let key = hc.create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: fee,
+            },
+        );
+
+        let keeper_balance_before = MtClient::new(&w.env, &w.market_tk).balance(&w.keeper);
+
+        hc.execute_withdrawal(&w.keeper, &key);
+
+        let keeper_balance_after = MtClient::new(&w.env, &w.market_tk).balance(&w.keeper);
+        assert_eq!(
+            keeper_balance_after - keeper_balance_before,
+            fee / 10,
+            "keeper must receive 10% of execution_fee in the market (LP) token"
         );
     }
 }
