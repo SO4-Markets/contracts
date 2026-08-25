@@ -216,13 +216,8 @@ fn weighted_avg_entry_price_after_increase_from_profit() {
     assert_eq!(pos_after_open.size_in_tokens, tp, "initial size_in_tokens = 1 token");
 
     // ── Price moves from $2 000 → $2 200 (unrealised PnL = $200 per token) ──
-
-    // Seed collateral_sum_key (workaround: increase_position_utils omits this)
-    DsClient::new(&w.env, &w.ds).set_u128(
-        &w.admin,
-        &gmx_keys::collateral_sum_key(&w.env, &w.market_tk, &w.long_tk, true),
-        &(collateral1 as u128),
-    );
+    // (collateral_sum_key was already credited by increase_position during the
+    // open order's execute_order above — see issue #644.)
 
     // ── Increase: 1 more token at $2 200 ─────────────────────────────────────
     // The unrealised profit of $200 (from the first token rising $200) serves as
@@ -388,11 +383,8 @@ fn position_size_doubles_after_equal_notional_increase() {
     set_prices(&w, 2_000 * fp);
     hc.execute_order(&w.keeper, &k1);
 
-    DsClient::new(&w.env, &w.ds).set_u128(
-        &w.admin,
-        &gmx_keys::collateral_sum_key(&w.env, &w.market_tk, &w.long_tk, true),
-        &(collateral1 as u128),
-    );
+    // (collateral_sum_key was already credited by increase_position during the
+    // open order's execute_order above — see issue #644.)
 
     // Increase: $2 000 more size at $2 200 → ~0.909 extra tokens
     let collateral2 = tp;

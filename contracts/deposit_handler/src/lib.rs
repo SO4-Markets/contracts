@@ -65,6 +65,11 @@ pub enum Error {
     /// the caller lacks permission — this means the tokens themselves are
     /// wrong regardless of who's calling.
     TokenMismatch = 13,
+    /// Issue #643: update_oracle called with the current oracle address
+    /// (no-op) or with this contract's own address / another of its stored
+    /// instance addresses (deposit_vault, data_store, role_store, admin) —
+    /// almost certainly a copy-paste mistake, not an intentional rotation.
+    InvalidOracle = 14,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -190,6 +195,25 @@ impl DepositHandler {
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         if caller != admin {
             panic_with_error!(&env, Error::Unauthorized);
+        }
+        // Issue #643: reject a no-op call and the most likely copy-paste
+        // mistakes — pointing the oracle at this contract itself or at one
+        // of its own other stored instance addresses.
+        if new_oracle == env.current_contract_address() {
+            panic_with_error!(&env, Error::InvalidOracle);
+        }
+        for key in [
+            InstanceKey::Oracle,
+            InstanceKey::Admin,
+            InstanceKey::RoleStore,
+            InstanceKey::DataStore,
+            InstanceKey::DepositVault,
+        ] {
+            if let Some(other) = env.storage().instance().get::<_, Address>(&key) {
+                if other == new_oracle {
+                    panic_with_error!(&env, Error::InvalidOracle);
+                }
+            }
         }
         env.storage().instance().set(&InstanceKey::Oracle, &new_oracle);
     }
@@ -2055,6 +2079,46 @@ mod tests {
         // impostor has no ORDER_KEEPER role — execute_deposit must panic.
         let impostor = Address::generate(&w.env);
         DepositHandlerClient::new(&w.env, &w.handler).execute_deposit(&impostor, &key);
+    }
+
+    // ── Issue #643: update_oracle sanity checks ───────────────────────────────
+
+    /// update_oracle must reject pointing the oracle at this contract's own
+    /// address — the most likely copy-paste mistake.
+    #[test]
+    #[should_panic]
+    fn update_oracle_rejects_self_address() {
+        let w = setup();
+        DepositHandlerClient::new(&w.env, &w.handler)
+            .update_oracle(&w.admin, &w.handler);
+    }
+
+    /// update_oracle must reject a no-op call (new_oracle == current oracle).
+    #[test]
+    #[should_panic]
+    fn update_oracle_rejects_noop() {
+        let w = setup();
+        DepositHandlerClient::new(&w.env, &w.handler)
+            .update_oracle(&w.admin, &w.oracle);
+    }
+
+    /// update_oracle must reject the deposit_vault's address — a plausible
+    /// copy-paste mistake between sibling instance addresses.
+    #[test]
+    #[should_panic]
+    fn update_oracle_rejects_sibling_vault_address() {
+        let w = setup();
+        DepositHandlerClient::new(&w.env, &w.handler)
+            .update_oracle(&w.admin, &w.vault);
+    }
+
+    /// A genuinely different oracle address must succeed.
+    #[test]
+    fn update_oracle_accepts_valid_new_address() {
+        let w = setup();
+        let new_oracle = Address::generate(&w.env);
+        DepositHandlerClient::new(&w.env, &w.handler)
+            .update_oracle(&w.admin, &new_oracle);
     }
 
     // ── Issue #110: upgrade smoke tests ───────────────────────────────────────
