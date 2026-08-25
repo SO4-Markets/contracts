@@ -21,7 +21,7 @@ pub enum Error {
     AlreadyInitialized = 1,
     NotInitialized = 2,
     Unauthorized = 3,
-    NegativeAmount = 4,
+    InvalidAmount = 4,
 }
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
@@ -114,7 +114,7 @@ impl OrderVault {
     ) {
         caller.require_auth();
         if amount <= 0 {
-            panic_with_error!(&env, Error::NegativeAmount);
+            panic_with_error!(&env, Error::InvalidAmount);
         }
         require_controller(&env, &caller);
         token::Client::new(&env, &token).transfer(
