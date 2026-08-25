@@ -128,6 +128,16 @@ pub enum Error {
     /// set_keeper_heartbeat_timeout called with timeout_ledgers = 0 (issue #634)
     /// — would make every keeper on the role appear stale after a single ledger.
     InvalidHeartbeatTimeout = 25,
+    /// liquidate_position or execute_adl referenced a position_key with no
+    /// stored PositionProps (issue #642) — distinct from OrderNotFound, which
+    /// means no such *order* id, not no such position.
+    PositionNotFound = 26,
+    /// Issue #643: update_oracle called with the current oracle address
+    /// (no-op) or with this contract's own address / another of its stored
+    /// instance addresses (order_vault, data_store, role_store, admin,
+    /// referral_storage) — almost certainly a copy-paste mistake, not an
+    /// intentional rotation.
+    InvalidOracle = 27,
 }
 
 
@@ -373,6 +383,26 @@ impl OrderHandler {
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         if caller != admin {
             panic_with_error!(&env, Error::Unauthorized);
+        }
+        // Issue #643: reject a no-op call and the most likely copy-paste
+        // mistakes — pointing the oracle at this contract itself or at one
+        // of its own other stored instance addresses.
+        if new_oracle == env.current_contract_address() {
+            panic_with_error!(&env, Error::InvalidOracle);
+        }
+        for key in [
+            InstanceKey::Oracle,
+            InstanceKey::Admin,
+            InstanceKey::RoleStore,
+            InstanceKey::DataStore,
+            InstanceKey::OrderVault,
+            InstanceKey::ReferralStorage,
+        ] {
+            if let Some(other) = env.storage().instance().get::<_, Address>(&key) {
+                if other == new_oracle {
+                    panic_with_error!(&env, Error::InvalidOracle);
+                }
+            }
         }
         env.storage().instance().set(&InstanceKey::Oracle, &new_oracle);
     }
@@ -1627,7 +1657,7 @@ impl OrderHandler {
             .storage()
             .persistent()
             .get(&PositionStorageKey::Position(pk.clone()))
-            .unwrap_or_else(|| panic_with_error!(&env, Error::OrderNotFound));
+            .unwrap_or_else(|| panic_with_error!(&env, Error::PositionNotFound));
 
         // Validate liquidatability
         if !gmx_position_utils::is_liquidatable(
@@ -1792,7 +1822,7 @@ impl OrderHandler {
             .storage()
             .persistent()
             .get(&PositionStorageKey::Position(adl_pos_key))
-            .unwrap_or_else(|| panic_with_error!(&env, Error::OrderNotFound));
+            .unwrap_or_else(|| panic_with_error!(&env, Error::PositionNotFound));
         let (adl_pnl_usd, _) =
             gmx_position_utils::get_position_pnl_usd(&env, &position, &index_price, size_delta_usd);
         if adl_pnl_usd <= 0 {
@@ -2621,6 +2651,46 @@ mod tests {
         let (_hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
         let intruder = Address::generate(&w.env);
         OrderHandlerClient::new(&w.env, &w.ord_handler).freeze_order(&intruder, &key);
+    }
+
+    // ── Issue #643: update_oracle sanity checks ───────────────────────────────
+
+    /// update_oracle must reject pointing the oracle at this contract's own
+    /// address — the most likely copy-paste mistake.
+    #[test]
+    #[should_panic]
+    fn update_oracle_rejects_self_address() {
+        let w = setup();
+        OrderHandlerClient::new(&w.env, &w.ord_handler)
+            .update_oracle(&w.admin, &w.ord_handler);
+    }
+
+    /// update_oracle must reject a no-op call (new_oracle == current oracle).
+    #[test]
+    #[should_panic]
+    fn update_oracle_rejects_noop() {
+        let w = setup();
+        OrderHandlerClient::new(&w.env, &w.ord_handler)
+            .update_oracle(&w.admin, &w.oracle);
+    }
+
+    /// update_oracle must reject the order_vault's address — a plausible
+    /// copy-paste mistake between sibling instance addresses.
+    #[test]
+    #[should_panic]
+    fn update_oracle_rejects_sibling_vault_address() {
+        let w = setup();
+        OrderHandlerClient::new(&w.env, &w.ord_handler)
+            .update_oracle(&w.admin, &w.ord_vault);
+    }
+
+    /// A genuinely different oracle address must succeed.
+    #[test]
+    fn update_oracle_accepts_valid_new_address() {
+        let w = setup();
+        let new_oracle = Address::generate(&w.env);
+        OrderHandlerClient::new(&w.env, &w.ord_handler)
+            .update_oracle(&w.admin, &new_oracle);
     }
 
     // ── Issue #10: upgrade entrypoint tests ───────────────────────────────────
