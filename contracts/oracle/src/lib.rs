@@ -78,6 +78,12 @@ const PRICE_FRESHNESS_LEDGERS: u32 = 60;
 /// pattern used elsewhere in the workspace (fee_batch_sweeper::MAX_BATCH_CLAIM_SIZE).
 const MAX_CLEAR_PRICES_BATCH_SIZE: u32 = 20;
 
+/// Maximum prices per `set_prices`/`set_prices_simple` call (issue #615).
+/// `set_prices` performs an `ed25519_verify` per entry on top of a storage
+/// write, so this stays at the same conservative size as
+/// MAX_CLEAR_PRICES_BATCH_SIZE rather than a larger number.
+const MAX_PRICE_BATCH_SIZE: u32 = 20;
+
 // ─── Signed price submitted by keeper ────────────────────────────────────────
 
 /// One signed price attestation from a keeper.
@@ -211,6 +217,14 @@ impl Oracle {
     pub fn set_prices(env: Env, caller: Address, prices: Vec<SignedPrice>) {
         caller.require_auth();
         require_order_keeper(&env, &caller);
+
+        // Issue #615: cap batch size — set_prices performs an ed25519_verify
+        // per entry, so an unbounded Vec can be built large enough to exceed
+        // the ledger's per-transaction CPU budget, failing with an opaque
+        // resource-limit error instead of this typed one.
+        if prices.len() > MAX_PRICE_BATCH_SIZE {
+            panic_with_error!(&env, Error::BatchSizeLimitExceeded);
+        }
 
         let passphrase: Bytes = env
             .storage()
@@ -504,6 +518,11 @@ impl Oracle {
     pub fn set_prices_simple(env: Env, caller: Address, prices: Vec<TokenPrice>) {
         caller.require_auth();
         require_order_keeper(&env, &caller);
+
+        // Issue #615: cap batch size, matching set_prices.
+        if prices.len() > MAX_PRICE_BATCH_SIZE {
+            panic_with_error!(&env, Error::BatchSizeLimitExceeded);
+        }
 
         let data_store: Address = env
             .storage()
@@ -948,6 +967,53 @@ mod tests {
         assert_eq!(client.get_primary_price(&eth).min, 2_000 * 10i128.pow(30));
         assert_eq!(client.get_primary_price(&btc).min, 60_000 * 10i128.pow(30));
         assert_eq!(client.get_primary_price(&usdc).min, 10i128.pow(30));
+    }
+
+    /// Issue #615: set_prices_simple must reject a batch larger than
+    /// MAX_PRICE_BATCH_SIZE, matching the cap pattern already applied to
+    /// clear_prices (#619) and every other batch entrypoint in the workspace.
+    #[test]
+    #[should_panic]
+    fn set_prices_simple_over_max_batch_size_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let mut prices = Vec::new(&env);
+        let mut i = 0u32;
+        while i < MAX_PRICE_BATCH_SIZE + 1 {
+            prices.push_back(TokenPrice {
+                token: Address::generate(&env),
+                min: 10i128.pow(30),
+                max: 10i128.pow(30),
+            });
+            i += 1;
+        }
+
+        client.set_prices_simple(&admin, &prices);
+    }
+
+    /// A batch exactly at the cap must still succeed.
+    #[test]
+    fn set_prices_simple_at_max_batch_size_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let mut prices = Vec::new(&env);
+        let mut i = 0u32;
+        while i < MAX_PRICE_BATCH_SIZE {
+            prices.push_back(TokenPrice {
+                token: Address::generate(&env),
+                min: 10i128.pow(30),
+                max: 10i128.pow(30),
+            });
+            i += 1;
+        }
+
+        client.set_prices_simple(&admin, &prices);
     }
 
     // ── Issue #292: signer rotation ───────────────────────────────────────────
