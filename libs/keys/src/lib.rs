@@ -580,27 +580,6 @@ pub fn swap_impact_exponent_factor_key(env: &Env, market: &Address) -> BytesN<32
     sha256(env, &b)
 }
 
-pub fn max_pnl_factor_key(
-    env: &Env,
-    pnl_factor_type: &BytesN<32>,
-    market: &Address,
-    is_long: bool,
-) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "MAX_PNL_FACTOR");
-    b.extend_from_array(&pnl_factor_type.to_array());
-    push_addr(&mut b, env, market);
-    push_bool(&mut b, env, is_long);
-    sha256(env, &b)
-}
-
-pub fn min_market_tokens_for_first_deposit_key(env: &Env, market: &Address) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "MIN_MARKET_TOKENS_FOR_FIRST_DEPOSIT");
-    push_addr(&mut b, env, market);
-    sha256(env, &b)
-}
-
 /// Stable price for stablecoins (bypasses oracle spread)
 pub fn stable_price_key(env: &Env, token: &Address) -> BytesN<32> {
     let mut b = Bytes::new(env);
@@ -651,13 +630,6 @@ pub fn keeper_heartbeat_timeout_key(env: &Env, role: &BytesN<32>) -> BytesN<32> 
 /// Default keeper heartbeat timeout: 2880 ledgers (~4 hours at ~5s/ledger).
 /// Used when `keeper_heartbeat_timeout_key(role)` is unset in data_store.
 pub const DEFAULT_KEEPER_HEARTBEAT_TIMEOUT: u64 = 2880;
-
-/// Market token wasm hash (for factory to deploy LP tokens)
-pub fn market_token_wasm_hash_key(env: &Env) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "MARKET_TOKEN_WASM_HASH");
-    sha256(env, &b)
-}
 
 /// Global cap on swap path length (default 3 hops)
 pub fn max_swap_path_length_key(env: &Env) -> BytesN<32> {
@@ -713,45 +685,6 @@ pub fn max_pnl_factor_for_adl_key(env: &Env, market: &Address, is_long: bool) ->
     push_str(&mut b, env, "MAX_PNL_FACTOR_FOR_ADL");
     push_addr(&mut b, env, market);
     push_bool(&mut b, env, is_long);
-    sha256(env, &b)
-}
-
-/// Referral code for an account
-pub fn referral_code_key(env: &Env, account: &Address) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "REFERRAL_CODE");
-    push_addr(&mut b, env, account);
-    sha256(env, &b)
-}
-
-/// Referrer for a given referral code
-pub fn referrer_key(env: &Env, code: &BytesN<32>) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "REFERRER");
-    b.extend_from_array(&code.to_array());
-    sha256(env, &b)
-}
-
-// ─── PnL factor type constants ────────────────────────────────────────────────
-
-/// sha256("MAX_PNL_FACTOR_FOR_TRADERS") — used in pool value calculation
-pub fn max_pnl_factor_for_traders_key(env: &Env) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "MAX_PNL_FACTOR_FOR_TRADERS");
-    sha256(env, &b)
-}
-
-/// sha256("MAX_PNL_FACTOR_FOR_DEPOSITS") — used during LP deposits
-pub fn max_pnl_factor_for_deposits_key(env: &Env) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "MAX_PNL_FACTOR_FOR_DEPOSITS");
-    sha256(env, &b)
-}
-
-/// sha256("MAX_PNL_FACTOR_FOR_WITHDRAWALS") — used during LP withdrawals
-pub fn max_pnl_factor_for_withdrawals_key(env: &Env) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "MAX_PNL_FACTOR_FOR_WITHDRAWALS");
     sha256(env, &b)
 }
 
