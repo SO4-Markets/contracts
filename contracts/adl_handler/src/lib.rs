@@ -12,7 +12,8 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    market_index_token_key, market_long_token_key, market_short_token_key, position_key, roles,
+    last_keeper_activity_key, market_index_token_key, market_long_token_key,
+    market_short_token_key, position_key, roles,
 };
 use gmx_position_utils::get_position_pnl_usd;
 use gmx_types::{MarketProps, PositionProps, PriceProps};
@@ -64,6 +65,7 @@ trait IRoleStore {
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
+    fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
 }
 
 #[allow(dead_code)]
@@ -243,6 +245,15 @@ impl AdlHandler {
             &size_delta_usd,
         );
 
+        // Issue #614: record ADL_KEEPER activity so check_keeper_heartbeat can
+        // report this role as alive.
+        record_keeper_activity(
+            &env,
+            &data_store,
+            &env.current_contract_address(),
+            &roles::adl_keeper(&env),
+        );
+
         env.events().publish(
             (symbol_short!("adl_req"),),
             (account, market, is_long, size_delta_usd, pnl_usd),
@@ -269,6 +280,21 @@ fn load_market_props(env: &Env, data_store: &Address, market_token: &Address) ->
         long_token,
         short_token,
     }
+}
+
+/// Issue #614: stamp ADL_KEEPER's last activity, mirroring order_handler's
+/// identical helper for ORDER_KEEPER (issue #249). Without this,
+/// check_keeper_heartbeat(roles::adl_keeper) always reads
+/// last_active_ledger = 0 and reports permanently stale, regardless of how
+/// recently the ADL keeper actually executed.
+/// `caller` must hold CONTROLLER in data_store (the handler does).
+fn record_keeper_activity(env: &Env, data_store: &Address, caller: &Address, role: &BytesN<32>) {
+    let ledger = env.ledger().sequence() as u128;
+    DataStoreClient::new(env, data_store).set_u128(
+        caller,
+        &last_keeper_activity_key(env, role),
+        &ledger,
+    );
 }
 
 // ─── Tests — Issue #134: ADL E2E tests through deployed-style clients ─────────
@@ -606,6 +632,54 @@ mod tests {
             "ADL must reduce position size: before={}, after={}",
             pos_before.size_in_usd,
             pos_after.size_in_usd
+        );
+    }
+
+    /// Issue #614: execute_adl must record ADL_KEEPER's activity in
+    /// data_store, so check_keeper_heartbeat(roles::adl_keeper) reports the
+    /// role as alive (last_active_ledger == current ledger) instead of
+    /// permanently stale (last_active_ledger == 0).
+    #[test]
+    fn execute_adl_records_keeper_activity() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let trader = Address::generate(&w.env);
+
+        let entry_price = 1_000 * fp;
+        set_prices(&w, entry_price);
+        seed_pool(&w, ONE_TOKEN * 200);
+        set_prices(&w, entry_price);
+
+        let collateral = 5 * ONE_TOKEN;
+        let size_usd = 10_000 * fp;
+        open_long(&w, &trader, collateral, size_usd);
+
+        set_prices(&w, 2_000 * fp);
+
+        let low_threshold = fp / 1_000_000;
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &max_pnl_factor_for_adl_key(&w.env, &w.market_tk, true),
+            &(low_threshold as u128),
+        );
+
+        let key = last_keeper_activity_key(&w.env, &roles::adl_keeper(&w.env));
+        assert_eq!(ds_c.get_u128(&key), 0, "no activity recorded before ADL");
+
+        AdlHandlerClient::new(&w.env, &w.adl_handler).execute_adl(
+            &w.adl_keeper,
+            &trader,
+            &w.market_tk,
+            &w.long_tk,
+            &true,
+            &(size_usd / 4),
+        );
+
+        assert_eq!(
+            ds_c.get_u128(&key),
+            w.env.ledger().sequence() as u128,
+            "ADL_KEEPER activity must be recorded after a successful execute_adl"
         );
     }
 

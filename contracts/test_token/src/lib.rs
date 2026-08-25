@@ -31,6 +31,10 @@ pub enum Error {
     AllowanceExpired = 7,
     Paused = 8,
     MainnetNotAllowed = 9,
+    /// approve() called with amount > 0 and an expiration_ledger already in
+    /// the past (issue #616) — matches the standard SEP-41 token contract's
+    /// validation, which panics on this input rather than silently accepting it.
+    InvalidExpirationLedger = 10,
 }
 
 #[contracttype]
@@ -173,6 +177,13 @@ impl TestToken {
         if amount == 0 {
             env.storage().temporary().remove(&key);
         } else {
+            // Issue #616: reject an already-past expiration_ledger, matching
+            // the standard SEP-41 token contract's validation. Without this,
+            // ledger_gap silently saturates to 0 and the call succeeds while
+            // storing an allowance that is already expired.
+            if expiration_ledger < env.ledger().sequence() {
+                panic_with_error!(&env, Error::InvalidExpirationLedger);
+            }
             let ledger_gap = expiration_ledger.saturating_sub(env.ledger().sequence());
             env.storage().temporary().set(
                 &key,
@@ -396,6 +407,21 @@ mod tests {
         assert_eq!(client.balance(&alice), 750_0000);
         assert_eq!(client.balance(&bob), 250_0000);
         assert_eq!(client.total_supply(), 10_000_000);
+    }
+
+    /// Issue #616: approve() with amount > 0 and an already-past
+    /// expiration_ledger must revert, matching standard SEP-41 behavior,
+    /// instead of silently storing an already-expired allowance.
+    #[test]
+    #[should_panic]
+    fn approve_rejects_past_expiration_ledger() {
+        let (env, owner, client) = setup();
+        let alice = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        client.mint(&owner, &alice, &10_000_000);
+        env.ledger().with_mut(|li| li.sequence_number = 2);
+        client.approve(&alice, &spender, &500_0000, &1u32);
     }
 
     #[test]
