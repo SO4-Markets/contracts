@@ -364,7 +364,14 @@ impl FeeHandler {
         DataStoreClient::new(&env, &data_store).get_u128(&key)
     }
 
-    /// Accrue a UI fee on behalf of a receiver (called by the exchange_router on every swap/trade).
+    /// Accrue a UI fee on behalf of a receiver.
+    ///
+    /// NOTE (issue #602): despite the name, no real trade path calls this yet —
+    /// `exchange_router`, `order_handler`, and `swap_utils` never invoke it, and
+    /// nothing computes `amount` from `get_ui_fee_factor`. The
+    /// `set_ui_fee_factor`/`accrue_ui_fee` UI-fee-attribution feature is
+    /// configuration-and-accrual scaffolding only; it has no effect on any real
+    /// swap or trade until a caller with CONTROLLER wires this into execution.
     ///
     /// Only a caller that holds the CONTROLLER role may accrue fees; this prevents
     /// arbitrary inflation of a receiver's balance.
