@@ -1171,4 +1171,26 @@ mod tests {
             &impostor, &referrer, &0u128,
         );
     }
+
+    /// Persistent referral-code storage survives an upgrade (Soroban host
+    /// guarantee). Requires a compiled WASM binary to invoke
+    /// update_current_contract_wasm; not runnable in unit-test mode.
+    #[test]
+    #[ignore]
+    fn upgrade_preserves_referral_code_storage() {
+        let w = setup();
+        let referrer = Address::generate(&w.env);
+        let code = Bytes::from_slice(&w.env, b"UPGRADE1");
+        client(&w).register_code(&referrer, &code);
+
+        assert_eq!(client(&w).get_code_owner(&code), Some(referrer.clone()));
+
+        client(&w).upgrade(&BytesN::from_array(&w.env, &[0u8; 32]));
+
+        assert_eq!(
+            client(&w).get_code_owner(&code),
+            Some(referrer),
+            "referral code ownership must survive upgrade"
+        );
+    }
 }

@@ -120,7 +120,7 @@ graph — see [`docs/deployment.md`](docs/deployment.md#7-periphery-contracts-de
 |---|---|
 | `libs/types` | All shared structs: `MarketProps`, `PositionProps`, `OrderProps`, `PriceProps`, `PositionFees`, etc. |
 | `libs/math` | `FLOAT_PRECISION` (10³⁰), `TOKEN_PRECISION` (10⁷), `mul_div_wide` (I256), `pow_factor`, `sqrt_fp`. |
-| `libs/keys` | ~58 deterministic `sha256`-based key derivation functions. |
+| `libs/keys` | A large and growing set of deterministic `sha256`-based key derivation functions (one per configurable/derived `data_store` key). |
 | `libs/market_utils` | Pool value, open interest, PnL, funding state, borrowing fees, pool/OI validation. |
 | `libs/position_utils` | Per-position PnL, fee breakdown, funding settlement, leverage validation, liquidation check. |
 | `libs/pricing_utils` | Swap and position price impact, execution price, impact pool management. |

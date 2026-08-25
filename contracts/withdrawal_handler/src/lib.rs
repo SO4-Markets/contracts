@@ -1321,4 +1321,42 @@ mod tests {
 
         WithdrawalHandlerClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &wth_key);
     }
+
+    /// Persistent withdrawal storage survives an upgrade (Soroban host guarantee).
+    /// Requires a compiled WASM binary to invoke update_current_contract_wasm;
+    /// not runnable in unit-test mode. Auth is covered by upgrade_non_admin_reverts.
+    #[test]
+    #[ignore]
+    fn upgrade_preserves_withdrawal_storage() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &10_000_000_i128);
+        set_prices(&w);
+        let lp = do_deposit(&w, &user, 10_000_000, 0);
+
+        let hc = WithdrawalHandlerClient::new(&w.env, &w.wth_handler);
+        let key = hc.create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
+
+        assert!(
+            hc.get_withdrawal(&key).is_some(),
+            "withdrawal must exist before upgrade"
+        );
+
+        hc.upgrade(&BytesN::from_array(&w.env, &[0u8; 32]));
+
+        assert!(
+            hc.get_withdrawal(&key).is_some(),
+            "withdrawal must survive upgrade"
+        );
+    }
 }
