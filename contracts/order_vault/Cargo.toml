@@ -14,3 +14,5 @@ gmx-keys    = { path = "../../libs/keys" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+role-store  = { path = "../role_store" }
+test-token  = { path = "../test_token" }
