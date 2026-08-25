@@ -239,7 +239,6 @@ pub struct PoolValueInfo {
     pub short_token_amount: i128,
     pub long_token_usd: i128,
     pub short_token_usd: i128,
-    pub total_borrowing_fees: i128,
     pub impact_pool_amount: i128,
 }
 
@@ -363,11 +362,13 @@ pub struct SwapEstimate {
 }
 
 /// Position leverage breakdown returned by reader::get_position_leverage.
-/// leverage_bps = size_usd * 100 / net_collateral_usd (e.g. 2000 = 20×).
-/// If net_collateral_usd == 0, effective_leverage_bps == u32::MAX.
+/// effective_leverage_x100 = size_usd * 100 / net_collateral_usd (e.g. 2000 = 20×).
+/// This is NOT basis points (BPS_DIVISOR = 10_000) — genuine bps would represent
+/// 20× as 200_000, not 2000. It's a leverage-times-100 scale.
+/// If net_collateral_usd == 0, effective_leverage_x100 == u32::MAX.
 #[contracttype]
 pub struct PositionLeverage {
-    pub effective_leverage_bps: u32,
+    pub effective_leverage_x100: u32,
     pub net_collateral_usd: u128,
     pub position_size_usd: u128,
     pub is_liquidatable: bool,
