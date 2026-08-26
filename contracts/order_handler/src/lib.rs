@@ -47,6 +47,9 @@ use soroban_sdk::{
     symbol_short, Address, BytesN, Env,
 };
 
+/// Maximum number of orders allowed in a single `create_orders` batch.
+pub const MAX_ORDER_BATCH_SIZE: u32 = 5;
+
 // ─── TTL constants (#297) ─────────────────────────────────────────────────────
 //
 // Lazy bump: extend_ttl only fires when the remaining TTL falls below
@@ -570,7 +573,7 @@ impl OrderHandler {
     ) -> soroban_sdk::Vec<BytesN<32>> {
         caller.require_auth();
 
-        if requests.len() > 5 {
+        if requests.len() > MAX_ORDER_BATCH_SIZE {
             panic_with_error!(&env, Error::BatchSizeLimitExceeded);
         }
 
@@ -3919,8 +3922,8 @@ mod tests {
         let w = setup();
         let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
         let mut requests = Vec::new(&w.env);
-        // Build 6 decrease orders (no collateral deposit needed)
-        for _ in 0..6 {
+        // Build MAX_ORDER_BATCH_SIZE + 1 decrease orders (no collateral deposit needed)
+        for _ in 0..=MAX_ORDER_BATCH_SIZE {
             requests.push_back(CreateOrderParams {
                 receiver: w.user.clone(),
                 market: w.market_tk.clone(),

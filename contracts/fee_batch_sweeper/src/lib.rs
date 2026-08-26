@@ -129,4 +129,69 @@ mod tests {
         assert_eq!(result.claims_attempted, 0);
         assert_eq!(result.total_claimed, 0);
     }
+
+    #[test]
+    fn too_many_markets_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(FeeBatchSweeper, ());
+        let client = FeeBatchSweeperClient::new(&env, &contract_id);
+
+        let markets: Vec<Address> = (0..=MAX_BATCH_CLAIM_SIZE)
+            .map(|_| Address::generate(&env))
+            .collect();
+        let tokens = soroban_sdk::vec![&env, Address::generate(&env)];
+
+        let result = client.try_claim_all_fees(
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &markets,
+            &tokens,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn too_many_tokens_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(FeeBatchSweeper, ());
+        let client = FeeBatchSweeperClient::new(&env, &contract_id);
+
+        let markets = soroban_sdk::vec![&env, Address::generate(&env)];
+        let tokens: Vec<Address> = (0..=MAX_BATCH_CLAIM_SIZE)
+            .map(|_| Address::generate(&env))
+            .collect();
+
+        let result = client.try_claim_all_fees(
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &markets,
+            &tokens,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn product_exceeds_limit_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(FeeBatchSweeper, ());
+        let client = FeeBatchSweeperClient::new(&env, &contract_id);
+
+        // 5 markets × 5 tokens = 25 > 20
+        let markets: Vec<Address> = (0..5).map(|_| Address::generate(&env)).collect();
+        let tokens: Vec<Address> = (0..5).map(|_| Address::generate(&env)).collect();
+
+        let result = client.try_claim_all_fees(
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &markets,
+            &tokens,
+        );
+        assert!(result.is_err());
+    }
 }
