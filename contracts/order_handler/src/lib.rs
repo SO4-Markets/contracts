@@ -37,6 +37,7 @@ use gmx_keys::{
     MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET,
 };
 use gmx_math::mul_div_wide;
+use gmx_position_utils::validate_position;
 use gmx_swap_utils::{swap_with_path, MAX_SWAP_PATH_LENGTH};
 pub use gmx_types::CreateOrderParams;
 use gmx_types::PositionProps;
@@ -1240,6 +1241,21 @@ impl OrderHandler {
                 {
                     panic_with_error!(&env, Error::MaxOpenInterestExceeded);
                 }
+
+                // Issue: min_collateral_factor was previously only ever evaluated on
+                // the decrease path (decrease_position_utils::validate_position), so a
+                // brand-new or increased position could sit below the configured
+                // collateral floor until its next decrease. Validate the resulting
+                // position here — the same place the OI cap is enforced — mirroring
+                // how decrease_position_utils validates before persisting.
+                validate_position(
+                    &env,
+                    &data_store,
+                    &updated,
+                    &market,
+                    collateral_price,
+                    &index_price,
+                );
 
                 // Issue #205: emit position event
                 let avg_price = if updated.size_in_tokens > 0 {
@@ -2593,6 +2609,74 @@ mod tests {
             },
         );
         hc.execute_order(&w.keeper, &key);
+    }
+
+    // ── min_collateral_factor must be enforced on the increase path ──────────
+    //
+    // Before this fix the factor was only ever evaluated on the decrease path
+    // (decrease_position_utils::validate_position), so a brand-new position
+    // could be opened below the configured collateral floor and only be judged
+    // at its next decrease or liquidation.
+
+    /// Opening a position whose collateral is below the configured
+    /// min_collateral_factor floor for its size must revert.
+    #[test]
+    #[should_panic]
+    fn increase_below_min_collateral_factor_reverts() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        // 50% floor: every position needs collateral_usd >= size_in_usd / 2.
+        DsClient::new(&w.env, &w.ds).set_u128(
+            &w.admin,
+            &gmx_keys::min_collateral_factor_key(&w.env, &w.market_tk),
+            &((fp / 2) as u128),
+        );
+        set_prices(&w, 2000 * fp);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let key = hc.create_order(
+            &w.user,
+            &CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                // 1 token ($2000) backing $10,000 → 20% collateral ratio < 50% floor.
+                size_delta_usd: 10_000 * fp,
+                collateral_delta_amount: COLLATERAL,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketIncrease,
+                is_long: true,
+                expiry_ledger: None,
+            },
+        );
+        hc.execute_order(&w.keeper, &key);
+    }
+
+    /// A position whose collateral meets the configured min_collateral_factor
+    /// floor must still open — the new check only rejects under-collateralised ones.
+    #[test]
+    fn increase_meeting_min_collateral_factor_succeeds() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        DsClient::new(&w.env, &w.ds).set_u128(
+            &w.admin,
+            &gmx_keys::min_collateral_factor_key(&w.env, &w.market_tk),
+            &((fp / 2) as u128),
+        );
+        set_prices(&w, 2000 * fp);
+        // create_increase_order: $2000 size backed by 1 token ($2000)
+        // → 100% collateral ratio ≥ 50% floor.
+        let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+        let pk = position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true);
+        assert!(
+            hc.get_position(&pk).is_some(),
+            "position meeting the min-collateral floor must be created"
+        );
     }
 
     // ── Issue #32: order storage cleanup tests ────────────────────────────────
