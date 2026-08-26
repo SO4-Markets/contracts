@@ -442,6 +442,12 @@ impl DataStore {
         value
     }
 
+    pub fn remove_bytes32(env: Env, caller: Address, key: BytesN<32>) {
+        caller.require_auth();
+        require_controller(&env, &caller);
+        env.storage().persistent().remove(&DataKey::B32(key));
+    }
+
     // ── Address set operations ────────────────────────────────────────────────
 
     pub fn add_address_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: Address) {
@@ -1373,5 +1379,100 @@ mod tests {
         let client = DataStoreClient::new(&env, &ds_id);
         let impostor = Address::generate(&env);
         client.set_min_execution_fee(&impostor, &1000u128);
+    }
+
+    #[test]
+    fn test_remove_u128() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xD4u8; 32]);
+
+        client.set_u128(&admin, &key, &42u128);
+        assert_eq!(client.get_u128(&key), 42);
+        client.remove_u128(&admin, &key);
+        assert_eq!(client.get_u128(&key), 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn remove_u128_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0xD5u8; 32]);
+        client.remove_u128(&impostor, &key);
+    }
+
+    #[test]
+    fn test_remove_bytes32() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xD6u8; 32]);
+        let val = BytesN::from_array(&env, &[0xEFu8; 32]);
+
+        client.set_bytes32(&admin, &key, &val);
+        assert_eq!(client.get_bytes32(&key), val);
+        client.remove_bytes32(&admin, &key);
+        assert_eq!(
+            client.get_bytes32(&key),
+            BytesN::from_array(&env, &[0u8; 32])
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn remove_bytes32_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0xD7u8; 32]);
+        client.remove_bytes32(&impostor, &key);
+    }
+
+    #[test]
+    fn test_increment_decrement_u128() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xD8u8; 32]);
+
+        assert_eq!(client.get_u128(&key), 0);
+        let inc_res = client.increment_u128(&admin, &key, &100u128);
+        assert_eq!(inc_res, 100);
+        assert_eq!(client.get_u128(&key), 100);
+
+        let dec_res = client.decrement_u128(&admin, &key, &40u128);
+        assert_eq!(dec_res, 60);
+        assert_eq!(client.get_u128(&key), 60);
+    }
+
+    #[test]
+    #[should_panic]
+    fn decrement_u128_underflow_panics() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xD9u8; 32]);
+
+        client.set_u128(&admin, &key, &50u128);
+        client.decrement_u128(&admin, &key, &51u128);
+    }
+
+    #[test]
+    #[should_panic]
+    fn increment_u128_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0xDAu8; 32]);
+        client.increment_u128(&impostor, &key, &10u128);
+    }
+
+    #[test]
+    #[should_panic]
+    fn decrement_u128_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0xDBu8; 32]);
+        client.decrement_u128(&impostor, &key, &10u128);
     }
 }
