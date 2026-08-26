@@ -119,6 +119,7 @@ trait IDataStore {
     fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
     fn set_position_manager(env: Env, caller: Address, market: Address, manager: Address) -> Address;
     fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address>;
+    fn remove_position_manager(env: Env, owner: Address, market: Address) -> bool;
 }
 
 #[allow(dead_code)]
@@ -638,13 +639,13 @@ impl ExchangeRouter {
         }
     }
 
-    /// Set or revoke a position manager for the caller on a specific market.
+    /// Set a position manager for the caller on a specific market.
     ///
     /// A position manager is authorized to create, increase, decrease, or close
     /// positions on behalf of the owner, but cannot redirect collateral receipts.
     /// The manager cannot override the receiver — funds always go to the owner.
     ///
-    /// Call with zero_address to revoke an existing manager.
+    /// Revoke an existing manager with remove_position_manager.
     pub fn set_position_manager(env: Env, caller: Address, market: Address, manager: Address) {
         caller.require_auth();
         let data_store: Address = env.storage().instance()
@@ -661,6 +662,17 @@ impl ExchangeRouter {
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let data_store_client = DataStoreClient::new(&env, &data_store);
         data_store_client.get_position_manager(&owner, &market)
+    }
+
+    /// Revoke the caller's position manager on a specific market. Only the
+    /// owner can call this; get_position_manager returns None afterwards.
+    pub fn remove_position_manager(env: Env, caller: Address, market: Address) -> bool {
+        caller.require_auth();
+        let data_store: Address = env.storage().instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let data_store_client = DataStoreClient::new(&env, &data_store);
+        data_store_client.remove_position_manager(&caller, &market)
     }
 
     /// Set the UI fee factor for a receiver. Delegates auth enforcement to fee_handler.
@@ -1725,6 +1737,14 @@ mod tests {
             router_client.get_position_manager(&owner, &market),
             Some(manager),
             "router must forward to the same data_store entry get_position_manager reads"
+        );
+
+        // Revocation through the router must clear the same data_store entry.
+        assert!(router_client.remove_position_manager(&owner, &market));
+        assert_eq!(
+            router_client.get_position_manager(&owner, &market),
+            None,
+            "revoked manager must read back as None"
         );
     }
 

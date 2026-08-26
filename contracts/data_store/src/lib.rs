@@ -127,6 +127,13 @@ pub struct PositionManagerSet {
     pub manager: Address,
 }
 
+#[contractevent(topics = ["pos_mgr_rm"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PositionManagerRemoved {
+    pub owner: Address,
+    pub market: Address,
+}
+
 #[contractevent(topics = ["liq_fee_set"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LiquidationExecutionFeeSet {
@@ -669,15 +676,17 @@ impl DataStore {
     // ── Position Manager (delegated position control for copy-trading) ────────
 
     /// Get the authorized position manager for a given owner and market.
-    /// Returns None if no manager is set or if revoked (zero address).
+    /// Returns None if no manager is set or if it has been revoked via
+    /// remove_position_manager.
     pub fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address> {
         use gmx_keys::position_manager_key;
         let key = DataKey::Addr(position_manager_key(&env, &owner, &market));
         env.storage().persistent().get(&key)
     }
 
-    /// Set or revoke a position manager for a given owner and market.
-    /// Only the owner can call this. Pass zero_address to revoke.
+    /// Set a position manager for a given owner and market.
+    /// Only the owner can call this. Returns the manager that was set.
+    /// Revoke with remove_position_manager.
     pub fn set_position_manager(env: Env, owner: Address, market: Address, manager: Address) -> Address {
         owner.require_auth();
         // Note: We don't check for CONTROLLER role here because the owner can revoke their own manager.
@@ -691,6 +700,19 @@ impl DataStore {
             manager: manager.clone(),
         });
         manager
+    }
+
+    /// Revoke the position manager for a given owner and market.
+    /// Only the owner can call this. Returns true if a manager was previously
+    /// set (and is now removed), false if none was set.
+    pub fn remove_position_manager(env: Env, owner: Address, market: Address) -> bool {
+        owner.require_auth();
+        use gmx_keys::position_manager_key;
+        let key = DataKey::Addr(position_manager_key(&env, &owner, &market));
+        let existed = env.storage().persistent().has(&key);
+        env.storage().persistent().remove(&key);
+        env.events().publish_event(&PositionManagerRemoved { owner, market });
+        existed
     }
 
     // ── Liquidation Execution Fee (keeper reimbursement on liquidation) ───────
@@ -1333,6 +1355,36 @@ mod tests {
         assert!(client.get_position_manager(&owner, &market).is_none());
         client.set_position_manager(&owner, &market, &manager);
         assert_eq!(client.get_position_manager(&owner, &market), Some(manager));
+    }
+
+    /// A set position manager can be revoked; get_position_manager returns None
+    /// afterwards and re-setting a new manager works again.
+    #[test]
+    fn test_position_manager_revoke() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let owner = Address::generate(&env);
+        let market = Address::generate(&env);
+        let manager = Address::generate(&env);
+        let replacement = Address::generate(&env);
+
+        // Removing with nothing set reports false and stays unset.
+        assert!(!client.remove_position_manager(&owner, &market));
+        assert!(client.get_position_manager(&owner, &market).is_none());
+
+        client.set_position_manager(&owner, &market, &manager);
+        assert_eq!(client.get_position_manager(&owner, &market), Some(manager));
+
+        // Revocation actually clears the entry instead of reassigning it.
+        assert!(client.remove_position_manager(&owner, &market));
+        assert!(client.get_position_manager(&owner, &market).is_none());
+
+        // A fresh manager can be delegated after revocation.
+        client.set_position_manager(&owner, &market, &replacement);
+        assert_eq!(
+            client.get_position_manager(&owner, &market),
+            Some(replacement)
+        );
     }
 
     #[test]

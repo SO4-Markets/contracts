@@ -5,7 +5,7 @@
 
 use gmx_keys::{
     claimable_funding_amount_key, cumulative_borrowing_factor_key, funding_amount_per_size_key,
-    max_leverage_key, min_collateral_factor_key, position_fee_factor_key, position_key,
+    max_leverage_key, min_collateral_factor_key, position_fee_factor_key,
 };
 use gmx_market_utils::validate_open_interest;
 use gmx_math::{mul_div_wide, mul_div_wide_up, FLOAT_PRECISION, TOKEN_PRECISION};
@@ -345,19 +345,6 @@ pub fn is_liquidatable(
     );
     // Fold PnL into the comparison so adverse index-price moves cannot hide insolvency.
     remaining < min_required
-}
-
-// ─── Position key ─────────────────────────────────────────────────────────────
-
-/// Compute the data_store key for a position.
-pub fn get_position_key(
-    env: &Env,
-    account: &Address,
-    market_token: &Address,
-    collateral_token: &Address,
-    is_long: bool,
-) -> BytesN<32> {
-    position_key(env, account, market_token, collateral_token, is_long)
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

@@ -361,6 +361,54 @@ mod tests {
         assert_eq!(liquidation_penalty - insurance_share, 7_500);
     }
 
+    /// preview_penalty_split must be callable through the deployed contract
+    /// entry point and return exactly the split route_liquidation_penalty
+    /// actually produces for the same inputs — integrators simulate before
+    /// they submit.
+    #[test]
+    fn preview_penalty_split_matches_routed_split_through_client() {
+        let w = setup();
+        let client = InsuranceFundRouterClient::new(&w.env, &w.router);
+        let market = Address::generate(&w.env);
+        let fund = Address::generate(&w.env);
+        let treasury = Address::generate(&w.env);
+        let source = Address::generate(&w.env);
+
+        StellarAssetClient::new(&w.env, &w.token).mint(&source, &10_000i128);
+        client.configure_insurance_fund(&w.ds, &w.rs, &w.admin, &market, &fund, &2_500u32);
+        client.configure_treasury(&w.ds, &w.admin, &treasury);
+        RsClient::new(&w.env, &w.rs).grant_role(&w.admin, &source, &roles::controller(&w.env));
+
+        // Preview through the contract client (no auth, no state change).
+        let preview = client.preview_penalty_split(&w.ds, &market, &10_000u128);
+        assert_eq!(preview.insurance_share, 2_500);
+        assert_eq!(preview.treasury_share, 7_500);
+
+        // The actual routed split must equal the preview for the same inputs.
+        let routed =
+            client.route_liquidation_penalty(&w.ds, &w.rs, &market, &w.token, &source, &10_000u128);
+        assert_eq!(preview, routed);
+
+        // And funds really moved according to that split.
+        let token_client = token::TokenClient::new(&w.env, &w.token);
+        assert_eq!(token_client.balance(&fund), 2_500);
+        assert_eq!(token_client.balance(&treasury), 7_500);
+        assert_eq!(token_client.balance(&source), 0);
+    }
+
+    /// With no allocation configured (0 bps), the client-facing preview routes
+    /// the entire penalty to the treasury.
+    #[test]
+    fn preview_penalty_split_zero_bps_routes_all_to_treasury_through_client() {
+        let w = setup();
+        let client = InsuranceFundRouterClient::new(&w.env, &w.router);
+        let market = Address::generate(&w.env);
+
+        let preview = client.preview_penalty_split(&w.ds, &market, &1_000u128);
+        assert_eq!(preview.insurance_share, 0);
+        assert_eq!(preview.treasury_share, 1_000);
+    }
+
     #[test]
     fn fund_covers_shortfall_until_exhausted() {
         let shortfall = 1_000u128;

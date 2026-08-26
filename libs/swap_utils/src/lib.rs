@@ -44,14 +44,14 @@ trait IMarketToken {
     );
 }
 
-// ─── Single-hop swap (with pre-fetched prices) ────────────────────────────────
+// ─── Single-hop swap hop (with pre-fetched prices) ────────────────────────────
 
 /// Execute one swap hop using caller-supplied prices.
 ///
-/// This is the canonical inner implementation. Both the public single-hop
-/// `swap()` and the multi-hop `swap_with_path()` delegate here after
-/// obtaining prices — the former via a direct oracle call, the latter via
-/// the pre-fetched price cache built once at the start of the path.
+/// This is the canonical inner implementation. The multi-hop `swap_with_path()`
+/// delegates here for every hop in the path after obtaining prices from the
+/// pre-fetched price cache built once at the start of the path — single-hop
+/// swaps included, via a one-element path.
 #[allow(clippy::too_many_arguments)]
 fn swap_with_prices(
     env: &Env,
@@ -122,39 +122,6 @@ fn swap_with_prices(
     );
 
     (token_out.clone(), amount_out)
-}
-
-// ─── Public single-hop swap ───────────────────────────────────────────────────
-
-#[allow(clippy::too_many_arguments)]
-pub fn swap(
-    env: &Env,
-    data_store: &Address,
-    caller: &Address,
-    oracle: &Address,
-    market: &MarketProps,
-    token_in: &Address,
-    amount_in: i128,
-    receiver: &Address,
-) -> (Address, i128) {
-    // Determine token_out
-    let token_out = if token_in == &market.long_token {
-        market.short_token.clone()
-    } else if token_in == &market.short_token {
-        market.long_token.clone()
-    } else {
-        soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(1u32));
-    };
-
-    // Fetch prices from oracle (single-hop path; no pre-fetch possible here)
-    let oracle_client = OracleClient::new(env, oracle);
-    let price_in = oracle_client.get_primary_price(token_in).mid_price();
-    let price_out = oracle_client.get_primary_price(&token_out).mid_price();
-
-    swap_with_prices(
-        env, data_store, caller, market, token_in, amount_in, receiver,
-        price_in, price_out, &token_out,
-    )
 }
 
 /// Absolute upper bound on swap path length (number of market hops).
