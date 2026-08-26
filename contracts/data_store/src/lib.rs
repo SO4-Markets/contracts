@@ -442,6 +442,12 @@ impl DataStore {
         value
     }
 
+    pub fn remove_bytes32(env: Env, caller: Address, key: BytesN<32>) {
+        caller.require_auth();
+        require_controller(&env, &caller);
+        env.storage().persistent().remove(&DataKey::B32(key));
+    }
+
     // ── Address set operations ────────────────────────────────────────────────
 
     pub fn add_address_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: Address) {
@@ -1320,6 +1326,136 @@ mod tests {
         let impostor = Address::generate(&env);
         let key = BytesN::from_array(&env, &[0xD3u8; 32]);
         client.remove_bool(&impostor, &key);
+    }
+
+    // ── Missing accessor tests: remove_u128, remove_bytes32, increment_u128, decrement_u128 ──
+
+    /// remove_u128 must erase a previously-set value (reads back as 0).
+    /// Mirrors test_remove_i128 / test_remove_address / test_remove_bool.
+    #[test]
+    fn test_remove_u128() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xD4u8; 32]);
+
+        client.set_u128(&admin, &key, &999u128);
+        assert_eq!(client.get_u128(&key), 999);
+        client.remove_u128(&admin, &key);
+        assert_eq!(client.get_u128(&key), 0, "get_u128 must return 0 after remove_u128");
+    }
+
+    /// remove_u128 must reject a caller that does not hold CONTROLLER.
+    #[test]
+    #[should_panic]
+    fn remove_u128_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0xD5u8; 32]);
+        client.remove_u128(&impostor, &key);
+    }
+
+    /// remove_bytes32 must erase a previously-set value (reads back as zero bytes).
+    /// Mirrors test_remove_i128 / test_remove_address / test_remove_bool.
+    #[test]
+    fn test_remove_bytes32() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xD6u8; 32]);
+        let val = BytesN::from_array(&env, &[0xFFu8; 32]);
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+
+        client.set_bytes32(&admin, &key, &val);
+        assert_eq!(client.get_bytes32(&key), val);
+        client.remove_bytes32(&admin, &key);
+        assert_eq!(
+            client.get_bytes32(&key),
+            zero,
+            "get_bytes32 must return zero after remove_bytes32"
+        );
+    }
+
+    /// remove_bytes32 must reject a caller that does not hold CONTROLLER.
+    #[test]
+    #[should_panic]
+    fn remove_bytes32_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0xD7u8; 32]);
+        client.remove_bytes32(&impostor, &key);
+    }
+
+    /// increment_u128 must add the given amount to the stored value.
+    /// Also verifies the result starting from zero (no prior set required).
+    #[test]
+    fn test_increment_u128_round_trip() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xD8u8; 32]);
+
+        // Starts at 0 (default)
+        assert_eq!(client.get_u128(&key), 0);
+
+        let r1 = client.increment_u128(&admin, &key, &50u128);
+        assert_eq!(r1, 50, "first increment must return 50");
+        assert_eq!(client.get_u128(&key), 50);
+
+        let r2 = client.increment_u128(&admin, &key, &25u128);
+        assert_eq!(r2, 75, "second increment must return 75");
+        assert_eq!(client.get_u128(&key), 75);
+    }
+
+    /// increment_u128 must reject a caller that does not hold CONTROLLER.
+    #[test]
+    #[should_panic]
+    fn increment_u128_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0xD9u8; 32]);
+        client.increment_u128(&impostor, &key, &10u128);
+    }
+
+    /// decrement_u128 must subtract the given amount from the stored value.
+    #[test]
+    fn test_decrement_u128_round_trip() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xDAu8; 32]);
+
+        client.set_u128(&admin, &key, &100u128);
+
+        let r1 = client.decrement_u128(&admin, &key, &40u128);
+        assert_eq!(r1, 60, "first decrement must return 60");
+        assert_eq!(client.get_u128(&key), 60);
+
+        let r2 = client.decrement_u128(&admin, &key, &60u128);
+        assert_eq!(r2, 0, "decrement to zero must return 0");
+        assert_eq!(client.get_u128(&key), 0);
+    }
+
+    /// decrement_u128 must panic with Underflow when amount exceeds current value.
+    #[test]
+    #[should_panic]
+    fn decrement_u128_underflow_panics() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let key = BytesN::from_array(&env, &[0xDBu8; 32]);
+
+        client.set_u128(&admin, &key, &10u128);
+        client.decrement_u128(&admin, &key, &20u128); // 20 > 10 → Underflow
+    }
+
+    /// decrement_u128 must reject a caller that does not hold CONTROLLER.
+    #[test]
+    #[should_panic]
+    fn decrement_u128_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0xDCu8; 32]);
+        client.decrement_u128(&impostor, &key, &10u128);
     }
 
     #[test]

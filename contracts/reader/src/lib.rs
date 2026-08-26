@@ -63,6 +63,12 @@ pub enum Error {
     Unauthorized = 3,
     /// `get_protocol_stats` was passed more than `MAX_STATS_MARKETS` markets.
     TooManyMarkets = 4,
+    /// The supplied market address is not registered in data_store —
+    /// one or more of its token addresses (index/long/short) returned None.
+    /// Mirrors the InvalidMarket pattern in deposit_handler/withdrawal_handler
+    /// (issue #371) so callers can match this condition as a typed error
+    /// instead of a generic execution failure.
+    InvalidMarket = 5,
 }
 
 // ─── External clients ─────────────────────────────────────────────────────────
@@ -146,13 +152,13 @@ impl Reader {
         let ds = DataStoreClient::new(&env, &data_store);
         let index_token = ds
             .get_address(&market_index_token_key(&env, &market_token))
-            .expect("market index token not found");
+            .unwrap_or_else(|| panic_with_error!(&env, Error::InvalidMarket));
         let long_token = ds
             .get_address(&market_long_token_key(&env, &market_token))
-            .expect("market long token not found");
+            .unwrap_or_else(|| panic_with_error!(&env, Error::InvalidMarket));
         let short_token = ds
             .get_address(&market_short_token_key(&env, &market_token))
-            .expect("market short token not found");
+            .unwrap_or_else(|| panic_with_error!(&env, Error::InvalidMarket));
         MarketProps {
             market_token,
             index_token,

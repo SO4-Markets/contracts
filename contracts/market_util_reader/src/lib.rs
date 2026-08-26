@@ -6,9 +6,23 @@ use gmx_keys::{
 };
 use gmx_market_utils::{get_open_interest_for_side, get_pool_value};
 use gmx_types::{MarketProps, PriceProps};
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env};
 
 const BPS_DIVISOR: u128 = 10_000;
+
+// ─── Errors ───────────────────────────────────────────────────────────────────
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum Error {
+    /// The supplied market address is not registered in data_store —
+    /// one or more of its token addresses (index/long/short) returned None.
+    /// Mirrors the InvalidMarket pattern in deposit_handler/withdrawal_handler
+    /// (issue #371) so callers can match this condition as a typed error
+    /// instead of a generic execution failure.
+    InvalidMarket = 1,
+}
 
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
@@ -100,13 +114,13 @@ fn load_market(env: &Env, data_store: &Address, market: &Address) -> MarketProps
     let ds = DataStoreClient::new(env, data_store);
     let index_token = ds
         .get_address(&market_index_token_key(env, market))
-        .expect("market index token not found");
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket));
     let long_token = ds
         .get_address(&market_long_token_key(env, market))
-        .expect("market long token not found");
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket));
     let short_token = ds
         .get_address(&market_short_token_key(env, market))
-        .expect("market short token not found");
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket));
 
     MarketProps {
         market_token: market.clone(),
