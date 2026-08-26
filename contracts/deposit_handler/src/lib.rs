@@ -424,15 +424,14 @@ impl DepositHandler {
         // than a stale one still sitting in temporary storage from an earlier ledger.
         let oracle_client = OracleClient::new(&env, &oracle);
         let current_seq = env.ledger().sequence();
-        let long_price = oracle_client
-            .require_price_fresh(&market.long_token, &current_seq)
-            .mid_price();
-        let short_price = oracle_client
-            .require_price_fresh(&market.short_token, &current_seq)
-            .mid_price();
-        let index_price = oracle_client
-            .require_price_fresh(&market.index_token, &current_seq)
-            .mid_price();
+        let long_price_props = oracle_client
+            .require_price_fresh(&market.long_token, &current_seq);
+        let short_price_props = oracle_client
+            .require_price_fresh(&market.short_token, &current_seq);
+        let index_price_props = oracle_client
+            .require_price_fresh(&market.index_token, &current_seq);
+        let long_price = long_price_props.mid_price();
+        let short_price = short_price_props.mid_price();
 
         // Verify vault actually holds at least what was recorded at deposit time.
         // This guards against fee-on-transfer tokens and any balance discrepancy
@@ -474,9 +473,9 @@ impl DepositHandler {
             &env,
             &data_store,
             &market,
-            long_price,
-            short_price,
-            index_price,
+            &long_price_props,
+            &short_price_props,
+            &index_price_props,
             false, // minimize → fewer LP tokens (conservative for depositor)
         );
 

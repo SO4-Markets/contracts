@@ -17,7 +17,7 @@ use gmx_keys::{
     saved_funding_factor_per_second_key, swap_impact_pool_amount_key,
 };
 use gmx_math::{mul_div_wide, pow_factor, FLOAT_PRECISION, TOKEN_PRECISION};
-use gmx_types::{MarketProps, PoolValueInfo};
+use gmx_types::{MarketProps, PoolValueInfo, PriceProps};
 use soroban_sdk::{vec, Address, BytesN, Env, Vec};
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -199,18 +199,18 @@ pub fn get_pnl(
 /// the same pattern `validate_open_interest` follows as the single source of
 /// truth for the OI cap).
 ///
-/// `index_price` is the mid-market price used for pool valuation; `pnl_price`
-/// is the maximize-resolved price (`PriceProps::pick_price_for_pnl`) used for
-/// the PnL calculation itself (issue #377).
+/// Pool valuation is minimized (conservative: harder to trigger ADL) via
+/// `get_pool_value(..., maximize=false)`, which minimizes assets and maximizes
+/// net PnL. PnL for the ADL threshold itself is maximized via
+/// `PriceProps::pick_price_for_pnl(is_long, true)` (issue #377).
 #[allow(clippy::too_many_arguments)]
 pub fn is_adl_required(
     env: &Env,
     ds: &Address,
     market: &MarketProps,
-    long_price: i128,
-    short_price: i128,
-    index_price: i128,
-    pnl_price: i128,
+    long_price: &PriceProps,
+    short_price: &PriceProps,
+    index_price: &PriceProps,
     is_long: bool,
 ) -> bool {
     let max_pnl_factor = DataStoreClient::new(env, ds)
@@ -226,7 +226,8 @@ pub fn is_adl_required(
         return false;
     }
 
-    // Maximize trader PnL (worst case for pool)
+    // Maximize trader PnL (worst case for pool) — resolve pnl price via PriceProps.
+    let pnl_price = index_price.pick_price_for_pnl(is_long, true);
     let pnl = get_pnl(env, ds, market, pnl_price, is_long, true);
     if pnl <= 0 {
         return false;
@@ -237,26 +238,6 @@ pub fn is_adl_required(
 }
 
 // ─── Borrowing fees ───────────────────────────────────────────────────────────
-
-/// Pending borrowing fee for a position: (cum_factor_now - factor_at_open) × size_in_tokens.
-pub fn get_borrowing_fees(
-    env: &Env,
-    ds: &Address,
-    market: &MarketProps,
-    _collateral_token: &Address,
-    is_long: bool,
-    borrowing_factor_at_open: u128,
-    size_in_tokens: u128,
-) -> u128 {
-    let key = cumulative_borrowing_factor_key(env, &market.market_token, is_long);
-    let cum_factor = DataStoreClient::new(env, ds).get_u128(&key);
-    if cum_factor <= borrowing_factor_at_open {
-        return 0;
-    }
-    let delta = cum_factor - borrowing_factor_at_open;
-    // fee = delta × size_in_tokens / FLOAT_PRECISION
-    mul_div_wide(env, delta as i128, size_in_tokens as i128, FLOAT_PRECISION) as u128
-}
 
 /// Update the cumulative borrowing factor for one side.
 ///
@@ -508,9 +489,9 @@ pub fn get_pool_value(
     env: &Env,
     ds: &Address,
     market: &MarketProps,
-    long_token_price: i128,
-    short_token_price: i128,
-    index_token_price: i128,
+    long_token_price: &PriceProps,
+    short_token_price: &PriceProps,
+    index_token_price: &PriceProps,
     maximize: bool,
 ) -> PoolValueInfo {
     // Batch all 11 reads into a single cross-contract call to stay within Soroban's
@@ -547,10 +528,19 @@ pub fn get_pool_value(
     let oit_short_lt = batch.get(9).unwrap_or(0) as i128;
     let oit_short_st = batch.get(10).unwrap_or(0) as i128;
 
+    // Price selection: maximize=true → max assets, min PnL (optimistic);
+    // maximize=false → min assets, max PnL (conservative, harder to trigger ADL)
+    let long_price = long_token_price.pick_price(maximize);
+    let short_price = short_token_price.pick_price(maximize);
+    let index_price_for_assets = index_token_price.pick_price(maximize);
+    // PnL uses opposite maximize: max pool wants min PnL, min pool wants max PnL
+    let long_pnl_price = index_token_price.pick_price_for_pnl(true, !maximize);
+    let short_pnl_price = index_token_price.pick_price_for_pnl(false, !maximize);
+
     // USD value of pool tokens
-    let long_usd       = mul_div_wide(env, long_pool, long_token_price, TOKEN_PRECISION);
-    let short_usd      = mul_div_wide(env, short_pool, short_token_price, TOKEN_PRECISION);
-    let impact_pool_usd = mul_div_wide(env, impact_pool_tokens, index_token_price, TOKEN_PRECISION);
+    let long_usd       = mul_div_wide(env, long_pool, long_price, TOKEN_PRECISION);
+    let short_usd      = mul_div_wide(env, short_pool, short_price, TOKEN_PRECISION);
+    let impact_pool_usd = mul_div_wide(env, impact_pool_tokens, index_price_for_assets, TOKEN_PRECISION);
 
     // Inline PnL calculation for longs
     let long_pnl = {
@@ -559,7 +549,7 @@ pub fn get_pool_value(
         if oi_tokens == 0 {
             0
         } else {
-            let pos_val = mul_div_wide(env, oi_tokens, index_token_price, TOKEN_PRECISION);
+            let pos_val = mul_div_wide(env, oi_tokens, long_pnl_price, TOKEN_PRECISION);
             pos_val - oi_usd
         }
     };
@@ -571,12 +561,11 @@ pub fn get_pool_value(
         if oi_tokens == 0 {
             0
         } else {
-            let pos_val = mul_div_wide(env, oi_tokens, index_token_price, TOKEN_PRECISION);
+            let pos_val = mul_div_wide(env, oi_tokens, short_pnl_price, TOKEN_PRECISION);
             oi_usd - pos_val
         }
     };
 
-    let _ = maximize; // reserved for future min/max price selection
     let net_pnl = long_pnl + short_pnl;
     let pool_value = long_usd + short_usd + impact_pool_usd - net_pnl;
 
@@ -607,9 +596,9 @@ pub fn get_market_token_price(
     env: &Env,
     ds: &Address,
     market: &MarketProps,
-    long_token_price: i128,
-    short_token_price: i128,
-    index_token_price: i128,
+    long_token_price: &PriceProps,
+    short_token_price: &PriceProps,
+    index_token_price: &PriceProps,
     maximize: bool,
 ) -> i128 {
     let supply = MarketTokenClient::new(env, &market.market_token).total_supply();
@@ -778,21 +767,46 @@ mod tests {
         env.mock_all_auths();
         let (_admin, ds, mt, it, lt, st) = make_market(&env);
         let market = make_market_props(&mt, &it, &lt, &st);
-        let price = FLOAT_PRECISION;
-        let info = get_pool_value(&env, &ds, &market, price, price, price, true);
+        let price = PriceProps { min: FLOAT_PRECISION, max: FLOAT_PRECISION };
+        let info = get_pool_value(&env, &ds, &market, &price, &price, &price, true);
         assert_eq!(info.pool_value, 0);
         assert_eq!(info.net_pnl, 0);
     }
 
     #[test]
-    fn borrowing_fees_zero_at_open() {
+    fn get_pool_value_maximize_changes_result_with_price_spread() {
         let env = Env::default();
         env.mock_all_auths();
-        let (_admin, ds, mt, it, lt, st) = make_market(&env);
+        let (admin, ds, mt, it, lt, st) = make_market(&env);
         let market = make_market_props(&mt, &it, &lt, &st);
-        // cum_factor starts at 0; position opened at 0 → no fees
-        let fees = get_borrowing_fees(&env, &ds, &market, &lt, true, 0, 1_000_000);
-        assert_eq!(fees, 0);
+        let ds_c = DsClient::new(&env, &ds);
+        let fp = FLOAT_PRECISION;
+
+        // Pool: 5 long tokens @ spread, 4000 short stable
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::pool_amount_key(&env, &mt, &lt), &(5 * 10_000_000));
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::pool_amount_key(&env, &mt, &st), &(4_000 * 10_000_000));
+        // Open interest: 5 long tokens opened at $2000, current size $10_000*FP
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &lt, true), &(10_000 * fp));
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_in_tokens_key(&env, &mt, &lt, true), &(5 * 10_000_000));
+        // Price spread: long $1800 .. $2200, short $1 stable, index $1800 .. $2200
+        let long_price = PriceProps { min: 1_800 * fp, max: 2_200 * fp };
+        let short_price = PriceProps { min: fp, max: fp };
+        let index_price = PriceProps { min: 1_800 * fp, max: 2_200 * fp };
+
+        let info_min = get_pool_value(&env, &ds, &market, &long_price, &short_price, &index_price, false);
+        let info_max = get_pool_value(&env, &ds, &market, &long_price, &short_price, &index_price, true);
+
+        assert_ne!(
+            info_min.pool_value, info_max.pool_value,
+            "maximize flag must affect pool_value: min={}, max={}",
+            info_min.pool_value, info_max.pool_value
+        );
+        // With this setup, max should be larger because assets at max and PnL at min
+        assert!(
+            info_max.pool_value > info_min.pool_value,
+            "max pool value must exceed min: max={}, min={}",
+            info_max.pool_value, info_min.pool_value
+        );
     }
 
     #[test]
@@ -1029,23 +1043,23 @@ mod tests {
             &short_pool,
         );
 
-        let long_price = 2_000_i128 * fp; // $2 000
-        let short_price = fp; // $1 (stablecoin)
-        let index_price = 2_000_i128 * fp;
+        let long_price = PriceProps { min: 2_000_i128 * fp, max: 2_000_i128 * fp }; // $2 000
+        let short_price = PriceProps { min: fp, max: fp }; // $1 (stablecoin)
+        let index_price = PriceProps { min: 2_000_i128 * fp, max: 2_000_i128 * fp };
 
         let info = get_pool_value(
             &env,
             &ds,
             &market,
-            long_price,
-            short_price,
-            index_price,
+            &long_price,
+            &short_price,
+            &index_price,
             true,
         );
 
         // Expected: long = 5 * $2000 = $10_000,  short = 4000 * $1 = $4_000
-        let expected_long_usd = mul_div_wide(&env, long_pool, long_price, TOKEN_PRECISION);
-        let expected_short_usd = mul_div_wide(&env, short_pool, short_price, TOKEN_PRECISION);
+        let expected_long_usd = mul_div_wide(&env, long_pool, long_price.max, TOKEN_PRECISION);
+        let expected_short_usd = mul_div_wide(&env, short_pool, short_price.max, TOKEN_PRECISION);
         let expected_pool_value = expected_long_usd + expected_short_usd; // no PnL, no impact pool
 
         assert_eq!(
@@ -1067,53 +1081,6 @@ mod tests {
             info.pool_value,
             14_000 * fp,
             "known value: 5*$2000 + 4000*$1 = $14000"
-        );
-    }
-
-    /// Reference: borrowing fee = (cum_factor_now - factor_at_open) * size_in_tokens / FP
-    ///
-    ///   cum_factor_now      = FP / 10  (10%)
-    ///   cum_factor_at_open  = 0
-    ///   size_in_tokens      = 2 * TOKEN_PRECISION
-    ///   fee = (FP/10 - 0) * (2 * TOKEN_PRECISION) / FP = 0.1 * 2 tokens = 0.2 tokens
-    #[test]
-    fn differential_get_borrowing_fees_matches_reference_formula() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (admin, ds, mt, it, lt, st) = make_market(&env);
-        let market = make_market_props(&mt, &it, &lt, &st);
-
-        let fp = FLOAT_PRECISION;
-        let ds_c = DsClient::new(&env, &ds);
-
-        let cum_factor_now: u128 = (fp / 10) as u128; // 10%
-        let cum_factor_at_open: u128 = 0;
-        let size_in_tokens: u128 = 2 * 10_000_000; // 2 whole tokens
-
-        let cum_key = gmx_keys::cumulative_borrowing_factor_key(&env, &mt, true);
-        ds_c.set_u128(&admin, &cum_key, &cum_factor_now);
-
-        let fee = get_borrowing_fees(
-            &env,
-            &ds,
-            &market,
-            &lt,
-            true,
-            cum_factor_at_open,
-            size_in_tokens,
-        );
-
-        // Reference: delta = 10%; fee = 10% * 2 tokens = 0.2 tokens = 2_000_000 units
-        let delta = cum_factor_now - cum_factor_at_open;
-        let expected = mul_div_wide(&env, delta as i128, size_in_tokens as i128, fp) as u128;
-
-        assert_eq!(
-            fee, expected,
-            "borrowing fee must match reference: fee={fee}, expected={expected}"
-        );
-        assert_eq!(
-            fee, 2_000_000u128,
-            "known numeric: 10% of 2 tokens = 0.2 tokens = 2_000_000 units"
         );
     }
 
