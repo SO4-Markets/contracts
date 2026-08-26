@@ -45,6 +45,12 @@ pub enum Error {
     NotInitialized = 2,
     Unauthorized = 3,
     NotLiquidatable = 5,
+    /// The supplied market address is not registered in data_store —
+    /// one or more of its token addresses (index/long/short) returned None.
+    /// Mirrors the InvalidMarket pattern in deposit_handler/withdrawal_handler
+    /// (issue #371) so callers can match this condition as a typed error
+    /// instead of a generic execution failure.
+    InvalidMarket = 6,
 }
 
 // ─── External clients ─────────────────────────────────────────────────────────
@@ -417,13 +423,13 @@ fn load_market_props(env: &Env, data_store: &Address, market_token: &Address) ->
     let ds = DataStoreClient::new(env, data_store);
     let index_token = ds
         .get_address(&market_index_token_key(env, market_token))
-        .expect("market index token not found");
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket));
     let long_token = ds
         .get_address(&market_long_token_key(env, market_token))
-        .expect("market long token not found");
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket));
     let short_token = ds
         .get_address(&market_short_token_key(env, market_token))
-        .expect("market short token not found");
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket));
     MarketProps {
         market_token: market_token.clone(),
         index_token,
@@ -1143,6 +1149,80 @@ mod tests {
             &w.market_tk,
             &w.long_tk,
             &true,
+        );
+    }
+
+    // ── check_liquidatable false-path coverage ────────────────────────────────
+
+    /// check_liquidatable must return false when no position exists for the
+    /// given account/market/collateral/is_long combination — the `None` branch
+    /// in its `get_position` match arm. No test previously called
+    /// check_liquidatable and asserted false, so a regression that made it
+    /// always return true (or panic) on a missing position would go undetected.
+    #[test]
+    fn check_liquidatable_returns_false_for_missing_position() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+
+        // Set prices so load_market_props + oracle calls succeed.
+        set_prices(&w, 2_000 * fp);
+
+        // w.user has no open position — the position_key lookup returns None.
+        let result = LiquidationHandlerClient::new(&w.env, &w.liq_handler).check_liquidatable(
+            &w.user,
+            &w.market_tk,
+            &w.long_tk,
+            &true,
+        );
+        assert!(
+            !result,
+            "check_liquidatable must return false when no position exists for the given key"
+        );
+    }
+
+    /// check_liquidatable must return false when a position exists but is
+    /// currently healthy (collateral well above the minimum threshold). This
+    /// directly exercises the `is_liquidatable → false` return path through
+    /// check_liquidatable itself, not the inlined path inside liquidate_position
+    /// that liquidate_healthy_long_reverts / liquidate_healthy_short_reverts
+    /// already cover.
+    #[test]
+    fn check_liquidatable_returns_false_for_healthy_position() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let entry_price = 2_000 * fp;
+
+        set_prices(&w, entry_price);
+
+        // Open a very well-collateralised long: 10 tokens ($20 000) backing a
+        // $10 000 position (0.5x leverage). With a 1% min_collateral_factor
+        // the liquidation price is far below any realistic oracle value.
+        let collateral = ONE_TOKEN * 10; // 10 tokens = $20 000 at entry
+        let size_usd = 10_000 * fp; // 0.5x leverage — deeply healthy
+
+        open_long_position(&w, collateral, size_usd);
+
+        // Confirm the position was created.
+        let pos_key = gmx_keys::position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true);
+        assert!(
+            OHClient::new(&w.env, &w.ord_handler)
+                .get_position(&pos_key)
+                .is_some(),
+            "position must exist before calling check_liquidatable"
+        );
+
+        // Price stays at entry — position is healthy.
+        set_prices(&w, entry_price);
+
+        let result = LiquidationHandlerClient::new(&w.env, &w.liq_handler).check_liquidatable(
+            &w.user,
+            &w.market_tk,
+            &w.long_tk,
+            &true,
+        );
+        assert!(
+            !result,
+            "check_liquidatable must return false for a healthy, well-collateralised position"
         );
     }
 }
