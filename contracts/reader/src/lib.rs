@@ -177,22 +177,16 @@ impl Reader {
     ) -> PoolValueInfo {
         let market = Self::get_market(env.clone(), data_store.clone(), market_token);
         let oracle_client = OracleClient::new(&env, &oracle);
-        let long_price = oracle_client
-            .get_primary_price(&market.long_token)
-            .mid_price();
-        let short_price = oracle_client
-            .get_primary_price(&market.short_token)
-            .mid_price();
-        let index_price = oracle_client
-            .get_primary_price(&market.index_token)
-            .mid_price();
+        let long_price = oracle_client.get_primary_price(&market.long_token);
+        let short_price = oracle_client.get_primary_price(&market.short_token);
+        let index_price = oracle_client.get_primary_price(&market.index_token);
         get_pool_value(
             &env,
             &data_store,
             &market,
-            long_price,
-            short_price,
-            index_price,
+            &long_price,
+            &short_price,
+            &index_price,
             maximize,
         )
     }
@@ -343,9 +337,9 @@ impl Reader {
                 &env,
                 &data_store,
                 &market,
-                long_price.mid_price(),
-                short_price.mid_price(),
-                index_price.mid_price(),
+                &long_price,
+                &short_price,
+                &index_price,
                 false,
             );
             total_pool_value_usd += pool.pool_value;

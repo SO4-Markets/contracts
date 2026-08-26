@@ -625,14 +625,55 @@ impl OrderHandler {
         // Issue #300: read max path length once for the entire batch.
         let raw_max = ds.get_u128(&gmx_keys::max_swap_path_length_key(&env)) as usize;
         let max_swap_len = if raw_max == 0 { MAX_SWAP_PATH_LENGTH } else { raw_max };
+        // Issue #294: read min execution fee once for the entire batch.
+        let min_fee = ds.get_min_execution_fee();
 
         let mut i = 0u32;
         while i < len {
             let params = requests.get_unchecked(i);
 
-            // Issue #300: enforce max path length at creation time.
-            if params.swap_path.len() as usize > max_swap_len {
-                panic_with_error!(&env, Error::SwapPathTooLong);
+            // Mirrors create_order's four per-request guards (issues #203, #232, #294, #269).
+            if ds.get_bool(&is_market_paused_key(&env, &params.market)) {
+                panic_with_error!(&env, Error::MarketPaused);
+            }
+
+            // Issue #232 + #300: cyclic check and max path length (per-request).
+            {
+                let path = &params.swap_path;
+                let path_len = path.len();
+                if path_len as usize > max_swap_len {
+                    panic_with_error!(&env, Error::SwapPathTooLong);
+                }
+                let mut a = 0u32;
+                while a < path_len {
+                    let mut b = a + 1;
+                    while b < path_len {
+                        if path.get(a).unwrap() == path.get(b).unwrap() {
+                            panic_with_error!(&env, Error::CyclicSwapPath);
+                        }
+                        b += 1;
+                    }
+                    a += 1;
+                }
+            }
+
+            // Issue #294: execution fee must cover the configured minimum (no negative fees).
+            if params.execution_fee < 0 || (params.execution_fee as u128) < min_fee {
+                panic_with_error!(&env, Error::InsufficientExecutionFee);
+            }
+
+            // Issue #269: position orders must carry a non-zero size.
+            let is_position_order = matches!(
+                params.order_type,
+                OrderType::MarketIncrease
+                    | OrderType::LimitIncrease
+                    | OrderType::StopIncrease
+                    | OrderType::MarketDecrease
+                    | OrderType::LimitDecrease
+                    | OrderType::StopLossDecrease
+            );
+            if is_position_order && params.size_delta_usd == 0 {
+                panic_with_error!(&env, Error::ZeroSizeDelta);
             }
 
             let is_increase_or_swap = matches!(
@@ -666,15 +707,6 @@ impl OrderHandler {
             // behalf. (The lookup direction itself is reversed per #385/#535 —
             // that is a separate, already-tracked defect; this mirrors
             // create_order's current behavior as-is, not a fix for #385.)
-            let is_position_order = matches!(
-                params.order_type,
-                OrderType::MarketIncrease
-                    | OrderType::LimitIncrease
-                    | OrderType::StopIncrease
-                    | OrderType::MarketDecrease
-                    | OrderType::LimitDecrease
-                    | OrderType::StopLossDecrease
-            );
             let (actual_owner, actual_receiver) = if is_position_order {
                 match ds.get_position_manager(&caller, &params.market) {
                     Some(owner) => (owner.clone(), owner),
@@ -1862,20 +1894,15 @@ impl OrderHandler {
 
         // Issue #417: ADL is only required when the pool's PnL ratio for this
         // market/side exceeds the configured threshold.
-        let long_price = oracle_client
-            .get_primary_price(&market_props.long_token)
-            .mid_price();
-        let short_price = oracle_client
-            .get_primary_price(&market_props.short_token)
-            .mid_price();
+        let long_price = oracle_client.get_primary_price(&market_props.long_token);
+        let short_price = oracle_client.get_primary_price(&market_props.short_token);
         if !gmx_market_utils::is_adl_required(
             &env,
             &data_store,
             &market_props,
-            long_price,
-            short_price,
-            index_price.mid_price(),
-            index_price.pick_price_for_pnl(is_long, true),
+            &long_price,
+            &short_price,
+            &index_price,
             is_long,
         ) {
             panic_with_error!(&env, Error::AdlRequirementNotMet);

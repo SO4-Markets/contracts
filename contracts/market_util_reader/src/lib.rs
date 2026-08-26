@@ -64,23 +64,17 @@ impl MarketUtilReader {
         let market_props = load_market(&env, &data_store, &market);
         let oracle_client = OracleClient::new(&env, &oracle);
 
-        let long_price = oracle_client
-            .get_primary_price(&market_props.long_token)
-            .mid_price();
-        let short_price = oracle_client
-            .get_primary_price(&market_props.short_token)
-            .mid_price();
-        let index_price = oracle_client
-            .get_primary_price(&market_props.index_token)
-            .mid_price();
+        let long_price = oracle_client.get_primary_price(&market_props.long_token);
+        let short_price = oracle_client.get_primary_price(&market_props.short_token);
+        let index_price = oracle_client.get_primary_price(&market_props.index_token);
 
         let pool = get_pool_value(
             &env,
             &data_store,
             &market_props,
-            long_price,
-            short_price,
-            index_price,
+            &long_price,
+            &short_price,
+            &index_price,
             false,
         );
         let pool_value_usd = if pool.pool_value <= 0 {

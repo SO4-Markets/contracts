@@ -142,28 +142,18 @@ impl AdlHandler {
         let market_props = load_market_props(&env, &data_store, &market);
         let oracle_client = OracleClient::new(&env, &oracle);
         let index_price_props = oracle_client.get_primary_price(&market_props.index_token);
-        let long_price = oracle_client
-            .get_primary_price(&market_props.long_token)
-            .mid_price();
-        let short_price = oracle_client
-            .get_primary_price(&market_props.short_token)
-            .mid_price();
-        let index_price = index_price_props.mid_price();
+        let long_price = oracle_client.get_primary_price(&market_props.long_token);
+        let short_price = oracle_client.get_primary_price(&market_props.short_token);
 
-        // Issue #377: get_pnl takes a single already-resolved price, so resolve
-        // the maximize-appropriate bound here via pick_price_for_pnl before
-        // calling. Issue #417: the threshold/pool-value/pnl computation itself
-        // lives in gmx_market_utils::is_adl_required so order_handler can
-        // re-run the identical check at its own mutating entry point.
-        let pnl_index_price = index_price_props.pick_price_for_pnl(is_long, true);
+        // Issue #377/#414: get_pnl's maximize is already handled inside market_utils via
+        // PriceProps; get_pool_value now minimizes pool value conservatively via maximize=false.
         gmx_market_utils::is_adl_required(
             &env,
             &data_store,
             &market_props,
-            long_price,
-            short_price,
-            index_price,
-            pnl_index_price,
+            &long_price,
+            &short_price,
+            &index_price_props,
             is_long,
         )
     }
