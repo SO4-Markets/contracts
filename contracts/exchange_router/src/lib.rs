@@ -1830,4 +1830,67 @@ mod tests {
         let ui_recv = Address::generate(&env);
         ExchangeRouterClient::new(&env, &router).set_ui_fee_factor(&ui_recv, &100u128);
     }
+
+    #[test]
+    fn schedule_unpause_sets_timestamp() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds_id, _, _, router_id, _) = setup(&env);
+        let client = ExchangeRouterClient::new(&env, &router_id);
+        
+        let ds = DataStoreClient::new(&env, &ds_id);
+        let unpause_key = keys::unpause_time_key(&env);
+
+        client.schedule_unpause(&admin);
+        
+        // Assert unpause timestamp is scheduled for 1 hour from now
+        let expected_time = env.ledger().timestamp() + 3600;
+        let actual_time = ds.get_u64(&unpause_key);
+        assert_eq!(actual_time, expected_time);
+    }
+
+    #[test]
+    fn execute_unpause_clears_pause_when_ready() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds_id, _, _, router_id, _) = setup(&env);
+        let client = ExchangeRouterClient::new(&env, &router_id);
+        
+        let ds = DataStoreClient::new(&env, &ds_id);
+        
+        // Set pause manually first
+        client.pause(&admin);
+        assert_eq!(ds.get_bool(&keys::global_pause_key(&env)), true);
+
+        // Schedule unpause
+        client.schedule_unpause(&admin);
+        let unpause_time = ds.get_u64(&keys::unpause_time_key(&env));
+        
+        // Fast forward ledger time
+        env.ledger().with_mut(|li| {
+            li.timestamp = unpause_time + 1;
+        });
+
+        client.execute_unpause();
+        assert_eq!(ds.get_bool(&keys::global_pause_key(&env)), false);
+    }
+
+    #[test]
+    fn reset_circuit_breaker_resets_volume_and_time() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds_id, _, _, router_id, _) = setup(&env);
+        let client = ExchangeRouterClient::new(&env, &router_id);
+        
+        let ds = DataStoreClient::new(&env, &ds_id);
+        
+        // Set volume and time arbitrarily
+        ds.set_u128(&admin, &keys::volume_tracker_key(&env), &1000);
+        ds.set_u64(&admin, &keys::volume_time_key(&env), &1000);
+
+        client.reset_circuit_breaker(&admin);
+        
+        assert_eq!(ds.get_u128(&keys::volume_tracker_key(&env)), 0);
+        assert_eq!(ds.get_u64(&keys::volume_time_key(&env)), env.ledger().timestamp());
+    }
 }

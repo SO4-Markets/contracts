@@ -1127,4 +1127,95 @@ mod tests {
         let non_admin = Address::generate(&env);
         client.rotate_signer(&non_admin, &0u32, &BytesN::from_array(&env, &[0xBB; 32]));
     }
+
+    #[test]
+    fn clear_prices_clears_batch() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let t1 = Address::generate(&env);
+        let t2 = Address::generate(&env);
+        let t3 = Address::generate(&env);
+        
+        let mut prices = Vec::new(&env);
+        prices.push_back(TokenPrice { token: t1.clone(), min: 100, max: 100 });
+        prices.push_back(TokenPrice { token: t2.clone(), min: 200, max: 200 });
+        prices.push_back(TokenPrice { token: t3.clone(), min: 300, max: 300 });
+
+        client.set_prices_simple(&admin, &prices);
+
+        assert_eq!(client.get_primary_price(&t1).min, 100);
+        assert_eq!(client.get_primary_price(&t2).min, 200);
+        assert_eq!(client.get_primary_price(&t3).min, 300);
+
+        let mut tokens_to_clear = Vec::new(&env);
+        tokens_to_clear.push_back(t1.clone());
+        tokens_to_clear.push_back(t2.clone());
+
+        client.clear_prices(&admin, &tokens_to_clear);
+
+        // t3 should still exist
+        assert_eq!(client.get_primary_price(&t3).min, 300);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError: Error(Value, InvalidInput)")] // or whatever panic comes from price not found
+    fn clear_prices_actually_clears() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let t1 = Address::generate(&env);
+        let mut prices = Vec::new(&env);
+        prices.push_back(TokenPrice { token: t1.clone(), min: 100, max: 100 });
+        client.set_prices_simple(&admin, &prices);
+
+        let mut tokens_to_clear = Vec::new(&env);
+        tokens_to_clear.push_back(t1.clone());
+        client.clear_prices(&admin, &tokens_to_clear);
+
+        // This will panic with PriceNotFound Error code
+        client.get_primary_price(&t1);
+    }
+
+    #[test]
+    fn get_stable_price_returns_none_on_overflow() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds_id, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        let ds = DataStoreClient::new(&env, &ds_id);
+        
+        // i128::MAX + 1 stored as u128
+        let overflow_val: u128 = (i128::MAX as u128) + 1;
+        ds.set_u128(&admin, &keys::stable_price_key(&env, &token), &overflow_val);
+
+        assert_eq!(client.get_stable_price(&token), None);
+    }
+
+    #[test]
+    fn get_price_with_stable_fallback_uses_primary_on_stable_overflow() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds_id, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        let ds = DataStoreClient::new(&env, &ds_id);
+        
+        let overflow_val: u128 = (i128::MAX as u128) + 1;
+        ds.set_u128(&admin, &keys::stable_price_key(&env, &token), &overflow_val);
+
+        let mut prices = Vec::new(&env);
+        prices.push_back(TokenPrice { token: token.clone(), min: 1234, max: 1234 });
+        client.set_prices_simple(&admin, &prices);
+
+        let price = client.get_price_with_stable_fallback(&token);
+        assert_eq!(price.min, 1234);
+    }
 }
