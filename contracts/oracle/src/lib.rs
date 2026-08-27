@@ -1218,4 +1218,39 @@ mod tests {
         let price = client.get_price_with_stable_fallback(&token);
         assert_eq!(price.min, 1234);
     }
+
+    #[test]
+    fn test_clear_prices() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _rs, _ds, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        client.clear_prices(&admin, &soroban_sdk::vec![&env, token]);
+    }
+
+    #[test]
+    fn test_get_stable_price() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, _rs, _ds, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        let price = client.get_stable_price(&token);
+        assert!(price.is_none());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_price_with_stable_fallback() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, _rs, _ds, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        client.get_price_with_stable_fallback(&token);
+    }
 }

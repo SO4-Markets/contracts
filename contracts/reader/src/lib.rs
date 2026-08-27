@@ -2442,4 +2442,26 @@ mod tests {
         assert_eq!(pending.key, 1);
         assert_eq!(pending.status, OrderStatus::Pending);
     }
+
+    #[test]
+    fn test_get_pending_orders_empty() {
+        let w = setup();
+        let oh = Address::generate(&w.env);
+        let market = Address::generate(&w.env);
+
+        let rc = ReaderClient::new(&w.env, &w.reader);
+        let orders = rc.get_pending_orders(&w.ds, &oh, &market, &0, &10);
+        assert_eq!(orders.len(), 0);
+    }
+
+    #[test]
+    fn test_get_liquidatable_positions_empty() {
+        let w = setup();
+        let market = seed_market(&w, 0, 0, 0, 0, 0, 0, 100 * FLOAT_PRECISION);
+        let oh = Address::generate(&w.env);
+
+        let rc = ReaderClient::new(&w.env, &w.reader);
+        let positions = rc.get_liquidatable_positions(&w.ds, &w.oracle, &oh, &market, &true, &10, &0);
+        assert_eq!(positions.len(), 0);
+    }
 }
