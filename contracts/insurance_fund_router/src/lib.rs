@@ -78,6 +78,22 @@ pub struct InsurancePenaltyRouted {
     pub treasury_share: u128,
 }
 
+/// Issue #581: route_liquidation_penalty's treasury-share transfer had no event of
+/// its own — it was only reported as a field on `InsurancePenaltyRouted`, which is
+/// published exclusively from the `insurance_share > 0` branch. When a market's
+/// `allocation_bps` is 0 (or otherwise routes nothing to the insurance fund), the
+/// treasury still receives a real token transfer with no corresponding event.
+/// This event is published unconditionally whenever `treasury_share > 0`, independent
+/// of whether the insurance-fund leg also ran.
+#[contractevent(topics = ["if_tpen"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreasuryShareRouted {
+    pub market: Address,
+    pub token: Address,
+    pub treasury: Address,
+    pub treasury_share: u128,
+}
+
 #[contractevent(topics = ["if_draw"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InsuranceShortfallCovered {
@@ -199,6 +215,12 @@ impl InsuranceFundRouter {
                 .get_address(&treasury_address_key(&env))
                 .unwrap_or_else(|| panic_with_error!(&env, Error::MissingTreasury));
             token_client.transfer(&source, &treasury, &(treasury_share as i128));
+            env.events().publish_event(&TreasuryShareRouted {
+                market: market.clone(),
+                token: token.clone(),
+                treasury,
+                treasury_share,
+            });
         }
 
         PenaltySplit {
@@ -304,6 +326,7 @@ mod tests {
     use role_store::{RoleStore, RoleStoreClient as RsClient};
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::token::StellarAssetClient;
+    use soroban_sdk::{symbol_short, IntoVal, Val, Vec as SdkVec};
 
     struct World {
         env: Env,
@@ -437,6 +460,45 @@ mod tests {
         let token_client = token::TokenClient::new(&w.env, &w.token);
         assert_eq!(token_client.balance(&treasury), 1_000);
         assert_eq!(token_client.balance(&source), 0);
+    }
+
+    /// Issue #581: when a market's allocation_bps is 0, insurance_share is 0 and the
+    /// `InsurancePenaltyRouted` event is skipped entirely — but the full penalty is
+    /// still transferred to the treasury. `TreasuryShareRouted` must be published for
+    /// that transfer even though no insurance-fund leg ran.
+    #[test]
+    fn route_liquidation_penalty_with_zero_insurance_share_emits_treasury_event() {
+        let w = setup();
+        let client = InsuranceFundRouterClient::new(&w.env, &w.router);
+        let market = Address::generate(&w.env);
+        let source = Address::generate(&w.env);
+        let treasury = Address::generate(&w.env);
+
+        StellarAssetClient::new(&w.env, &w.token).mint(&source, &1_000i128);
+        client.configure_treasury(&w.ds, &w.admin, &treasury);
+        RsClient::new(&w.env, &w.rs).grant_role(&w.admin, &source, &roles::controller(&w.env));
+
+        // No configure_insurance_fund call: allocation_bps defaults to 0, so
+        // insurance_share is 0 and the whole penalty routes to the treasury.
+        let split =
+            client.route_liquidation_penalty(&w.ds, &w.rs, &market, &w.token, &source, &1_000u128);
+        assert_eq!(split.insurance_share, 0);
+        assert_eq!(split.treasury_share, 1_000);
+
+        // The transfer to the treasury also emits the token's own SEP-41 transfer
+        // event in the same call, so check containment rather than exact equality.
+        let events = w.env.events().all();
+        let expected_topics: SdkVec<Val> = (symbol_short!("if_tpen"),).into_val(&w.env);
+        let expected_payload = TreasuryShareRouted {
+            market,
+            token: w.token.clone(),
+            treasury,
+            treasury_share: 1_000,
+        };
+        assert!(
+            events.contains((w.router.clone(), expected_topics, expected_payload.into_val(&w.env))),
+            "TreasuryShareRouted must be published even when insurance_share is 0"
+        );
     }
 
     #[test]

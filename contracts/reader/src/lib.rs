@@ -2464,4 +2464,253 @@ mod tests {
         let positions = rc.get_liquidatable_positions(&w.ds, &w.oracle, &oh, &market, &true, &10, &0);
         assert_eq!(positions.len(), 0);
     }
+
+    // ── Issue #598: get_claimable_funding_amount ─────────────────────────────
+    //
+    // get_claimable_funding_amount merges two independent computations:
+    //   1. Claimable side: (tracker - latest funding_amount_per_size) * size_in_usd / FLOAT_PRECISION,
+    //      computed separately for the long_token and short_token side.
+    //   2. Owed side: get_position_fees's funding_fee_amount, subtracted from whichever
+    //      claimable side matches the position's own collateral_token.
+    // Both tests below seed known trackers/latest values on both sides and assert the
+    // returned FundingAmountResult matches the independently pre-computed expected values.
+
+    /// Long-collateral position: the owed funding_fee_amount must be deducted from
+    /// long_token_amount (the side matching collateral_token), leaving short_token_amount
+    /// as the untouched claimable amount for the short side.
+    #[test]
+    fn get_claimable_funding_amount_deducts_fee_from_long_collateral_side() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+
+        let admin = Address::generate(&env);
+
+        let rs = env.register(RoleStore, ());
+        RsClient::new(&env, &rs).initialize(&admin);
+        RsClient::new(&env, &rs).grant_role(&admin, &admin, &roles::controller(&env));
+        RsClient::new(&env, &rs).grant_role(&admin, &admin, &roles::order_keeper(&env));
+
+        let ds = env.register(DataStore, ());
+        DsClient::new(&env, &ds).initialize(&admin, &rs);
+
+        let oracle = env.register(Oracle, ());
+        let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
+        OClient::new(&env, &oracle).initialize(&admin, &rs, &ds, &passphrase);
+
+        let reader = env.register(Reader, ());
+        ReaderClient::new(&env, &reader).initialize(&admin);
+
+        let index_tk = Address::generate(&env);
+        let long_tk = Address::generate(&env);
+        let short_tk = Address::generate(&env);
+        let market_tk = Address::generate(&env);
+        let trader = Address::generate(&env);
+
+        let ds_c = DsClient::new(&env, &ds);
+        ds_c.set_address(&admin, &market_index_token_key(&env, &market_tk), &index_tk);
+        ds_c.set_address(&admin, &market_long_token_key(&env, &market_tk), &long_tk);
+        ds_c.set_address(&admin, &market_short_token_key(&env, &market_tk), &short_tk);
+
+        let fp = FLOAT_PRECISION;
+        OClient::new(&env, &oracle).set_prices_simple(
+            &admin,
+            &SdkVec::from_array(
+                &env,
+                [
+                    TokenPrice { token: index_tk.clone(), min: fp, max: fp },
+                    TokenPrice { token: long_tk.clone(), min: fp, max: fp },
+                    TokenPrice { token: short_tk.clone(), min: fp, max: fp },
+                ],
+            ),
+        );
+
+        let dummy_vault = env.register(OrderVault, ());
+        OVClient::new(&env, &dummy_vault).initialize(&admin, &rs);
+        let ord_handler = env.register(OrderHandler, ());
+        OHClient::new(&env, &ord_handler).initialize(&admin, &rs, &ds, &oracle, &dummy_vault);
+        RsClient::new(&env, &rs).grant_role(&admin, &ord_handler, &roles::controller(&env));
+
+        // Long-collateral, is_long = true position with 10,000 USD size.
+        let size_in_usd = 10_000i128 * fp;
+        let is_long = true;
+        let collateral_token = long_tk.clone();
+
+        // Owed side: funding_fee_amount_per_size starts at 0; the long_tk funding_amount_per_size
+        // key (the same key used for the collateral-token's claimable-side lookup, since
+        // collateral_token == long_tk and position.is_long == true) is seeded at 3e27.
+        // funding_delta = 3e27 - 0 = 3e27.
+        //   fee_usd = 3e27 * 10_000*fp / fp = 3e31
+        //   funding_fee_amount = 3e31 * TOKEN_PRECISION / fp = 3e8 (30 tokens)
+        let long_latest = fp / 1_000 * 3; // 3e27
+        ds_c.set_i128(
+            &admin,
+            &funding_amount_per_size_key(&env, &market_tk, &long_tk, is_long),
+            &long_latest,
+        );
+
+        // Claimable side, long_tk: tracker - latest = 50_000 => claimable = 50_000 * 10_000 = 5e8 (50 tokens).
+        let long_tracker = long_latest + 50_000;
+
+        // Claimable side, short_tk: latest = 1e27, tracker - latest = 10_000 => claimable = 1e8 (10 tokens).
+        let short_latest = fp / 1_000; // 1e27
+        ds_c.set_i128(
+            &admin,
+            &funding_amount_per_size_key(&env, &market_tk, &short_tk, is_long),
+            &short_latest,
+        );
+        let short_tracker = short_latest + 10_000;
+
+        let position = PositionProps {
+            account: trader.clone(),
+            market: market_tk.clone(),
+            collateral_token: collateral_token.clone(),
+            size_in_usd,
+            size_in_tokens: 10_000i128 * TOKEN_PRECISION,
+            collateral_amount: 500i128 * TOKEN_PRECISION,
+            pending_impact_amount: 0,
+            borrowing_factor: 0,
+            funding_fee_amount_per_size: 0,
+            long_claim_fnd_per_size: long_tracker,
+            short_claim_fnd_per_size: short_tracker,
+            increased_at_time: 0,
+            decreased_at_time: 0,
+            is_long,
+        };
+
+        let pk = position_key(&env, &trader, &market_tk, &collateral_token, is_long);
+        env.as_contract(&ord_handler, || {
+            env.storage()
+                .persistent()
+                .set(&PositionStorageKey::Position(pk.clone()), &position);
+        });
+
+        let result = ReaderClient::new(&env, &reader)
+            .get_claimable_funding_amount(&ds, &oracle, &ord_handler, &trader, &market_tk, &collateral_token, &is_long)
+            .unwrap();
+
+        // long_token_amount = claimable[long] (5e8) - funding_fee_amount (3e8) = 2e8 (20 tokens)
+        assert_eq!(result.long_token_amount, 200_000_000);
+        // short_token_amount = claimable[short] (1e8), untouched since collateral_token == long_tk
+        assert_eq!(result.short_token_amount, 100_000_000);
+    }
+
+    /// Short-collateral position: the owed funding_fee_amount must be deducted from
+    /// short_token_amount (the side matching collateral_token), leaving long_token_amount
+    /// as the untouched claimable amount for the long side.
+    #[test]
+    fn get_claimable_funding_amount_deducts_fee_from_short_collateral_side() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+
+        let admin = Address::generate(&env);
+
+        let rs = env.register(RoleStore, ());
+        RsClient::new(&env, &rs).initialize(&admin);
+        RsClient::new(&env, &rs).grant_role(&admin, &admin, &roles::controller(&env));
+        RsClient::new(&env, &rs).grant_role(&admin, &admin, &roles::order_keeper(&env));
+
+        let ds = env.register(DataStore, ());
+        DsClient::new(&env, &ds).initialize(&admin, &rs);
+
+        let oracle = env.register(Oracle, ());
+        let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
+        OClient::new(&env, &oracle).initialize(&admin, &rs, &ds, &passphrase);
+
+        let reader = env.register(Reader, ());
+        ReaderClient::new(&env, &reader).initialize(&admin);
+
+        let index_tk = Address::generate(&env);
+        let long_tk = Address::generate(&env);
+        let short_tk = Address::generate(&env);
+        let market_tk = Address::generate(&env);
+        let trader = Address::generate(&env);
+
+        let ds_c = DsClient::new(&env, &ds);
+        ds_c.set_address(&admin, &market_index_token_key(&env, &market_tk), &index_tk);
+        ds_c.set_address(&admin, &market_long_token_key(&env, &market_tk), &long_tk);
+        ds_c.set_address(&admin, &market_short_token_key(&env, &market_tk), &short_tk);
+
+        let fp = FLOAT_PRECISION;
+        OClient::new(&env, &oracle).set_prices_simple(
+            &admin,
+            &SdkVec::from_array(
+                &env,
+                [
+                    TokenPrice { token: index_tk.clone(), min: fp, max: fp },
+                    TokenPrice { token: long_tk.clone(), min: fp, max: fp },
+                    TokenPrice { token: short_tk.clone(), min: fp, max: fp },
+                ],
+            ),
+        );
+
+        let dummy_vault = env.register(OrderVault, ());
+        OVClient::new(&env, &dummy_vault).initialize(&admin, &rs);
+        let ord_handler = env.register(OrderHandler, ());
+        OHClient::new(&env, &ord_handler).initialize(&admin, &rs, &ds, &oracle, &dummy_vault);
+        RsClient::new(&env, &rs).grant_role(&admin, &ord_handler, &roles::controller(&env));
+
+        // Short-collateral, is_long = false position with 10,000 USD size.
+        let size_in_usd = 10_000i128 * fp;
+        let is_long = false;
+        let collateral_token = short_tk.clone();
+
+        // Claimable side, long_tk: latest = 1e27, tracker - latest = 20_000 => claimable = 2e8 (20 tokens).
+        let long_latest = fp / 1_000; // 1e27
+        ds_c.set_i128(
+            &admin,
+            &funding_amount_per_size_key(&env, &market_tk, &long_tk, is_long),
+            &long_latest,
+        );
+        let long_tracker = long_latest + 20_000;
+
+        // Owed side: funding_fee_amount_per_size starts at 0; the short_tk funding_amount_per_size
+        // key (matches collateral_token == short_tk, position.is_long == false) is seeded at 4e27.
+        // funding_delta = 4e27 - 0 = 4e27.
+        //   fee_usd = 4e27 * 10_000*fp / fp = 4e31
+        //   funding_fee_amount = 4e31 * TOKEN_PRECISION / fp = 4e8 (40 tokens)
+        let short_latest = fp / 1_000 * 4; // 4e27
+        ds_c.set_i128(
+            &admin,
+            &funding_amount_per_size_key(&env, &market_tk, &short_tk, is_long),
+            &short_latest,
+        );
+
+        // Claimable side, short_tk: tracker - latest = 70_000 => claimable = 7e8 (70 tokens).
+        let short_tracker = short_latest + 70_000;
+
+        let position = PositionProps {
+            account: trader.clone(),
+            market: market_tk.clone(),
+            collateral_token: collateral_token.clone(),
+            size_in_usd,
+            size_in_tokens: 10_000i128 * TOKEN_PRECISION,
+            collateral_amount: 500i128 * TOKEN_PRECISION,
+            pending_impact_amount: 0,
+            borrowing_factor: 0,
+            funding_fee_amount_per_size: 0,
+            long_claim_fnd_per_size: long_tracker,
+            short_claim_fnd_per_size: short_tracker,
+            increased_at_time: 0,
+            decreased_at_time: 0,
+            is_long,
+        };
+
+        let pk = position_key(&env, &trader, &market_tk, &collateral_token, is_long);
+        env.as_contract(&ord_handler, || {
+            env.storage()
+                .persistent()
+                .set(&PositionStorageKey::Position(pk.clone()), &position);
+        });
+
+        let result = ReaderClient::new(&env, &reader)
+            .get_claimable_funding_amount(&ds, &oracle, &ord_handler, &trader, &market_tk, &collateral_token, &is_long)
+            .unwrap();
+
+        // long_token_amount = claimable[long] (2e8), untouched since collateral_token == short_tk
+        assert_eq!(result.long_token_amount, 200_000_000);
+        // short_token_amount = claimable[short] (7e8) - funding_fee_amount (4e8) = 3e8 (30 tokens)
+        assert_eq!(result.short_token_amount, 300_000_000);
+    }
 }

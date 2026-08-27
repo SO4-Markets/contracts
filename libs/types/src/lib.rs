@@ -405,3 +405,24 @@ pub struct LiquidatablePosition {
 }
 
 use soroban_sdk::BytesN;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Issue #589: PriceProps::pick_price had no direct unit test (only indirect
+    // coverage via mid_price/pick_price_for_pnl call sites). It is used by
+    // gmx_market_utils::get_pool_value to select the asset-side price for the
+    // long/short/index tokens based on the `maximize` flag.
+    #[test]
+    fn pick_price_returns_max_when_maximize_true() {
+        let price = PriceProps { min: 100, max: 200 };
+        assert_eq!(price.pick_price(true), 200);
+    }
+
+    #[test]
+    fn pick_price_returns_min_when_maximize_false() {
+        let price = PriceProps { min: 100, max: 200 };
+        assert_eq!(price.pick_price(false), 100);
+    }
+}
