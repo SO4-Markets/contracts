@@ -1300,4 +1300,43 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn auto_compound_toggles_correctly() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds_id, _, _, fee_handler_id) = setup(&env);
+        let client = FeeHandlerClient::new(&env, &fee_handler_id);
+
+        let ds = DataStoreClient::new(&env, &ds_id);
+
+        // Initially false or default
+        assert_eq!(client.is_auto_compound(&admin), false);
+
+        client.set_auto_compound(&admin, &true);
+        assert_eq!(client.is_auto_compound(&admin), true);
+
+        client.set_auto_compound(&admin, &false);
+        assert_eq!(client.is_auto_compound(&admin), false);
+    }
+
+    #[test]
+    fn record_fee_accrual_updates_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds_id, _, _, fee_handler_id) = setup(&env);
+        let client = FeeHandlerClient::new(&env, &fee_handler_id);
+        
+        let ds = DataStoreClient::new(&env, &ds_id);
+        let token = Address::generate(&env);
+        let amount: i128 = 1000;
+
+        // Ensure initially 0
+        let fee_tracker_key = keys::fee_tracker_key(&env, &token);
+        assert_eq!(ds.get_i128(&fee_tracker_key), 0);
+
+        client.record_fee_accrual(&token, &amount);
+
+        assert_eq!(ds.get_i128(&fee_tracker_key), 1000);
+    }
 }

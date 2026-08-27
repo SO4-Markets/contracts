@@ -2227,4 +2227,219 @@ mod tests {
         // NotInitialized instead of authorizing against the original admin.
         rc.upgrade(&BytesN::from_array(&w.env, &[0u8; 32]));
     }
+
+    #[test]
+    fn get_liquidatable_positions_returns_expected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let admin = Address::generate(&env);
+
+        let rs = env.register(RoleStore, ());
+        RsClient::new(&env, &rs).initialize(&admin);
+        RsClient::new(&env, &rs).grant_role(&admin, &admin, &roles::controller(&env));
+        RsClient::new(&env, &rs).grant_role(&admin, &admin, &roles::order_keeper(&env));
+
+        let ds = env.register(DataStore, ());
+        DsClient::new(&env, &ds).initialize(&admin, &rs);
+
+        let oracle = env.register(Oracle, ());
+        let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
+        OClient::new(&env, &oracle).initialize(&admin, &rs, &ds, &passphrase);
+
+        let reader = env.register(Reader, ());
+        ReaderClient::new(&env, &reader).initialize(&admin);
+
+        let index_tk = Address::generate(&env);
+        let long_tk = Address::generate(&env);
+        let short_tk = Address::generate(&env);
+        let market_tk = Address::generate(&env);
+        let trader1 = Address::generate(&env);
+        let trader2 = Address::generate(&env);
+
+        let ds_c = DsClient::new(&env, &ds);
+        ds_c.set_address(&admin, &market_index_token_key(&env, &market_tk), &index_tk);
+        ds_c.set_address(&admin, &market_long_token_key(&env, &market_tk), &long_tk);
+        ds_c.set_address(&admin, &market_short_token_key(&env, &market_tk), &short_tk);
+
+        let fp = FLOAT_PRECISION;
+        // Set index price at $1.
+        OClient::new(&env, &oracle).set_prices_simple(
+            &admin,
+            &SdkVec::from_array(
+                &env,
+                [
+                    TokenPrice { token: index_tk.clone(), min: fp, max: fp },
+                    TokenPrice { token: long_tk.clone(), min: fp, max: fp },
+                    TokenPrice { token: short_tk.clone(), min: fp, max: fp },
+                ],
+            ),
+        );
+
+        let dummy_vault = env.register(OrderVault, ());
+        OVClient::new(&env, &dummy_vault).initialize(&admin, &rs);
+        let ord_handler = env.register(OrderHandler, ());
+        OHClient::new(&env, &ord_handler).initialize(&admin, &rs, &ds, &oracle, &dummy_vault);
+        RsClient::new(&env, &rs).grant_role(&admin, &ord_handler, &roles::controller(&env));
+
+        let tk_prec = TOKEN_PRECISION;
+        // Position 1: Healthy. Collateral $500, size $10,000.
+        let pos1 = PositionProps {
+            account: trader1.clone(),
+            market: market_tk.clone(),
+            collateral_token: long_tk.clone(),
+            size_in_usd: 10_000i128 * fp,
+            size_in_tokens: 10_000i128 * tk_prec,
+            collateral_amount: 500i128 * tk_prec,
+            pending_impact_amount: 0,
+            borrowing_factor: 0,
+            funding_fee_amount_per_size: 0,
+            long_claim_fnd_per_size: 0,
+            short_claim_fnd_per_size: 0,
+            increased_at_time: 0,
+            decreased_at_time: 0,
+            is_long: true,
+        };
+
+        // Position 2: Liquidatable. Collateral $10 (very small), size $10,000.
+        let pos2 = PositionProps {
+            account: trader2.clone(),
+            market: market_tk.clone(),
+            collateral_token: long_tk.clone(),
+            size_in_usd: 10_000i128 * fp,
+            size_in_tokens: 10_000i128 * tk_prec,
+            collateral_amount: 10i128 * tk_prec, // Liquidatable due to fees/spread eating it
+            pending_impact_amount: 0,
+            borrowing_factor: 0,
+            funding_fee_amount_per_size: 0,
+            long_claim_fnd_per_size: 0,
+            short_claim_fnd_per_size: 0,
+            increased_at_time: 0,
+            decreased_at_time: 0,
+            is_long: true,
+        };
+
+        let pk1 = position_key(&env, &trader1, &market_tk, &long_tk, true);
+        let pk2 = position_key(&env, &trader2, &market_tk, &long_tk, true);
+        env.as_contract(&ord_handler, || {
+            env.storage().persistent().set(&PositionStorageKey::Position(pk1), &pos1);
+            env.storage().persistent().set(&PositionStorageKey::Position(pk2), &pos2);
+        });
+
+        let result = ReaderClient::new(&env, &reader)
+            .get_liquidatable_positions(&ds, &oracle, &ord_handler, &market_tk, &true, &10, &0);
+
+        assert_eq!(result.len(), 1);
+        let c = result.get(0).unwrap();
+        assert_eq!(c.owner, trader2);
+    }
+
+    #[test]
+    fn get_pending_orders_excludes_executed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let admin = Address::generate(&env);
+
+        let rs = env.register(RoleStore, ());
+        RsClient::new(&env, &rs).initialize(&admin);
+
+        let ds = env.register(DataStore, ());
+        DsClient::new(&env, &ds).initialize(&admin, &rs);
+
+        let reader = env.register(Reader, ());
+        ReaderClient::new(&env, &reader).initialize(&admin);
+
+        let trader1 = Address::generate(&env);
+        let trader2 = Address::generate(&env);
+
+        // Seed orders
+        // Pending
+        let o1 = Order {
+            key: 1,
+            account: trader1.clone(),
+            receiver: trader1.clone(),
+            ui_fee_receiver: trader1.clone(),
+            market: Address::generate(&env),
+            initial_collateral_token: Address::generate(&env),
+            swap_path: SdkVec::new(&env),
+            size_delta_usd: 0,
+            initial_collateral_delta_amount: 0,
+            trigger_price: 0,
+            acceptable_price: 0,
+            execution_fee: 0,
+            callback_gas_limit: 0,
+            min_output_amount: 0,
+            updated_at_time: 0,
+            is_long: true,
+            is_increase: true,
+            is_swap: false,
+            order_type: OrderType::MarketIncrease,
+            status: OrderStatus::Pending,
+        };
+        // Executed
+        let o2 = Order {
+            key: 2,
+            account: trader2.clone(),
+            receiver: trader2.clone(),
+            ui_fee_receiver: trader2.clone(),
+            market: Address::generate(&env),
+            initial_collateral_token: Address::generate(&env),
+            swap_path: SdkVec::new(&env),
+            size_delta_usd: 0,
+            initial_collateral_delta_amount: 0,
+            trigger_price: 0,
+            acceptable_price: 0,
+            execution_fee: 0,
+            callback_gas_limit: 0,
+            min_output_amount: 0,
+            updated_at_time: 0,
+            is_long: true,
+            is_increase: true,
+            is_swap: false,
+            order_type: OrderType::MarketIncrease,
+            status: OrderStatus::Executed,
+        };
+        // Expired
+        let o3 = Order {
+            key: 3,
+            account: trader1.clone(),
+            receiver: trader1.clone(),
+            ui_fee_receiver: trader1.clone(),
+            market: Address::generate(&env),
+            initial_collateral_token: Address::generate(&env),
+            swap_path: SdkVec::new(&env),
+            size_delta_usd: 0,
+            initial_collateral_delta_amount: 0,
+            trigger_price: 0,
+            acceptable_price: 0,
+            execution_fee: 0,
+            callback_gas_limit: 0,
+            min_output_amount: 0,
+            updated_at_time: 0,
+            is_long: true,
+            is_increase: true,
+            is_swap: false,
+            order_type: OrderType::MarketIncrease,
+            status: OrderStatus::Expired,
+        };
+
+        // Note: ds needs to own the order storage
+        env.as_contract(&ds, || {
+            env.storage().persistent().set(&OrderStorageKey::Order(1), &o1);
+            env.storage().persistent().set(&OrderStorageKey::Order(2), &o2);
+            env.storage().persistent().set(&OrderStorageKey::Order(3), &o3);
+        });
+
+        // Set order ID counter to 3 so reader knows to scan 1..=3
+        let ds_c = DsClient::new(&env, &ds);
+        ds_c.set_u64(&admin, &keys::order_id_key(&env), &3);
+
+        let result = ReaderClient::new(&env, &reader).get_pending_orders(&ds, &0, &10);
+
+        assert_eq!(result.len(), 1);
+        let pending = result.get(0).unwrap();
+        assert_eq!(pending.key, 1);
+        assert_eq!(pending.status, OrderStatus::Pending);
+    }
 }
