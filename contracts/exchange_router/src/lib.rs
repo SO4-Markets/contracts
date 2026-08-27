@@ -1893,4 +1893,27 @@ mod tests {
         assert_eq!(ds.get_u128(&keys::volume_tracker_key(&env)), 0);
         assert_eq!(ds.get_u64(&keys::volume_time_key(&env)), env.ledger().timestamp());
     }
+
+    #[test]
+    fn test_schedule_unpause() {
+        let w = setup();
+        let client = ExchangeRouterClient::new(&w.env, &w.router);
+        client.schedule_unpause();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_execute_unpause_premature() {
+        let w = setup();
+        let client = ExchangeRouterClient::new(&w.env, &w.router);
+        client.schedule_unpause();
+        client.execute_unpause();
+    }
+
+    #[test]
+    fn test_reset_circuit_breaker() {
+        let w = setup();
+        let client = ExchangeRouterClient::new(&w.env, &w.router);
+        client.reset_circuit_breaker(&w.market_tk);
+    }
 }

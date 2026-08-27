@@ -1339,4 +1339,29 @@ mod tests {
 
         assert_eq!(ds.get_i128(&fee_tracker_key), 1000);
     }
+
+    #[test]
+    fn test_auto_compound_flow() {
+        let w = setup();
+        let fh = FeeHandlerClient::new(&w.env, &w.handler);
+        let market = Address::generate(&w.env);
+
+        assert_eq!(fh.is_auto_compound(&market), false);
+
+        fh.set_auto_compound(&market, &true);
+        assert_eq!(fh.is_auto_compound(&market), true);
+
+        fh.set_auto_compound(&market, &false);
+        assert_eq!(fh.is_auto_compound(&market), false);
+    }
+
+    #[test]
+    fn test_record_fee_accrual() {
+        let w = setup();
+        let fh = FeeHandlerClient::new(&w.env, &w.handler);
+        let market = Address::generate(&w.env);
+        let token = Address::generate(&w.env);
+
+        fh.record_fee_accrual(&w.admin, &market, &token, &1u32, &100u128);
+    }
 }
