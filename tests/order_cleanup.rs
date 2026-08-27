@@ -22,9 +22,10 @@ use order_handler::{OrderHandler, OrderHandlerClient as OHClient};
 use order_vault::{OrderVault, OrderVaultClient as OVClient};
 use role_store::{RoleStore, RoleStoreClient as RsClient};
 use soroban_sdk::{
+    symbol_short,
     testutils::{Address as _, Ledger as _},
     token::StellarAssetClient,
-    Address, Env, Vec,
+    Address, Env, IntoVal, Val, Vec,
 };
 
 const ONE_TOKEN: i128 = 10_000_000; // 7-decimal Stellar precision
@@ -377,4 +378,120 @@ fn preview_expired_order_reports_correctly() {
     let preview_after = cc.preview_expired_order(&w.ds, &w.ord_handler, &key);
     assert!(preview_after.exists, "order must still exist");
     assert!(preview_after.is_expired, "order must be expired after advancing time");
+}
+
+/// set_order_expiry configures a per-OrderType expiry window that preview_expired_order
+/// and cancel_expired_order actually read, instead of falling back to DEFAULT_ORDER_EXPIRY
+/// (2880 seconds). A MarketIncrease order configured with a 50-second expiry is reported
+/// (and can be cleaned up) as expired at age 60s, while a LimitIncrease order with no
+/// custom expiry configured is not expired at the same age (age < DEFAULT_ORDER_EXPIRY).
+#[test]
+fn set_order_expiry_overrides_default_for_configured_order_type() {
+    let w = setup();
+    let env = &w.env;
+
+    seed_pool(&w);
+
+    let cc = OrderCleanupClient::new(env, &w.cleanup);
+    cc.set_order_expiry(&w.ds, &w.admin, &OrderType::MarketIncrease, &50);
+
+    let user = Address::generate(env);
+    let deposit = 200 * ONE_TOKEN;
+    let execution_fee = 1_000_000;
+    StellarAssetClient::new(env, &w.short_tk).mint(&user, &((deposit + execution_fee) * 2));
+    set_prices(&w, 2000);
+
+    let current_seq = env.ledger().sequence();
+    let expiry_ledger = (current_seq + 1) as u64;
+
+    let hc = OHClient::new(env, &w.ord_handler);
+
+    // Configured order type: custom 50s expiry.
+    StellarAssetClient::new(env, &w.short_tk).transfer(&user, &w.ord_vault, &(deposit + execution_fee));
+    let configured_key = hc.create_order(
+        &user,
+        &CreateOrderParams {
+            receiver: user.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.short_tk.clone(),
+            swap_path: Vec::new(env),
+            size_delta_usd: 2000 * ONE_USD,
+            collateral_delta_amount: deposit,
+            trigger_price: 0,
+            acceptable_price: 0,
+            execution_fee,
+            min_output_amount: 0,
+            order_type: OrderType::MarketIncrease,
+            is_long: true,
+            expiry_ledger: Some(expiry_ledger),
+        },
+    );
+
+    // Unconfigured order type: still falls back to DEFAULT_ORDER_EXPIRY (2880s).
+    StellarAssetClient::new(env, &w.short_tk).transfer(&user, &w.ord_vault, &(deposit + execution_fee));
+    let default_key = hc.create_order(
+        &user,
+        &CreateOrderParams {
+            receiver: user.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.short_tk.clone(),
+            swap_path: Vec::new(env),
+            size_delta_usd: 2000 * ONE_USD,
+            collateral_delta_amount: deposit,
+            trigger_price: 1_900 * ONE_USD,
+            acceptable_price: 0,
+            execution_fee,
+            min_output_amount: 0,
+            order_type: OrderType::LimitIncrease,
+            is_long: true,
+            expiry_ledger: Some(expiry_ledger),
+        },
+    );
+
+    env.ledger().set_sequence_number((expiry_ledger + 1) as u32);
+    // Age = 60s: past the configured 50s expiry, but well under the 2880s default.
+    env.ledger().set_timestamp(60);
+
+    let configured_preview = cc.preview_expired_order(&w.ds, &w.ord_handler, &configured_key);
+    assert!(
+        configured_preview.is_expired,
+        "order of a type with a configured 50s expiry must be expired at age 60s"
+    );
+
+    let default_preview = cc.preview_expired_order(&w.ds, &w.ord_handler, &default_key);
+    assert!(
+        !default_preview.is_expired,
+        "order of a type with no configured expiry must not be expired at age 60s (default is 2880s)"
+    );
+
+    // cancel_expired_order must actually honor the configured value end-to-end, not just preview.
+    let cleaner = Address::generate(env);
+    cc.cancel_expired_order(&w.ds, &w.ord_handler, &cleaner, &configured_key);
+    assert!(
+        hc.get_order(&configured_key).is_none(),
+        "order must be cleaned up once its configured expiry elapses"
+    );
+}
+
+/// record_manual_refund emits a "man_ref" event carrying the exact admin, token,
+/// receiver, amount, and reason fields it was called with.
+#[test]
+fn record_manual_refund_emits_event_with_all_fields() {
+    let w = setup();
+    let env = &w.env;
+
+    let receiver = Address::generate(env);
+    let amount: i128 = 4_200_000;
+    let reason = soroban_sdk::BytesN::<32>::from_array(env, &[7u8; 32]);
+
+    let cc = OrderCleanupClient::new(env, &w.cleanup);
+    cc.record_manual_refund(&w.admin, &w.short_tk, &receiver, &amount, &reason);
+
+    let events = env.events().all();
+    let expected_topics: Vec<Val> = (symbol_short!("man_ref"),).into_val(env);
+    let expected_data: Val = (w.admin.clone(), w.short_tk.clone(), receiver, amount, reason).into_val(env);
+    assert!(
+        events.contains((w.cleanup.clone(), expected_topics, expected_data)),
+        "record_manual_refund must emit a man_ref event with the exact admin/token/receiver/amount/reason fields"
+    );
 }
