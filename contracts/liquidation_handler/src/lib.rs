@@ -44,6 +44,7 @@ pub enum Error {
     AlreadyInitialized = 1,
     NotInitialized = 2,
     Unauthorized = 3,
+    MarketPaused = 6,
     NotLiquidatable = 5,
     /// The supplied market address is not registered in data_store —
     /// one or more of its token addresses (index/long/short) returned None.
@@ -64,6 +65,7 @@ trait IRoleStore {
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
+    fn get_bool(env: Env, key: BytesN<32>) -> bool;
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     /// Cache-first read for rarely-changing market config (issue #299).
     fn get_u128_cached(env: Env, key: BytesN<32>) -> u128;
@@ -254,6 +256,11 @@ impl LiquidationHandler {
             .instance()
             .get(&InstanceKey::OrderHandler)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+
+        let data_store_client = DataStoreClient::new(&env, &data_store);
+        if data_store_client.get_bool(&is_market_paused_key(&env, &market)) {
+            panic_with_error!(&env, Error::MarketPaused);
+        }
 
         let market_props = load_market_props(&env, &data_store, &market);
         let oracle_client = OracleClient::new(&env, &oracle);

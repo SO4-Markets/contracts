@@ -46,6 +46,7 @@ pub enum Error {
     AdlNotRequired = 4,
     InvalidInput = 5,
     NotProfitable = 6,
+    MarketPaused = 9,
     PositionNotFound = 7,
     /// Max PnL factor for ADL is not configured (0) for the requested market/side.
     /// Callers must set a non-zero value via DataStore before ADL can be evaluated.
@@ -63,6 +64,7 @@ trait IRoleStore {
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
+    fn get_bool(env: Env, key: BytesN<32>) -> bool;
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
     fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
@@ -207,6 +209,11 @@ impl AdlHandler {
             .instance()
             .get(&InstanceKey::OrderHandler)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+
+        let data_store_client = DataStoreClient::new(&env, &data_store);
+        if data_store_client.get_bool(&is_market_paused_key(&env, &market)) {
+            panic_with_error!(&env, Error::MarketPaused);
+        }
 
         let market_props = load_market_props(&env, &data_store, &market);
         let oracle_client = OracleClient::new(&env, &oracle);
