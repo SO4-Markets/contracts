@@ -8,8 +8,15 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Env, String,
+    BytesN, Env, String,
 };
+
+/// `network_id` (SHA-256 of the network passphrase) for the Stellar public
+/// network. Test tokens must never be initialized here (issue #400).
+const MAINNET_NETWORK_ID: [u8; 32] = [
+    0x7a, 0xc3, 0x39, 0x97, 0x54, 0x4e, 0x31, 0x75, 0xd2, 0x66, 0xbd, 0x02, 0x24, 0x39, 0xb2, 0x2c,
+    0xdb, 0x16, 0x50, 0x8c, 0x01, 0x16, 0x3f, 0x26, 0xe5, 0xcb, 0x2a, 0x3e, 0x10, 0x45, 0xa9, 0x79,
+];
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -23,6 +30,11 @@ pub enum Error {
     NegativeAmount = 6,
     AllowanceExpired = 7,
     Paused = 8,
+    MainnetNotAllowed = 9,
+    /// approve() called with amount > 0 and an expiration_ledger already in
+    /// the past (issue #616) — matches the standard SEP-41 token contract's
+    /// validation, which panics on this input rather than silently accepting it.
+    InvalidExpirationLedger = 10,
 }
 
 #[contracttype]
@@ -53,6 +65,12 @@ pub struct TestToken;
 #[contractimpl]
 impl TestToken {
     pub fn initialize(env: Env, owner: Address, decimal: u32, name: String, symbol: String) {
+        require_not_mainnet(&env);
+        // Issue #612: require the owner's own auth so a front-runner who
+        // observes the deploy transaction (or predicts the deterministic
+        // contract address) can't call initialize first with themselves as
+        // owner, matching every other initialize in the workspace.
+        owner.require_auth();
         if env.storage().instance().has(&InstanceKey::Owner) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
@@ -164,6 +182,13 @@ impl TestToken {
         if amount == 0 {
             env.storage().temporary().remove(&key);
         } else {
+            // Issue #616: reject an already-past expiration_ledger, matching
+            // the standard SEP-41 token contract's validation. Without this,
+            // ledger_gap silently saturates to 0 and the call succeeds while
+            // storing an allowance that is already expired.
+            if expiration_ledger < env.ledger().sequence() {
+                panic_with_error!(&env, Error::InvalidExpirationLedger);
+            }
             let ledger_gap = expiration_ledger.saturating_sub(env.ledger().sequence());
             env.storage().temporary().set(
                 &key,
@@ -238,6 +263,12 @@ impl TestToken {
         change_total_supply(&env, -amount);
         env.events()
             .publish((symbol_short!("burn_from"),), (spender, from, amount));
+    }
+}
+
+fn require_not_mainnet(env: &Env) {
+    if env.ledger().network_id() == BytesN::from_array(env, &MAINNET_NETWORK_ID) {
+        panic_with_error!(env, Error::MainnetNotAllowed);
     }
 }
 
@@ -349,7 +380,10 @@ fn spend_allowance(env: &Env, from: &Address, spender: &Address, amount: i128) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        Env,
+    };
 
     fn setup() -> (Env, Address, TestTokenClient<'static>) {
         let env = Env::default();
@@ -372,12 +406,46 @@ mod tests {
         let alice = Address::generate(&env);
         let bob = Address::generate(&env);
 
-        client.mint(&owner, &alice, &1_000_0000);
+        client.mint(&owner, &alice, &10_000_000);
         client.transfer(&alice, &bob, &250_0000);
 
         assert_eq!(client.balance(&alice), 750_0000);
         assert_eq!(client.balance(&bob), 250_0000);
-        assert_eq!(client.total_supply(), 1_000_0000);
+        assert_eq!(client.total_supply(), 10_000_000);
+    }
+
+    /// Issue #612: initialize must require the owner's own auth, not just
+    /// guard against re-initialization — otherwise a front-runner who
+    /// observes the deploy transaction could call initialize first with
+    /// themselves as owner.
+    #[test]
+    #[should_panic]
+    fn initialize_requires_owner_auth() {
+        let env = Env::default();
+        // No mock_all_auths() — any require_auth() call must panic.
+        let owner = Address::generate(&env);
+        let id = env.register(TestToken, ());
+        TestTokenClient::new(&env, &id).initialize(
+            &owner,
+            &7,
+            &String::from_str(&env, "Test Wrapped Bitcoin"),
+            &String::from_str(&env, "TWBTC"),
+        );
+    }
+
+    /// Issue #616: approve() with amount > 0 and an already-past
+    /// expiration_ledger must revert, matching standard SEP-41 behavior,
+    /// instead of silently storing an already-expired allowance.
+    #[test]
+    #[should_panic]
+    fn approve_rejects_past_expiration_ledger() {
+        let (env, owner, client) = setup();
+        let alice = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        client.mint(&owner, &alice, &10_000_000);
+        env.ledger().with_mut(|li| li.sequence_number = 2);
+        client.approve(&alice, &spender, &500_0000, &1u32);
     }
 
     #[test]
@@ -402,5 +470,23 @@ mod tests {
         client.unpause(&owner);
         client.mint(&owner, &alice, &1);
         assert_eq!(client.balance(&alice), 1);
+    }
+
+    /// Issue #400: initializing against the mainnet `network_id` must panic —
+    /// test tokens must never come up live on mainnet.
+    #[test]
+    #[should_panic]
+    fn initialize_rejects_mainnet_network_id() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_network_id(MAINNET_NETWORK_ID);
+        let owner = Address::generate(&env);
+        let id = env.register(TestToken, ());
+        TestTokenClient::new(&env, &id).initialize(
+            &owner,
+            &7,
+            &String::from_str(&env, "Test Wrapped Bitcoin"),
+            &String::from_str(&env, "TWBTC"),
+        );
     }
 }

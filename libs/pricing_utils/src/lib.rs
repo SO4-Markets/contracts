@@ -27,6 +27,7 @@ use soroban_sdk::{Address, BytesN, Env};
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
+    fn get_u128_batch(env: Env, keys: soroban_sdk::Vec<BytesN<32>>) -> soroban_sdk::Vec<u128>;
     fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
     fn apply_delta_to_u128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> u128;
 }
@@ -76,6 +77,21 @@ fn compute_impact_usd(
     }
 }
 
+// ─── USD → token conversion for signed price impact ──────────────────────────
+
+/// Convert a signed USD price impact to token units, rounding correctly for
+/// the sign: a positive impact (payout to the trader) floors, while a
+/// negative impact (a charge) takes the ceiling of its magnitude before
+/// re-applying the sign — mirroring how fee amounts always round up so the
+/// protocol never under-collects.
+fn convert_impact_usd_to_tokens(env: &Env, impact_usd: i128, token_price: i128) -> i128 {
+    if impact_usd >= 0 {
+        mul_div_wide(env, impact_usd, TOKEN_PRECISION, token_price)
+    } else {
+        -mul_div_wide_up(env, -impact_usd, TOKEN_PRECISION, token_price)
+    }
+}
+
 // ─── Swap price impact ────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -103,9 +119,17 @@ pub fn get_swap_price_impact(
     let next_out_usd = pool_out_usd - amount_in_usd;
     let next_diff = (next_in_usd - next_out_usd).abs();
 
-    let pos_factor = ds.get_u128(&swap_impact_factor_key(env, &market.market_token, true)) as i128;
-    let neg_factor = ds.get_u128(&swap_impact_factor_key(env, &market.market_token, false)) as i128;
-    let exponent = ds.get_u128(&swap_impact_exponent_factor_key(env, &market.market_token)) as i128;
+    // #381: batch the three impact-factor reads into a single cross-contract call.
+    let impact_keys = soroban_sdk::vec![
+        env,
+        swap_impact_factor_key(env, &market.market_token, true),
+        swap_impact_factor_key(env, &market.market_token, false),
+        swap_impact_exponent_factor_key(env, &market.market_token),
+    ];
+    let impact_batch = ds.get_u128_batch(&impact_keys);
+    let pos_factor = impact_batch.get(0).unwrap_or(0) as i128;
+    let neg_factor = impact_batch.get(1).unwrap_or(0) as i128;
+    let exponent = impact_batch.get(2).unwrap_or(0) as i128;
 
     // Impact pool cap (in USD of token_out)
     let pool_tokens = get_swap_impact_pool_amount(env, data_store, market, token_out) as i128;
@@ -139,7 +163,7 @@ pub fn apply_swap_impact_value(
         return 0;
     }
     // Convert USD impact to token amount
-    let impact_amount = mul_div_wide(env, impact_usd, TOKEN_PRECISION, token_price);
+    let impact_amount = convert_impact_usd_to_tokens(env, impact_usd, token_price);
 
     // Positive impact → paid from pool (reduce pool); negative → paid into pool (increase pool)
     let delta = -impact_amount;
@@ -186,7 +210,7 @@ pub fn get_swap_output_amount(
         env, data_store, market, token_in, token_out, amount_in, price_in, price_out,
     );
     let impact_amount = if price_out > 0 {
-        mul_div_wide(env, impact_usd, TOKEN_PRECISION, price_out)
+        convert_impact_usd_to_tokens(env, impact_usd, price_out)
     } else {
         0
     };
@@ -223,17 +247,17 @@ pub fn get_position_price_impact(
     };
     let next_diff = (next_long - next_short).abs();
 
-    let pos_factor =
-        ds.get_u128(&position_impact_factor_key(env, &market.market_token, true)) as i128;
-    let neg_factor = ds.get_u128(&position_impact_factor_key(
+    // #381: batch the three impact-factor reads into a single cross-contract call.
+    let impact_keys = soroban_sdk::vec![
         env,
-        &market.market_token,
-        false,
-    )) as i128;
-    let exponent = ds.get_u128(&position_impact_exponent_factor_key(
-        env,
-        &market.market_token,
-    )) as i128;
+        position_impact_factor_key(env, &market.market_token, true),
+        position_impact_factor_key(env, &market.market_token, false),
+        position_impact_exponent_factor_key(env, &market.market_token),
+    ];
+    let impact_batch = ds.get_u128_batch(&impact_keys);
+    let pos_factor = impact_batch.get(0).unwrap_or(0) as i128;
+    let neg_factor = impact_batch.get(1).unwrap_or(0) as i128;
+    let exponent = impact_batch.get(2).unwrap_or(0) as i128;
 
     // Impact pool cap (in USD of index token)
     let pool_tokens = get_position_impact_pool_amount(env, data_store, market) as i128;
@@ -268,7 +292,7 @@ pub fn apply_position_impact_value(
     if impact_usd == 0 || index_token_price == 0 {
         return 0;
     }
-    let impact_amount = mul_div_wide(env, impact_usd, TOKEN_PRECISION, index_token_price);
+    let impact_amount = convert_impact_usd_to_tokens(env, impact_usd, index_token_price);
     let delta = -impact_amount; // positive impact → pool shrinks; negative → pool grows
     DataStoreClient::new(env, data_store).apply_delta_to_u128(
         caller,
@@ -288,15 +312,26 @@ pub fn get_execution_price(
     index_price: i128,
     size_delta_usd: i128,
     price_impact_usd: i128,
-    _is_long: bool,
-    _is_increase: bool,
+    is_long: bool,
+    is_increase: bool,
 ) -> i128 {
     if size_delta_usd == 0 || index_price == 0 {
         return index_price;
     }
 
+    // A cost (negative) price impact must raise the execution price on a "buy"
+    // (long-increase or short-decrease) but lower it on a "sell" (long-decrease
+    // or short-increase). Flip the sign on the sell side before folding the
+    // impact into size_delta_usd so the two scenarios move in opposite directions.
+    let is_buy = is_long == is_increase;
+    let signed_impact_usd = if is_buy {
+        price_impact_usd
+    } else {
+        -price_impact_usd
+    };
+
     // Adjusted size after price impact
-    let adjusted_size = size_delta_usd + price_impact_usd;
+    let adjusted_size = size_delta_usd + signed_impact_usd;
     if adjusted_size <= 0 {
         return index_price;
     }
@@ -378,6 +413,7 @@ mod tests {
     }
 
     /// Seed pool amounts and impact factors in data_store.
+    #[allow(clippy::too_many_arguments)]
     fn seed_swap_market(
         env: &Env,
         ds: &Address,
@@ -823,6 +859,64 @@ mod tests {
         );
     }
 
+    // ── Issue #376: buy/sell sign flip for get_execution_price ────────────────
+
+    /// Long-decrease (a "sell") with a cost (negative) price impact must LOWER
+    /// the execution price below index_price — the opposite of a long-increase
+    /// ("buy"), so the acceptable_price floor a trader configured for a close
+    /// actually protects them.
+    #[test]
+    fn property_negative_impact_lowers_execution_price_for_long_decrease() {
+        let env = Env::default();
+        let index_price = 2_000 * FLOAT_PRECISION;
+        let size_delta_usd = 10_000 * FLOAT_PRECISION;
+        let neg_impact = -(100 * FLOAT_PRECISION);
+
+        // is_long = true, is_increase = false → sell scenario
+        let exec_price =
+            get_execution_price(&env, index_price, size_delta_usd, neg_impact, true, false);
+        assert!(
+            exec_price < index_price,
+            "negative impact must lower execution price for long decrease: exec={exec_price}, index={index_price}"
+        );
+    }
+
+    /// Short-increase (also a "sell") with a cost price impact must likewise
+    /// lower the execution price below index_price.
+    #[test]
+    fn property_negative_impact_lowers_execution_price_for_short_increase() {
+        let env = Env::default();
+        let index_price = 2_000 * FLOAT_PRECISION;
+        let size_delta_usd = 10_000 * FLOAT_PRECISION;
+        let neg_impact = -(100 * FLOAT_PRECISION);
+
+        // is_long = false, is_increase = true → sell scenario
+        let exec_price =
+            get_execution_price(&env, index_price, size_delta_usd, neg_impact, false, true);
+        assert!(
+            exec_price < index_price,
+            "negative impact must lower execution price for short increase: exec={exec_price}, index={index_price}"
+        );
+    }
+
+    /// Short-decrease (a "buy", mirroring long-increase) with a cost price
+    /// impact must RAISE the execution price above index_price.
+    #[test]
+    fn property_negative_impact_raises_execution_price_for_short_decrease() {
+        let env = Env::default();
+        let index_price = 2_000 * FLOAT_PRECISION;
+        let size_delta_usd = 10_000 * FLOAT_PRECISION;
+        let neg_impact = -(100 * FLOAT_PRECISION);
+
+        // is_long = false, is_increase = false → buy scenario
+        let exec_price =
+            get_execution_price(&env, index_price, size_delta_usd, neg_impact, false, false);
+        assert!(
+            exec_price > index_price,
+            "negative impact must raise execution price for short decrease: exec={exec_price}, index={index_price}"
+        );
+    }
+
     /// apply_swap_impact_value with impact_usd = 0 returns 0 without mutating state.
     #[test]
     fn property_apply_swap_impact_zero_impact_is_noop() {
@@ -1107,6 +1201,7 @@ mod tests {
 
     /// Seed both OI sides (via the long_token collateral key) and the three
     /// position impact parameters.  All OI values are in FLOAT_PRECISION units.
+    #[allow(clippy::too_many_arguments)]
     fn seed_position_market(
         env: &Env,
         ds: &Address,

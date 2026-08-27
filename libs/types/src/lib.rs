@@ -166,6 +166,7 @@ pub struct CreateWithdrawalParams {
 
 /// User-supplied parameters for creating an order. Mirrors GMX BaseOrderUtils.CreateOrderParams.
 #[contracttype]
+#[derive(Clone)]
 pub struct CreateOrderParams {
     pub receiver: Address,
     pub market: Address,
@@ -179,6 +180,10 @@ pub struct CreateOrderParams {
     pub min_output_amount: i128,
     pub order_type: OrderType,
     pub is_long: bool,
+    /// Optional ledger-sequence deadline. If `Some(n)` the order auto-cancels
+    /// (with full refund) when the keeper calls `execute_order` after sequence `n`.
+    /// `None` means the order never expires via this mechanism.
+    pub expiry_ledger: Option<u64>,
 }
 
 // ─── Deposits / Withdrawals ───────────────────────────────────────────────────
@@ -234,8 +239,17 @@ pub struct PoolValueInfo {
     pub short_token_amount: i128,
     pub long_token_usd: i128,
     pub short_token_usd: i128,
-    pub total_borrowing_fees: i128,
     pub impact_pool_amount: i128,
+}
+
+/// Pending (not-yet-settled) funding for a single position — issue #275.
+/// Positive = amount the holder would receive; negative = amount the holder
+/// would pay, in each of the position's long_token / short_token units.
+#[contracttype]
+pub struct FundingAmountResult {
+    pub long_token_amount: i128,
+    pub short_token_amount: i128,
+    pub at_ledger: u64,
 }
 
 /// Aggregate funding information for a market (used by Reader).
@@ -318,11 +332,16 @@ pub struct PositionInfo {
     pub funding_fee_usd: i128,
     pub position_fee_usd: i128,
     pub liquidation_price: i128,
+    /// Issue #260: weighted average entry price across all position increases.
+    /// Computed as size_in_usd / size_in_tokens × TOKEN_PRECISION (FLOAT_PRECISION units).
+    /// Zero when size_in_tokens is zero (no open position).
+    pub avg_entry_price: i128,
 }
 
 /// ADL-eligible position candidate for auto-deleveraging.
 /// Returned by reader::get_adl_eligible_positions.
 #[contracttype]
+#[derive(Clone)]
 pub struct AdlCandidate {
     pub key: BytesN<32>,                  // position key for order_handler::get_position
     pub owner: Address,                   // position owner
@@ -343,11 +362,13 @@ pub struct SwapEstimate {
 }
 
 /// Position leverage breakdown returned by reader::get_position_leverage.
-/// leverage_bps = size_usd * 100 / net_collateral_usd (e.g. 2000 = 20×).
-/// If net_collateral_usd == 0, effective_leverage_bps == u32::MAX.
+/// effective_leverage_x100 = size_usd * 100 / net_collateral_usd (e.g. 2000 = 20×).
+/// This is NOT basis points (BPS_DIVISOR = 10_000) — genuine bps would represent
+/// 20× as 200_000, not 2000. It's a leverage-times-100 scale.
+/// If net_collateral_usd == 0, effective_leverage_x100 == u32::MAX.
 #[contracttype]
 pub struct PositionLeverage {
-    pub effective_leverage_bps: u32,
+    pub effective_leverage_x100: u32,
     pub net_collateral_usd: u128,
     pub position_size_usd: u128,
     pub is_liquidatable: bool,
@@ -367,6 +388,20 @@ pub struct PendingOrder {
     pub execution_fee: i128,
     pub updated_at_time: u64,
     pub is_long: bool,
+}
+
+/// Liquidatable position entry returned by `reader::get_liquidatable_positions` (issue #283).
+///
+/// `health_factor_bps < 10000` means the position is below the min-collateral threshold
+/// (i.e., currently eligible for liquidation). Sorted ascending so the most
+/// under-collateralised positions appear first.
+#[contracttype]
+pub struct LiquidatablePosition {
+    pub key: BytesN<32>,           // canonical position key for order_handler::get_position
+    pub owner: Address,
+    pub size_usd: u128,
+    pub collateral_usd: u128,
+    pub health_factor_bps: u32,    // collateral_usd * 10000 / size_usd; < 10000 = liquidatable
 }
 
 use soroban_sdk::BytesN;

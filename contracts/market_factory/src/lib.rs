@@ -10,6 +10,11 @@
 //!   salt = sha256("GMX_MARKET" ‖ index_token ‖ long_token ‖ short_token ‖ market_type)
 //!   LP token address = env.deployer().with_address(factory, salt).deployed_address()
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 
 use gmx_keys::{
     market_index_token_key, market_key, market_list_key, market_long_token_key,
@@ -17,8 +22,8 @@ use gmx_keys::{
 };
 use gmx_types::MarketProps;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Bytes, BytesN, Env, String, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
+    Address, Bytes, BytesN, Env, String, Vec,
 };
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -71,6 +76,7 @@ trait IDataStore {
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "MarketTokenClient")]
 trait IMarketToken {
+    #[allow(clippy::too_many_arguments)]
     fn initialize(
         env: Env,
         admin: Address,
@@ -78,6 +84,8 @@ trait IMarketToken {
         decimal: u32,
         name: String,
         symbol: String,
+        long_token: Address,
+        short_token: Address,
     );
     fn decimals(env: Env) -> u32;
 }
@@ -197,7 +205,7 @@ impl MarketFactory {
         // market_token uses the initialize() pattern, not __constructor, so we
         // use deploy() (no constructor call) followed by an explicit initialize.
         let deployer = env.deployer().with_address(factory, salt);
-        let market_token_address = deployer.deploy(wasm_hash);
+        let market_token_address = deployer.deploy_v2(wasm_hash, ());
 
         MarketTokenClient::new(&env, &market_token_address).initialize(
             &env.current_contract_address(),
@@ -205,6 +213,8 @@ impl MarketFactory {
             &7u32,
             &name,
             &symbol,
+            &long_token,
+            &short_token,
         );
 
         let market = MarketProps {
@@ -237,10 +247,13 @@ impl MarketFactory {
             &market_short_token_key(&env, &market_token_address),
             &short_token,
         );
-        // 3. Store token decimals (7 for Stellar standard)
-        ds_client.set_u128(&factory, &token_decimals_key(&env, &long_token), &7u128);
-        ds_client.set_u128(&factory, &token_decimals_key(&env, &short_token), &7u128);
-        ds_client.set_u128(&factory, &token_decimals_key(&env, &index_token), &7u128);
+        // 3. Store token decimals (queried from each SEP-41 token contract)
+        let long_decimals = token::Client::new(&env, &long_token).decimals() as u128;
+        let short_decimals = token::Client::new(&env, &short_token).decimals() as u128;
+        let index_decimals = token::Client::new(&env, &index_token).decimals() as u128;
+        ds_client.set_u128(&factory, &token_decimals_key(&env, &long_token), &long_decimals);
+        ds_client.set_u128(&factory, &token_decimals_key(&env, &short_token), &short_decimals);
+        ds_client.set_u128(&factory, &token_decimals_key(&env, &index_token), &index_decimals);
         // 4. Add to market list
         ds_client.add_address_to_set(&factory, &market_list_key(&env), &market_token_address);
 
@@ -421,6 +434,68 @@ mod tests {
         let short_tk = Address::generate(&env);
         let mt = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
         client.create_market(&impostor, &index_tk, &long_tk, &short_tk, &mt);
+    }
+
+    // Issue #257: a second create_market call with an identical token triple
+    // must revert with MarketAlreadyExists instead of deploying a competing pool.
+    //
+    // Previously this test used bare `#[should_panic]`, which made it pass for
+    // the wrong reason: setup() never calls set_market_token_wasm_hash, so
+    // create_market panicked at WasmHashNotSet (step 2 in its execution order)
+    // before ever reaching the MarketAlreadyExists check (step 3). The test
+    // passed because *some* panic occurred, not the intended one — the
+    // MarketAlreadyExists check could be deleted entirely and the test would
+    // still pass. This version uses try_create_market to assert the specific
+    // error code, so it only passes when the panic genuinely originates from
+    // the MarketAlreadyExists branch.
+    #[test]
+    fn create_market_duplicate_token_triple_panics() {
+        let (env, admin, rs, ds, factory_id) = setup();
+        let index_tk = Address::generate(&env);
+        let long_tk = Address::generate(&env);
+        let short_tk = Address::generate(&env);
+        let mt = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+
+        // Compute the same deterministic address create_market would derive
+        // for this token triple, and pre-register it as already-existing so the
+        // duplicate check fires without needing a real market_token WASM upload.
+        let salt = compute_market_salt(&env, &index_tk, &long_tk, &short_tk, &mt);
+        let deployed_address = env
+            .deployer()
+            .with_address(factory_id.clone(), salt)
+            .deployed_address();
+        // The factory holds CONTROLLER in production; grant it here so
+        // the pre-registration set_bool call succeeds in the test environment.
+        RsClient::new(&env, &rs).grant_role(&admin, &factory_id, &roles::controller(&env));
+        DsClient::new(&env, &ds).set_bool(&factory_id, &market_key(&env, &deployed_address), &true);
+
+        // set_market_token_wasm_hash must be called BEFORE create_market so that
+        // execution reaches step (3) — the MarketAlreadyExists check — without
+        // being diverted to step (2)'s WasmHashNotSet panic first.
+        // Any 32-byte value works here; the deploy never fires because the
+        // duplicate check fires first.
+        let dummy_wasm_hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+        MarketFactoryClient::new(&env, &factory_id)
+            .set_market_token_wasm_hash(&admin, &dummy_wasm_hash);
+
+        // Must fail with the specific Error::MarketAlreadyExists (code 4).
+        // Using try_create_market instead of #[should_panic] prevents this test
+        // from passing silently for any other panic reason.
+        let result = MarketFactoryClient::new(&env, &factory_id)
+            .try_create_market(&admin, &index_tk, &long_tk, &short_tk, &mt);
+
+        match result {
+            Err(Ok(err)) => {
+                assert_eq!(
+                    err,
+                    soroban_sdk::Error::from_contract_error(Error::MarketAlreadyExists as u32),
+                    "expected Error::MarketAlreadyExists (code {})",
+                    Error::MarketAlreadyExists as u32,
+                );
+            }
+            Ok(_) => panic!("create_market must fail on a duplicate token triple, but it succeeded"),
+            Err(Err(_)) => panic!("create_market failed with a host error, not a contract error — MarketAlreadyExists was not reached"),
+        }
     }
 
     #[test]

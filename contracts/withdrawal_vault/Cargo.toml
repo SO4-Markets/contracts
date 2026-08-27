@@ -2,6 +2,7 @@
 name = "withdrawal-vault"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 publish = false
 
 [lib]
@@ -10,8 +11,8 @@ crate-type = ["cdylib", "lib"]
 [dependencies]
 soroban-sdk = { workspace = true }
 gmx-keys    = { path = "../../libs/keys" }
-role-store  = { path = "../role_store" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 role-store  = { path = "../role_store" }
+test-token  = { path = "../test_token" }

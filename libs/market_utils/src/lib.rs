@@ -1,4 +1,9 @@
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
@@ -6,13 +11,13 @@ use gmx_keys::{
     cumulative_borrowing_factor_updated_at_key, funding_amount_per_size_key,
     funding_decrease_factor_per_second_key, funding_exponent_factor_key, funding_factor_key,
     funding_increase_factor_per_second_key, funding_updated_at_key,
-    max_funding_factor_per_second_key, max_open_interest_key, max_pool_amount_key,
-    min_funding_factor_per_second_key, open_interest_in_tokens_key, open_interest_key,
-    pool_amount_key, position_impact_pool_amount_key, saved_funding_factor_per_second_key,
-    swap_impact_pool_amount_key,
+    max_funding_factor_per_second_key, max_open_interest_key, max_pnl_factor_for_adl_key,
+    max_pool_amount_key, min_funding_factor_per_second_key, open_interest_in_tokens_key,
+    open_interest_key, pool_amount_key, position_impact_pool_amount_key,
+    saved_funding_factor_per_second_key, swap_impact_pool_amount_key,
 };
 use gmx_math::{mul_div_wide, pow_factor, FLOAT_PRECISION, TOKEN_PRECISION};
-use gmx_types::{MarketProps, PoolValueInfo};
+use gmx_types::{MarketProps, PoolValueInfo, PriceProps};
 use soroban_sdk::{vec, Address, BytesN, Env, Vec};
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -151,13 +156,14 @@ pub fn get_pnl(
     is_long: bool,
     maximize: bool,
 ) -> i128 {
-    // Choose min or max price for the index token
-    let price = if is_long == maximize {
-        // long+maximize or short+minimize → use max price
-        index_token_price
-    } else {
-        index_token_price
-    };
+    // `index_token_price` is a single already-resolved price (not a min/max
+    // pair), so there is nothing for `maximize` to select between here.
+    // Callers wanting a conservative (worst-case-for-the-pool) valuation must
+    // resolve `index_token_price` themselves via
+    // `PriceProps::pick_price_for_pnl(is_long, maximize)` before calling this
+    // function. See issue #377.
+    let _ = maximize; // reserved: see doc comment above
+    let price = index_token_price;
 
     // Sum OI over both collateral tokens
     let oi_usd = (get_open_interest_for_side(env, ds, market, is_long)) as i128;
@@ -181,27 +187,57 @@ pub fn get_pnl(
     }
 }
 
-// ─── Borrowing fees ───────────────────────────────────────────────────────────
+// ─── ADL (Auto-Deleveraging) ───────────────────────────────────────────────────
 
-/// Pending borrowing fee for a position: (cum_factor_now - factor_at_open) × size_in_tokens.
-pub fn get_borrowing_fees(
+/// True when total trader PnL / pool_value exceeds the configured ADL threshold
+/// for this market/side (`max_pnl_factor_for_adl_key`). A threshold of 0 means
+/// ADL is disabled for that market/side.
+///
+/// Shared by `adl_handler::is_adl_required` (view-only check) and
+/// `order_handler::execute_adl` (issue #417: the real mutating entry point must
+/// re-validate this itself rather than trust the wrapper contract's check —
+/// the same pattern `validate_open_interest` follows as the single source of
+/// truth for the OI cap).
+///
+/// Pool valuation is minimized (conservative: harder to trigger ADL) via
+/// `get_pool_value(..., maximize=false)`, which minimizes assets and maximizes
+/// net PnL. PnL for the ADL threshold itself is maximized via
+/// `PriceProps::pick_price_for_pnl(is_long, true)` (issue #377).
+#[allow(clippy::too_many_arguments)]
+pub fn is_adl_required(
     env: &Env,
     ds: &Address,
     market: &MarketProps,
-    _collateral_token: &Address,
+    long_price: &PriceProps,
+    short_price: &PriceProps,
+    index_price: &PriceProps,
     is_long: bool,
-    borrowing_factor_at_open: u128,
-    size_in_tokens: u128,
-) -> u128 {
-    let key = cumulative_borrowing_factor_key(env, &market.market_token, is_long);
-    let cum_factor = DataStoreClient::new(env, ds).get_u128(&key);
-    if cum_factor <= borrowing_factor_at_open {
-        return 0;
+) -> bool {
+    let max_pnl_factor = DataStoreClient::new(env, ds)
+        .get_u128(&max_pnl_factor_for_adl_key(env, &market.market_token, is_long))
+        as i128;
+    if max_pnl_factor == 0 {
+        return false;
     }
-    let delta = cum_factor - borrowing_factor_at_open;
-    // fee = delta × size_in_tokens / FLOAT_PRECISION
-    mul_div_wide(env, delta as i128, size_in_tokens as i128, FLOAT_PRECISION) as u128
+
+    // Minimize pool value (conservative: harder to trigger ADL)
+    let pool_info = get_pool_value(env, ds, market, long_price, short_price, index_price, false);
+    if pool_info.pool_value <= 0 {
+        return false;
+    }
+
+    // Maximize trader PnL (worst case for pool) — resolve pnl price via PriceProps.
+    let pnl_price = index_price.pick_price_for_pnl(is_long, true);
+    let pnl = get_pnl(env, ds, market, pnl_price, is_long, true);
+    if pnl <= 0 {
+        return false;
+    }
+
+    let pnl_factor = mul_div_wide(env, pnl, FLOAT_PRECISION, pool_info.pool_value);
+    pnl_factor > max_pnl_factor
 }
+
+// ─── Borrowing fees ───────────────────────────────────────────────────────────
 
 /// Update the cumulative borrowing factor for one side.
 ///
@@ -271,8 +307,6 @@ pub fn update_funding_state(
     ds: &Address,
     caller: &Address,
     market: &MarketProps,
-    _long_token_price: i128,
-    _short_token_price: i128,
     current_time: u64,
 ) -> FundingResult {
     let ds_client = DataStoreClient::new(env, ds);
@@ -442,9 +476,11 @@ fn compute_next_funding_factor(
 /// Full pool value breakdown (mirrors GMX's getPoolValue).
 ///
 /// SIMPLIFIED vs GMX:
-///   - `total_borrowing_fees` is always 0. Full borrowing fee accrual requires
-///     tracking a per-side `cumulative_borrowing_factor` updated on every position
-///     event and is not yet implemented.
+///   - Pool value intentionally excludes outstanding, not-yet-settled borrowing
+///     fees traders currently owe the pool (issue #645). Borrowing fees are only
+///     realised into pool accounting at position decrease/liquidation time, via
+///     `get_position_fees`'s `borrowing_fee_amount` (itself driven by the
+///     per-side `cumulative_borrowing_factor` this file already tracks).
 ///   - No `max_pnl_factor` cap is applied. GMX applies different PnL cap factors
 ///     for deposit, withdrawal, and trader operations; this function returns the
 ///     raw net PnL without capping. Pool token prices may diverge from GMX under
@@ -453,9 +489,9 @@ pub fn get_pool_value(
     env: &Env,
     ds: &Address,
     market: &MarketProps,
-    long_token_price: i128,
-    short_token_price: i128,
-    index_token_price: i128,
+    long_token_price: &PriceProps,
+    short_token_price: &PriceProps,
+    index_token_price: &PriceProps,
     maximize: bool,
 ) -> PoolValueInfo {
     // Batch all 11 reads into a single cross-contract call to stay within Soroban's
@@ -492,10 +528,19 @@ pub fn get_pool_value(
     let oit_short_lt = batch.get(9).unwrap_or(0) as i128;
     let oit_short_st = batch.get(10).unwrap_or(0) as i128;
 
+    // Price selection: maximize=true → max assets, min PnL (optimistic);
+    // maximize=false → min assets, max PnL (conservative, harder to trigger ADL)
+    let long_price = long_token_price.pick_price(maximize);
+    let short_price = short_token_price.pick_price(maximize);
+    let index_price_for_assets = index_token_price.pick_price(maximize);
+    // PnL uses opposite maximize: max pool wants min PnL, min pool wants max PnL
+    let long_pnl_price = index_token_price.pick_price_for_pnl(true, !maximize);
+    let short_pnl_price = index_token_price.pick_price_for_pnl(false, !maximize);
+
     // USD value of pool tokens
-    let long_usd       = mul_div_wide(env, long_pool, long_token_price, TOKEN_PRECISION);
-    let short_usd      = mul_div_wide(env, short_pool, short_token_price, TOKEN_PRECISION);
-    let impact_pool_usd = mul_div_wide(env, impact_pool_tokens, index_token_price, TOKEN_PRECISION);
+    let long_usd       = mul_div_wide(env, long_pool, long_price, TOKEN_PRECISION);
+    let short_usd      = mul_div_wide(env, short_pool, short_price, TOKEN_PRECISION);
+    let impact_pool_usd = mul_div_wide(env, impact_pool_tokens, index_price_for_assets, TOKEN_PRECISION);
 
     // Inline PnL calculation for longs
     let long_pnl = {
@@ -504,7 +549,7 @@ pub fn get_pool_value(
         if oi_tokens == 0 {
             0
         } else {
-            let pos_val = mul_div_wide(env, oi_tokens, index_token_price, TOKEN_PRECISION);
+            let pos_val = mul_div_wide(env, oi_tokens, long_pnl_price, TOKEN_PRECISION);
             pos_val - oi_usd
         }
     };
@@ -516,12 +561,11 @@ pub fn get_pool_value(
         if oi_tokens == 0 {
             0
         } else {
-            let pos_val = mul_div_wide(env, oi_tokens, index_token_price, TOKEN_PRECISION);
+            let pos_val = mul_div_wide(env, oi_tokens, short_pnl_price, TOKEN_PRECISION);
             oi_usd - pos_val
         }
     };
 
-    let _ = maximize; // reserved for future min/max price selection
     let net_pnl = long_pnl + short_pnl;
     let pool_value = long_usd + short_usd + impact_pool_usd - net_pnl;
 
@@ -534,7 +578,6 @@ pub fn get_pool_value(
         short_token_usd: short_usd,
         long_token_amount: long_pool,
         short_token_amount: short_pool,
-        total_borrowing_fees: 0, // SIMPLIFIED: borrowing fee accrual not yet implemented
         impact_pool_amount: impact_pool_tokens,
     }
 }
@@ -553,9 +596,9 @@ pub fn get_market_token_price(
     env: &Env,
     ds: &Address,
     market: &MarketProps,
-    long_token_price: i128,
-    short_token_price: i128,
-    index_token_price: i128,
+    long_token_price: &PriceProps,
+    short_token_price: &PriceProps,
+    index_token_price: &PriceProps,
     maximize: bool,
 ) -> i128 {
     let supply = MarketTokenClient::new(env, &market.market_token).total_supply();
@@ -724,21 +767,46 @@ mod tests {
         env.mock_all_auths();
         let (_admin, ds, mt, it, lt, st) = make_market(&env);
         let market = make_market_props(&mt, &it, &lt, &st);
-        let price = FLOAT_PRECISION;
-        let info = get_pool_value(&env, &ds, &market, price, price, price, true);
+        let price = PriceProps { min: FLOAT_PRECISION, max: FLOAT_PRECISION };
+        let info = get_pool_value(&env, &ds, &market, &price, &price, &price, true);
         assert_eq!(info.pool_value, 0);
         assert_eq!(info.net_pnl, 0);
     }
 
     #[test]
-    fn borrowing_fees_zero_at_open() {
+    fn get_pool_value_maximize_changes_result_with_price_spread() {
         let env = Env::default();
         env.mock_all_auths();
-        let (_admin, ds, mt, it, lt, st) = make_market(&env);
+        let (admin, ds, mt, it, lt, st) = make_market(&env);
         let market = make_market_props(&mt, &it, &lt, &st);
-        // cum_factor starts at 0; position opened at 0 → no fees
-        let fees = get_borrowing_fees(&env, &ds, &market, &lt, true, 0, 1_000_000);
-        assert_eq!(fees, 0);
+        let ds_c = DsClient::new(&env, &ds);
+        let fp = FLOAT_PRECISION;
+
+        // Pool: 5 long tokens @ spread, 4000 short stable
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::pool_amount_key(&env, &mt, &lt), &(5 * 10_000_000));
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::pool_amount_key(&env, &mt, &st), &(4_000 * 10_000_000));
+        // Open interest: 5 long tokens opened at $2000, current size $10_000*FP
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &lt, true), &(10_000 * fp));
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_in_tokens_key(&env, &mt, &lt, true), &(5 * 10_000_000));
+        // Price spread: long $1800 .. $2200, short $1 stable, index $1800 .. $2200
+        let long_price = PriceProps { min: 1_800 * fp, max: 2_200 * fp };
+        let short_price = PriceProps { min: fp, max: fp };
+        let index_price = PriceProps { min: 1_800 * fp, max: 2_200 * fp };
+
+        let info_min = get_pool_value(&env, &ds, &market, &long_price, &short_price, &index_price, false);
+        let info_max = get_pool_value(&env, &ds, &market, &long_price, &short_price, &index_price, true);
+
+        assert_ne!(
+            info_min.pool_value, info_max.pool_value,
+            "maximize flag must affect pool_value: min={}, max={}",
+            info_min.pool_value, info_max.pool_value
+        );
+        // With this setup, max should be larger because assets at max and PnL at min
+        assert!(
+            info_max.pool_value > info_min.pool_value,
+            "max pool value must exceed min: max={}, min={}",
+            info_max.pool_value, info_min.pool_value
+        );
     }
 
     #[test]
@@ -975,23 +1043,23 @@ mod tests {
             &short_pool,
         );
 
-        let long_price = 2_000_i128 * fp; // $2 000
-        let short_price = fp; // $1 (stablecoin)
-        let index_price = 2_000_i128 * fp;
+        let long_price = PriceProps { min: 2_000_i128 * fp, max: 2_000_i128 * fp }; // $2 000
+        let short_price = PriceProps { min: fp, max: fp }; // $1 (stablecoin)
+        let index_price = PriceProps { min: 2_000_i128 * fp, max: 2_000_i128 * fp };
 
         let info = get_pool_value(
             &env,
             &ds,
             &market,
-            long_price,
-            short_price,
-            index_price,
+            &long_price,
+            &short_price,
+            &index_price,
             true,
         );
 
         // Expected: long = 5 * $2000 = $10_000,  short = 4000 * $1 = $4_000
-        let expected_long_usd = mul_div_wide(&env, long_pool, long_price, TOKEN_PRECISION);
-        let expected_short_usd = mul_div_wide(&env, short_pool, short_price, TOKEN_PRECISION);
+        let expected_long_usd = mul_div_wide(&env, long_pool, long_price.max, TOKEN_PRECISION);
+        let expected_short_usd = mul_div_wide(&env, short_pool, short_price.max, TOKEN_PRECISION);
         let expected_pool_value = expected_long_usd + expected_short_usd; // no PnL, no impact pool
 
         assert_eq!(
@@ -1013,53 +1081,6 @@ mod tests {
             info.pool_value,
             14_000 * fp,
             "known value: 5*$2000 + 4000*$1 = $14000"
-        );
-    }
-
-    /// Reference: borrowing fee = (cum_factor_now - factor_at_open) * size_in_tokens / FP
-    ///
-    ///   cum_factor_now      = FP / 10  (10%)
-    ///   cum_factor_at_open  = 0
-    ///   size_in_tokens      = 2 * TOKEN_PRECISION
-    ///   fee = (FP/10 - 0) * (2 * TOKEN_PRECISION) / FP = 0.1 * 2 tokens = 0.2 tokens
-    #[test]
-    fn differential_get_borrowing_fees_matches_reference_formula() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (admin, ds, mt, it, lt, st) = make_market(&env);
-        let market = make_market_props(&mt, &it, &lt, &st);
-
-        let fp = FLOAT_PRECISION;
-        let ds_c = DsClient::new(&env, &ds);
-
-        let cum_factor_now: u128 = (fp / 10) as u128; // 10%
-        let cum_factor_at_open: u128 = 0;
-        let size_in_tokens: u128 = 2 * 10_000_000; // 2 whole tokens
-
-        let cum_key = gmx_keys::cumulative_borrowing_factor_key(&env, &mt, true);
-        ds_c.set_u128(&admin, &cum_key, &cum_factor_now);
-
-        let fee = get_borrowing_fees(
-            &env,
-            &ds,
-            &market,
-            &lt,
-            true,
-            cum_factor_at_open,
-            size_in_tokens,
-        );
-
-        // Reference: delta = 10%; fee = 10% * 2 tokens = 0.2 tokens = 2_000_000 units
-        let delta = cum_factor_now - cum_factor_at_open;
-        let expected = mul_div_wide(&env, delta as i128, size_in_tokens as i128, fp) as u128;
-
-        assert_eq!(
-            fee, expected,
-            "borrowing fee must match reference: fee={fee}, expected={expected}"
-        );
-        assert_eq!(
-            fee, 2_000_000u128,
-            "known numeric: 10% of 2 tokens = 0.2 tokens = 2_000_000 units"
         );
     }
 
@@ -1150,7 +1171,7 @@ mod tests {
         );
 
         let market = make_market_props(&mt, &it, &lt, &st);
-        let result = update_funding_state(&env, &ds, &admin, &market, 0, 0, 1);
+        let result = update_funding_state(&env, &ds, &admin, &market, 1);
 
         // Rate crossed zero (was 100, now negative) → fnd_flip event fires exactly here.
         assert!(
@@ -1185,13 +1206,136 @@ mod tests {
         );
 
         let market = make_market_props(&mt, &it, &lt, &st);
-        let result = update_funding_state(&env, &ds, &admin, &market, 0, 0, 1);
+        let result = update_funding_state(&env, &ds, &admin, &market, 1);
 
         // Rate stayed positive (magnitude increased but no sign change) → no fnd_flip event.
         assert!(
             result.funding_factor_per_second > 0,
             "rate must stay positive when OI is long-dominant; got {}",
             result.funding_factor_per_second,
+        );
+    }
+
+    // ── Issue #256: dominant OI side always pays the subordinate side ────────
+    //
+    // These tests seed `saved_factor` directly at the rate's converged target
+    // (rather than starting from 0 and relying on the per-second ramp to get
+    // there, as `funding_sign_flip_emits_event` does) so a modest `dt` already
+    // produces a comfortably nonzero per-size delta. Ramp-up dynamics are a
+    // separate, already-covered concern; these tests isolate the sign/magnitude
+    // of the steady-state pay/receive split itself.
+
+    /// Short-dominated OI: shorts must pay (positive per-size delta, a debit for
+    /// a fresh short position) and longs must receive (negative delta, a credit).
+    #[test]
+    fn funding_short_dominated_shorts_pay_longs_receive() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = make_market(&env);
+        let ds_c = DsClient::new(&env, &ds);
+
+        // $2M long vs $8M short OI → diff/total = 6M/10M = 0.6 → target rate = 0.6×FP,
+        // negative since short dominates. Seed saved_factor at exactly that value.
+        setup_funding_params(&env, &ds, &admin, &mt, -6 * FLOAT_PRECISION / 10);
+
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &lt, true), &(2_000_000 * FLOAT_PRECISION));
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &st, false), &(8_000_000 * FLOAT_PRECISION));
+
+        let market = make_market_props(&mt, &it, &lt, &st);
+        let result = update_funding_state(&env, &ds, &admin, &market, 100);
+
+        assert!(
+            result.funding_factor_per_second < 0,
+            "shorts dominate → rate must be negative (shorts pay)"
+        );
+        assert!(
+            result.short_funding_per_size_delta > 0,
+            "short-side per-size delta must be positive (a debit) when shorts dominate, got {}",
+            result.short_funding_per_size_delta
+        );
+        assert!(
+            result.long_funding_per_size_delta < 0,
+            "long-side per-size delta must be negative (a credit) when shorts dominate, got {}",
+            result.long_funding_per_size_delta
+        );
+    }
+
+    /// Long-dominated OI: longs must pay (positive per-size delta, a debit for a
+    /// fresh long position) and shorts must receive (negative delta, a credit).
+    /// This mirrors the existing long-dominated coverage in
+    /// `funding_magnitude_change_no_event`, asserting on the deltas directly.
+    #[test]
+    fn funding_long_dominated_longs_pay_shorts_receive() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = make_market(&env);
+        let ds_c = DsClient::new(&env, &ds);
+
+        // $8M long vs $2M short OI → same 0.6 ratio, positive since long dominates.
+        setup_funding_params(&env, &ds, &admin, &mt, 6 * FLOAT_PRECISION / 10);
+
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &lt, true), &(8_000_000 * FLOAT_PRECISION));
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &st, false), &(2_000_000 * FLOAT_PRECISION));
+
+        let market = make_market_props(&mt, &it, &lt, &st);
+        let result = update_funding_state(&env, &ds, &admin, &market, 100);
+
+        assert!(
+            result.funding_factor_per_second > 0,
+            "longs dominate → rate must be positive (longs pay)"
+        );
+        assert!(
+            result.long_funding_per_size_delta > 0,
+            "long-side per-size delta must be positive (a debit) when longs dominate, got {}",
+            result.long_funding_per_size_delta
+        );
+        assert!(
+            result.short_funding_per_size_delta < 0,
+            "short-side per-size delta must be negative (a credit) when longs dominate, got {}",
+            result.short_funding_per_size_delta
+        );
+    }
+
+    /// Conservation: the USD amount the dominant side is charged must equal (up to
+    /// integer-rounding dust) the USD amount credited to the subordinate side —
+    /// funding never creates or destroys value, only moves it between sides.
+    #[test]
+    fn funding_conserves_value_across_long_and_short_sides() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = make_market(&env);
+        let ds_c = DsClient::new(&env, &ds);
+
+        // $3M long vs $7M short OI → diff/total = 4M/10M = 0.4, negative (short-dominant).
+        setup_funding_params(&env, &ds, &admin, &mt, -4 * FLOAT_PRECISION / 10);
+
+        let long_oi: i128 = 3_000_000 * FLOAT_PRECISION;
+        let short_oi: i128 = 7_000_000 * FLOAT_PRECISION;
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &lt, true), &long_oi);
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &st, false), &short_oi);
+
+        let market = make_market_props(&mt, &it, &lt, &st);
+        let result = update_funding_state(&env, &ds, &admin, &market, 100);
+
+        // The deltas must actually be nonzero, or the sum-to-zero check below would
+        // trivially (and vacuously) pass.
+        assert!(result.long_funding_per_size_delta != 0);
+        assert!(result.short_funding_per_size_delta != 0);
+
+        // Aggregate each side's per-size delta back to a USD amount over its full OI.
+        let long_usd = mul_div_wide(&env, long_oi, result.long_funding_per_size_delta, FLOAT_PRECISION);
+        let short_usd = mul_div_wide(&env, short_oi, result.short_funding_per_size_delta, FLOAT_PRECISION);
+        let net = long_usd + short_usd;
+
+        // Each side's per-size delta is floor-rounded independently, so re-aggregating
+        // over its full OI can lose up to that side's own OI (in USD) as dust; bound
+        // net by both sides' OI combined — a real sign inversion would fail this by
+        // orders of magnitude (net would be ~2x one side's total instead of near 0).
+        let tolerance = long_oi / FLOAT_PRECISION + short_oi / FLOAT_PRECISION;
+        assert!(
+            net.abs() <= tolerance,
+            "net funding across both sides must sum to ~zero (within rounding dust), got {} (tolerance {})",
+            net, tolerance
         );
     }
 

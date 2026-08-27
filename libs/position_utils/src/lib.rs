@@ -5,7 +5,7 @@
 
 use gmx_keys::{
     claimable_funding_amount_key, cumulative_borrowing_factor_key, funding_amount_per_size_key,
-    max_leverage_key, min_collateral_factor_key, position_fee_factor_key, position_key,
+    max_leverage_key, min_collateral_factor_key, position_fee_factor_key,
 };
 use gmx_market_utils::validate_open_interest;
 use gmx_math::{mul_div_wide, mul_div_wide_up, FLOAT_PRECISION, TOKEN_PRECISION};
@@ -32,6 +32,9 @@ trait IDataStore {
 /// `size_delta_usd` — the portion of the position being closed (= position.size_in_usd for full).
 ///
 /// Returns (pnl_usd, uncapped_pnl_usd) — same value for now; capping happens in get_pool_value.
+/// When prorating a loss (negative PnL), rounds the magnitude up so the trader pays the pool
+/// the full amount owed (protocol-favoring direction). For profit (positive PnL), floors toward
+/// zero (trader-favoring direction), already correct per GMX invariant.
 pub fn get_position_pnl_usd(
     env: &Env,
     position: &PositionProps,
@@ -57,8 +60,17 @@ pub fn get_position_pnl_usd(
         position.size_in_usd - position_value
     };
 
-    // Scale to the slice being closed
-    let pnl_usd = mul_div_wide(env, total_pnl, size_delta_usd, position.size_in_usd);
+    // Scale to the slice being closed, rounding based on sign:
+    //   Profit (total_pnl >= 0): use floor (mul_div_wide) → protocol favoring
+    //   Loss (total_pnl < 0): round magnitude up → pool gets full amount owed
+    let pnl_usd = if total_pnl >= 0 {
+        mul_div_wide(env, total_pnl, size_delta_usd, position.size_in_usd)
+    } else {
+        // For negative PnL, negate, round up, then negate back
+        let magnitude_rounded_up =
+            mul_div_wide_up(env, -total_pnl, size_delta_usd, position.size_in_usd);
+        -magnitude_rounded_up
+    };
 
     (pnl_usd, pnl_usd)
 }
@@ -308,9 +320,10 @@ pub fn is_liquidatable(
         collateral_token_price,
         TOKEN_PRECISION,
     );
-    // net_collateral excludes PnL — used for the min_collateral_factor adequacy check.
-    // PnL should not mask a collateral shortfall: a profitable unrealised gain does
-    // not mean the deposited collateral is sufficient to absorb liquidation costs.
+    // net_collateral (fees deducted, PnL not yet applied) feeds `remaining` below,
+    // which folds pnl_usd back in before either liquidation comparison (#406):
+    // an adverse index-price move must not be able to hide insolvency behind an
+    // unrealised loss that was excluded from the check.
     let net_collateral = collateral_usd - fees_usd;
     let remaining = net_collateral + pnl_usd;
 
@@ -330,21 +343,8 @@ pub fn is_liquidatable(
         min_collateral_factor,
         FLOAT_PRECISION,
     );
-    // Use net_collateral (no PnL) so unrealised gains cannot hide a collateral shortfall.
-    net_collateral < min_required
-}
-
-// ─── Position key ─────────────────────────────────────────────────────────────
-
-/// Compute the data_store key for a position.
-pub fn get_position_key(
-    env: &Env,
-    account: &Address,
-    market_token: &Address,
-    collateral_token: &Address,
-    is_long: bool,
-) -> BytesN<32> {
-    position_key(env, account, market_token, collateral_token, is_long)
+    // Fold PnL into the comparison so adverse index-price moves cannot hide insolvency.
+    remaining < min_required
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -606,6 +606,60 @@ mod tests {
         assert_eq!(
             pos.funding_fee_amount_per_size, global_value,
             "position tracker must be reset to current global after settlement"
+        );
+    }
+
+    // ── Issue #256: dominant OI side always pays the subordinate side ────────
+
+    /// Short-dominated market: a short position being decreased must be charged a
+    /// funding debit (funding_fee_amount > 0), never credited.
+    #[test]
+    fn get_position_fees_short_holder_pays_debit_when_shorts_dominate() {
+        let w = setup();
+        let ds_c = DsClient::new(&w.env, &w.ds);
+
+        // Shorts dominate → the short-side accumulator (short_token, is_long=false)
+        // increases, exactly as market_utils::update_funding_state computes it.
+        let fnd_key = gmx_keys::funding_amount_per_size_key(&w.env, &w.market_tk, &w.short_tk, false);
+        let funding_per_size: i128 = FP / 100_000;
+        ds_c.apply_delta_to_i128(&w.admin, &fnd_key, &funding_per_size);
+
+        let market = make_market(&w);
+        let mut position = make_position(&w, 1_000 * FP, ONE_TOKEN * 10, 2_000 * FP);
+        position.is_long = false;
+        position.collateral_token = w.short_tk.clone();
+
+        let fees = get_position_fees(&w.env, &w.ds, &market, &position, FP, 1_000 * FP, true);
+
+        assert!(
+            fees.funding_fee_amount > 0,
+            "short holder must be charged a funding debit when shorts dominate, got {}",
+            fees.funding_fee_amount
+        );
+    }
+
+    /// Long-dominated market: a long position being decreased must be charged a
+    /// funding debit (funding_fee_amount > 0), never credited.
+    #[test]
+    fn get_position_fees_long_holder_pays_debit_when_longs_dominate() {
+        let w = setup();
+        let ds_c = DsClient::new(&w.env, &w.ds);
+
+        // Longs dominate → the long-side accumulator (long_token, is_long=true) increases.
+        let fnd_key = gmx_keys::funding_amount_per_size_key(&w.env, &w.market_tk, &w.long_tk, true);
+        let funding_per_size: i128 = FP / 100_000;
+        ds_c.apply_delta_to_i128(&w.admin, &fnd_key, &funding_per_size);
+
+        let market = make_market(&w);
+        let position = make_position(&w, 1_000 * FP, ONE_TOKEN * 10, 2_000 * FP);
+        // default make_position is already is_long: true, collateral_token: long_tk
+
+        let fees = get_position_fees(&w.env, &w.ds, &market, &position, FP, 1_000 * FP, true);
+
+        assert!(
+            fees.funding_fee_amount > 0,
+            "long holder must be charged a funding debit when longs dominate, got {}",
+            fees.funding_fee_amount
         );
     }
 

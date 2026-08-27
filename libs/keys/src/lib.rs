@@ -2,6 +2,17 @@
 
 use soroban_sdk::{Address, Bytes, BytesN, Env};
 
+// ─── TTL bump policy (#659) ────────────────────────────────────────────────────
+//
+// Shared persistent-entry TTL policy, previously redeclared identically in
+// order_handler, data_store, and referral_storage.
+
+/// Target TTL (in ledgers) to bump a persistent entry to on renewal (~30 days
+/// at 5s/ledger).
+pub const PERSISTENT_BUMP_TARGET: u32 = 518_400;
+/// Renew an entry's TTL once its remaining TTL drops below this threshold.
+pub const MIN_BUMP_THRESHOLD: u32 = 259_200;
+
 // ─── Internal key builder ─────────────────────────────────────────────────────
 //
 // Each component is length-prefixed (2-byte BE length + bytes) so that
@@ -454,9 +465,28 @@ pub fn max_pool_amount_key(env: &Env, market: &Address, token: &Address) -> Byte
     sha256(env, &b)
 }
 
+/// Issue #279: minimum USD value (FLOAT_PRECISION-scaled) a deposit must meet
+/// to prevent dust LP positions. 0 means uncapped (default, no regression).
+pub fn min_deposit_usd_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "MIN_DEPOSIT_USD");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
 pub fn max_open_interest_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "MAX_OPEN_INTEREST");
+    push_addr(&mut b, env, market);
+    push_bool(&mut b, env, is_long);
+    sha256(env, &b)
+}
+
+/// Issue #278: per-market, per-side cap on a single position's size_in_usd.
+/// A value of 0 means uncapped.
+pub fn max_position_size_usd_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "MAX_POSITION_SIZE_USD");
     push_addr(&mut b, env, market);
     push_bool(&mut b, env, is_long);
     sha256(env, &b)
@@ -550,27 +580,6 @@ pub fn swap_impact_exponent_factor_key(env: &Env, market: &Address) -> BytesN<32
     sha256(env, &b)
 }
 
-pub fn max_pnl_factor_key(
-    env: &Env,
-    pnl_factor_type: &BytesN<32>,
-    market: &Address,
-    is_long: bool,
-) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "MAX_PNL_FACTOR");
-    b.extend_from_array(&pnl_factor_type.to_array());
-    push_addr(&mut b, env, market);
-    push_bool(&mut b, env, is_long);
-    sha256(env, &b)
-}
-
-pub fn min_market_tokens_for_first_deposit_key(env: &Env, market: &Address) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "MIN_MARKET_TOKENS_FOR_FIRST_DEPOSIT");
-    push_addr(&mut b, env, market);
-    sha256(env, &b)
-}
-
 /// Stable price for stablecoins (bypasses oracle spread)
 pub fn stable_price_key(env: &Env, token: &Address) -> BytesN<32> {
     let mut b = Bytes::new(env);
@@ -622,13 +631,6 @@ pub fn keeper_heartbeat_timeout_key(env: &Env, role: &BytesN<32>) -> BytesN<32> 
 /// Used when `keeper_heartbeat_timeout_key(role)` is unset in data_store.
 pub const DEFAULT_KEEPER_HEARTBEAT_TIMEOUT: u64 = 2880;
 
-/// Market token wasm hash (for factory to deploy LP tokens)
-pub fn market_token_wasm_hash_key(env: &Env) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "MARKET_TOKEN_WASM_HASH");
-    sha256(env, &b)
-}
-
 /// Global cap on swap path length (default 3 hops)
 pub fn max_swap_path_length_key(env: &Env) -> BytesN<32> {
     let mut b = Bytes::new(env);
@@ -644,8 +646,6 @@ pub fn ui_fee_factor_key(env: &Env, ui_fee_receiver: &Address) -> BytesN<32> {
     sha256(env, &b)
 }
 
-
-
 /// Max PnL factor for ADL triggering
 /// sha256("POSITION_MANAGER" ‖ owner ‖ market)
 pub fn position_manager_key(env: &Env, owner: &Address, market: &Address) -> BytesN<32> {
@@ -653,6 +653,13 @@ pub fn position_manager_key(env: &Env, owner: &Address, market: &Address) -> Byt
     push_str(&mut b, env, "POSITION_MANAGER");
     push_addr(&mut b, env, owner);
     push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+/// sha256("MIN_EXECUTION_FEE") — global minimum execution fee for all order types
+pub fn min_execution_fee_key(env: &Env) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "MIN_EXECUTION_FEE");
     sha256(env, &b)
 }
 
@@ -669,45 +676,6 @@ pub fn max_pnl_factor_for_adl_key(env: &Env, market: &Address, is_long: bool) ->
     push_str(&mut b, env, "MAX_PNL_FACTOR_FOR_ADL");
     push_addr(&mut b, env, market);
     push_bool(&mut b, env, is_long);
-    sha256(env, &b)
-}
-
-/// Referral code for an account
-pub fn referral_code_key(env: &Env, account: &Address) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "REFERRAL_CODE");
-    push_addr(&mut b, env, account);
-    sha256(env, &b)
-}
-
-/// Referrer for a given referral code
-pub fn referrer_key(env: &Env, code: &BytesN<32>) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "REFERRER");
-    b.extend_from_array(&code.to_array());
-    sha256(env, &b)
-}
-
-// ─── PnL factor type constants ────────────────────────────────────────────────
-
-/// sha256("MAX_PNL_FACTOR_FOR_TRADERS") — used in pool value calculation
-pub fn max_pnl_factor_for_traders_key(env: &Env) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "MAX_PNL_FACTOR_FOR_TRADERS");
-    sha256(env, &b)
-}
-
-/// sha256("MAX_PNL_FACTOR_FOR_DEPOSITS") — used during LP deposits
-pub fn max_pnl_factor_for_deposits_key(env: &Env) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "MAX_PNL_FACTOR_FOR_DEPOSITS");
-    sha256(env, &b)
-}
-
-/// sha256("MAX_PNL_FACTOR_FOR_WITHDRAWALS") — used during LP withdrawals
-pub fn max_pnl_factor_for_withdrawals_key(env: &Env) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "MAX_PNL_FACTOR_FOR_WITHDRAWALS");
     sha256(env, &b)
 }
 
@@ -743,7 +711,7 @@ pub fn fee_tier_volume_threshold_key(env: &Env, market: &Address, tier: u32) -> 
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "FEE_TIER_VOL_THRESH");
     push_addr(&mut b, env, market);
-    b.push_back((tier & 0xff) as u8);
+    b.append(&Bytes::from_slice(env, &tier.to_be_bytes()));
     sha256(env, &b)
 }
 
@@ -752,7 +720,7 @@ pub fn fee_tier_position_fee_factor_key(env: &Env, market: &Address, tier: u32) 
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "FEE_TIER_POS_FEE");
     push_addr(&mut b, env, market);
-    b.push_back((tier & 0xff) as u8);
+    b.append(&Bytes::from_slice(env, &tier.to_be_bytes()));
     sha256(env, &b)
 }
 
@@ -774,7 +742,52 @@ pub fn trader_volume_window_start_key(env: &Env, trader: &Address, market: &Addr
     sha256(env, &b)
 }
 
+// ─── Unpause timelock key (issue #282) ───────────────────────────────────────
+
+/// Ledger sequence at which `execute_unpause` is allowed (issue #282).
+/// Written by `schedule_unpause`; cleared when the market is re-paused or unpause executes.
+pub fn scheduled_unpause_ledger_key(env: &Env) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "SCHEDULED_UNPAUSE_LEDGER");
+    sha256(env, &b)
+}
+
+// ─── Auto-compound fee key (issue #285) ──────────────────────────────────────
+
+/// Bool stored in data_store: when `true`, position fees for `market` are retained
+/// in `pool_amount` rather than accrued to the claimable balance. (issue #285)
+pub fn auto_compound_fees_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "AUTO_COMPOUND_FEES");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+// ─── Keeper Reputation & Slashing Keys (Issue #514) ──────────────────────────
+
+pub fn keeper_execution_count_key(env: &Env, keeper: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "KEEPER_EXEC_COUNT");
+    push_addr(&mut b, env, keeper);
+    sha256(env, &b)
+}
+
+pub fn keeper_total_variance_key(env: &Env, keeper: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "KEEPER_TOTAL_VARIANCE");
+    push_addr(&mut b, env, keeper);
+    sha256(env, &b)
+}
+
+pub fn keeper_slash_amount_key(env: &Env, keeper: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "KEEPER_SLASH_AMOUNT");
+    push_addr(&mut b, env, keeper);
+    sha256(env, &b)
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
+
 
 #[cfg(test)]
 mod tests {

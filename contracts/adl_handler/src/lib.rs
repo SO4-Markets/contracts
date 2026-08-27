@@ -4,14 +4,17 @@
 //!
 //! Delegates actual position closure to order_handler since positions live there.
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    is_market_paused_key, market_index_token_key, market_long_token_key, market_short_token_key,
-    max_pnl_factor_for_adl_key, position_key, roles,
+    last_keeper_activity_key, market_index_token_key, market_long_token_key,
+    market_short_token_key, position_key, roles,
 };
-use gmx_market_utils::{get_pnl, get_pool_value};
-use gmx_math::{mul_div_wide, FLOAT_PRECISION};
 use gmx_position_utils::get_position_pnl_usd;
 use gmx_types::{MarketProps, PositionProps, PriceProps};
 use soroban_sdk::{
@@ -64,6 +67,7 @@ trait IDataStore {
     fn get_bool(env: Env, key: BytesN<32>) -> bool;
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
+    fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
 }
 
 #[allow(dead_code)]
@@ -140,45 +144,20 @@ impl AdlHandler {
         let market_props = load_market_props(&env, &data_store, &market);
         let oracle_client = OracleClient::new(&env, &oracle);
         let index_price_props = oracle_client.get_primary_price(&market_props.index_token);
-        let long_price = oracle_client
-            .get_primary_price(&market_props.long_token)
-            .mid_price();
-        let short_price = oracle_client
-            .get_primary_price(&market_props.short_token)
-            .mid_price();
-        let index_price = index_price_props.mid_price();
+        let long_price = oracle_client.get_primary_price(&market_props.long_token);
+        let short_price = oracle_client.get_primary_price(&market_props.short_token);
 
-        // Minimize pool value (conservative: harder to trigger ADL)
-        let pool_info = get_pool_value(
+        // Issue #377/#414: get_pnl's maximize is already handled inside market_utils via
+        // PriceProps; get_pool_value now minimizes pool value conservatively via maximize=false.
+        gmx_market_utils::is_adl_required(
             &env,
             &data_store,
             &market_props,
-            long_price,
-            short_price,
-            index_price,
-            false,
-        );
-        if pool_info.pool_value <= 0 {
-            return false;
-        }
-
-        // Maximize trader PnL (worst case for pool)
-        let pnl = get_pnl(&env, &data_store, &market_props, index_price, is_long, true);
-        if pnl <= 0 {
-            return false;
-        }
-
-        let pnl_factor = mul_div_wide(&env, pnl, FLOAT_PRECISION, pool_info.pool_value);
-
-        // A zero value means no threshold is configured; ADL is disabled for this market/side.
-        let max_pnl_factor = DataStoreClient::new(&env, &data_store)
-            .get_u128(&max_pnl_factor_for_adl_key(&env, &market, is_long))
-            as i128;
-
-        if max_pnl_factor == 0 {
-            return false;
-        }
-        pnl_factor > max_pnl_factor
+            &long_price,
+            &short_price,
+            &index_price_props,
+            is_long,
+        )
     }
 
     /// Execute ADL on a specific profitable position.
@@ -263,11 +242,56 @@ impl AdlHandler {
             &size_delta_usd,
         );
 
+        // Issue #614: record ADL_KEEPER activity so check_keeper_heartbeat can
+        // report this role as alive.
+        record_keeper_activity(
+            &env,
+            &data_store,
+            &env.current_contract_address(),
+            &roles::adl_keeper(&env),
+        );
+
         env.events().publish(
             (symbol_short!("adl_req"),),
             (account, market, is_long, size_delta_usd, pnl_usd),
         );
     }
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+fn load_market_props(env: &Env, data_store: &Address, market_token: &Address) -> MarketProps {
+    let ds = DataStoreClient::new(env, data_store);
+    let index_token = ds
+        .get_address(&market_index_token_key(env, market_token))
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidInput));
+    let long_token = ds
+        .get_address(&market_long_token_key(env, market_token))
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidInput));
+    let short_token = ds
+        .get_address(&market_short_token_key(env, market_token))
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidInput));
+    MarketProps {
+        market_token: market_token.clone(),
+        index_token,
+        long_token,
+        short_token,
+    }
+}
+
+/// Issue #614: stamp ADL_KEEPER's last activity, mirroring order_handler's
+/// identical helper for ORDER_KEEPER (issue #249). Without this,
+/// check_keeper_heartbeat(roles::adl_keeper) always reads
+/// last_active_ledger = 0 and reports permanently stale, regardless of how
+/// recently the ADL keeper actually executed.
+/// `caller` must hold CONTROLLER in data_store (the handler does).
+fn record_keeper_activity(env: &Env, data_store: &Address, caller: &Address, role: &BytesN<32>) {
+    let ledger = env.ledger().sequence() as u128;
+    DataStoreClient::new(env, data_store).set_u128(
+        caller,
+        &last_keeper_activity_key(env, role),
+        &ledger,
+    );
 }
 
 // ─── Tests — Issue #134: ADL E2E tests through deployed-style clients ─────────
@@ -281,6 +305,7 @@ mod tests {
     use deposit_handler::{DepositHandler, DepositHandlerClient};
     use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
     use gmx_keys::roles;
+    use gmx_keys::max_pnl_factor_for_adl_key;
     use gmx_math::FLOAT_PRECISION;
     use gmx_types::{CreateDepositParams, CreateOrderParams, OrderType, TokenPrice};
     use market_token::{MarketToken, MarketTokenClient as MtClient};
@@ -292,6 +317,7 @@ mod tests {
 
     const ONE_TOKEN: i128 = 10_000_000; // Stellar 7-decimal precision
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,
@@ -340,15 +366,6 @@ mod tests {
         let ord_vault = env.register(OrderVault, ());
         OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
-        let market_tk = env.register(MarketToken, ());
-        MtClient::new(&env, &market_tk).initialize(
-            &admin,
-            &rs,
-            &7u32,
-            &soroban_sdk::String::from_str(&env, "ADL Test Market"),
-            &soroban_sdk::String::from_str(&env, "GM"),
-        );
-
         let long_tk = env
             .register_stellar_asset_contract_v2(admin.clone())
             .address();
@@ -356,6 +373,17 @@ mod tests {
             .register_stellar_asset_contract_v2(admin.clone())
             .address();
         let index_tk = Address::generate(&env);
+
+        let market_tk = env.register(MarketToken, ());
+        MtClient::new(&env, &market_tk).initialize(
+            &admin,
+            &rs,
+            &7u32,
+            &soroban_sdk::String::from_str(&env, "ADL Test Market"),
+            &soroban_sdk::String::from_str(&env, "GM"),
+            &long_tk,
+            &short_tk,
+        );
 
         let dep_handler = env.register(DepositHandler, ());
         DepositHandlerClient::new(&env, &dep_handler).initialize(
@@ -520,6 +548,7 @@ mod tests {
                 min_output_amount: 0,
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
+                expiry_ledger: None,
             },
         );
         OHClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
@@ -603,6 +632,54 @@ mod tests {
         );
     }
 
+    /// Issue #614: execute_adl must record ADL_KEEPER's activity in
+    /// data_store, so check_keeper_heartbeat(roles::adl_keeper) reports the
+    /// role as alive (last_active_ledger == current ledger) instead of
+    /// permanently stale (last_active_ledger == 0).
+    #[test]
+    fn execute_adl_records_keeper_activity() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let trader = Address::generate(&w.env);
+
+        let entry_price = 1_000 * fp;
+        set_prices(&w, entry_price);
+        seed_pool(&w, ONE_TOKEN * 200);
+        set_prices(&w, entry_price);
+
+        let collateral = 5 * ONE_TOKEN;
+        let size_usd = 10_000 * fp;
+        open_long(&w, &trader, collateral, size_usd);
+
+        set_prices(&w, 2_000 * fp);
+
+        let low_threshold = fp / 1_000_000;
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &max_pnl_factor_for_adl_key(&w.env, &w.market_tk, true),
+            &(low_threshold as u128),
+        );
+
+        let key = last_keeper_activity_key(&w.env, &roles::adl_keeper(&w.env));
+        assert_eq!(ds_c.get_u128(&key), 0, "no activity recorded before ADL");
+
+        AdlHandlerClient::new(&w.env, &w.adl_handler).execute_adl(
+            &w.adl_keeper,
+            &trader,
+            &w.market_tk,
+            &w.long_tk,
+            &true,
+            &(size_usd / 4),
+        );
+
+        assert_eq!(
+            ds_c.get_u128(&key),
+            w.env.ledger().sequence() as u128,
+            "ADL_KEEPER activity must be recorded after a successful execute_adl"
+        );
+    }
+
     // ── Issue #134 Test 2: ADL reverts when PnL factor is below threshold ─────
 
     /// When the ADL threshold is set high enough that the current PnL ratio
@@ -647,6 +724,89 @@ mod tests {
             &w.long_tk,
             &true,
             &(500 * fp),
+        );
+    }
+
+    // ── Issue #377: get_pnl's maximize parameter must actually bound the price ─
+
+    /// index_tk with a min/max spread: long_tk/short_tk (which drive pool
+    /// value) stay pegged, so only the index-price bound fed into the PnL
+    /// calculation changes between calls.
+    fn set_index_spread(w: &World, pool_price: i128, index_min: i128, index_max: i128) {
+        let fp = FLOAT_PRECISION;
+        OClient::new(&w.env, &w.oracle).set_prices_simple(
+            &w.keeper,
+            &Vec::from_array(
+                &w.env,
+                [
+                    TokenPrice {
+                        token: w.long_tk.clone(),
+                        min: pool_price,
+                        max: pool_price,
+                    },
+                    TokenPrice {
+                        token: w.short_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: w.index_tk.clone(),
+                        min: index_min,
+                        max: index_max,
+                    },
+                ],
+            ),
+        );
+    }
+
+    /// Before the fix, get_pnl ignored `maximize` and always used a single
+    /// resolved price, so a wide index-price spread had no effect on the
+    /// reported PnL ratio. After the fix, adl_handler resolves the index
+    /// price via `pick_price_for_pnl(is_long, true)` before calling get_pnl,
+    /// so widening the spread (raising `max` while holding pool value's
+    /// mid-priced inputs fixed) must raise the long PnL factor and can push
+    /// `is_adl_required` from false to true.
+    #[test]
+    fn is_adl_required_reflects_index_price_max_bound_for_long_pnl() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let trader = Address::generate(&w.env);
+
+        let entry_price = 1_000 * fp;
+        set_prices(&w, entry_price);
+        seed_pool(&w, ONE_TOKEN * 200);
+        set_prices(&w, entry_price);
+
+        open_long(&w, &trader, 5 * ONE_TOKEN, 10_000 * fp);
+
+        // A threshold that a narrow (mid=2000) spread will not exceed, but
+        // that widening `max` alone (still mid=2000) does exceed.
+        let threshold = fp / 20; // 5%
+        DsClient::new(&w.env, &w.ds).set_u128(
+            &w.admin,
+            &max_pnl_factor_for_adl_key(&w.env, &w.market_tk, true),
+            &(threshold as u128),
+        );
+
+        // Narrow spread: min = max = 2000 → mid = 2000.
+        set_index_spread(&w, 2_000 * fp, 2_000 * fp, 2_000 * fp);
+        let required_narrow =
+            AdlHandlerClient::new(&w.env, &w.adl_handler).is_adl_required(&w.market_tk, &true);
+
+        // Wide spread: min = 1000, max = 3000 → mid is still 2000, but the
+        // maximize=true long PnL bound is now 3000.
+        set_index_spread(&w, 2_000 * fp, 1_000 * fp, 3_000 * fp);
+        let required_wide =
+            AdlHandlerClient::new(&w.env, &w.adl_handler).is_adl_required(&w.market_tk, &true);
+
+        assert!(
+            !required_narrow,
+            "narrow spread (mid=2000) must not exceed the 5% threshold"
+        );
+        assert!(
+            required_wide,
+            "widening the index-price max bound must raise the long PnL factor past the threshold, \
+             proving `maximize` now actually selects the max price instead of being ignored"
         );
     }
 
@@ -721,26 +881,5 @@ mod tests {
             !AdlHandlerClient::new(&w.env, &w.adl_handler).is_adl_required(&w.market_tk, &true),
             "ADL must not be required when position PnL is negative"
         );
-    }
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-fn load_market_props(env: &Env, data_store: &Address, market_token: &Address) -> MarketProps {
-    let ds = DataStoreClient::new(env, data_store);
-    let index_token = ds
-        .get_address(&market_index_token_key(env, market_token))
-        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidInput));
-    let long_token = ds
-        .get_address(&market_long_token_key(env, market_token))
-        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidInput));
-    let short_token = ds
-        .get_address(&market_short_token_key(env, market_token))
-        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidInput));
-    MarketProps {
-        market_token: market_token.clone(),
-        index_token,
-        long_token,
-        short_token,
     }
 }

@@ -10,13 +10,19 @@
 //!   6. Validate leverage and OI limits.
 //!   7. Persist updated position.
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use gmx_keys::{account_position_list_key, position_key, position_list_key};
+use gmx_keys::{account_position_list_key, collateral_sum_key, max_position_size_usd_key, pool_amount_key, claimable_fee_amount_key, position_key, position_list_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET};
 use gmx_market_utils::{
     apply_delta_to_open_interest, apply_delta_to_open_interest_in_tokens,
 };
 use gmx_math::{mul_div_wide, TOKEN_PRECISION};
+use gmx_position_utils::get_position_fees;
 use gmx_pricing_utils::get_execution_price;
 use gmx_types::{MarketProps, PositionProps, PriceProps};
 use soroban_sdk::{contracttype, Address, BytesN, Env};
@@ -27,7 +33,7 @@ trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn get_i128(env: Env, key: BytesN<32>) -> i128;
     fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
-    fn apply_delta_to_u128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> u128;
+    fn apply_delta_to_u128(env: Env, caller: Address, key: BytesN<32>, delta: &i128) -> u128;
     fn apply_delta_to_i128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> i128;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
     fn add_bytes32_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
@@ -56,6 +62,9 @@ pub struct IncreasePositionParams<'a> {
     pub index_token_price: &'a PriceProps,
     pub collateral_price: i128, // FLOAT_PRECISION
     pub current_time: u64,
+    /// true = maker (positive price impact), false = taker (negative price impact).
+    /// Selects position_fee_factor_key(market, for_positive_impact) for fee computation.
+    pub for_positive_impact: bool,
 }
 
 // ─── Main entry ───────────────────────────────────────────────────────────────
@@ -129,18 +138,54 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
         0
     };
 
-    // NOTE: position fees, borrowing/funding tracker syncs, collateral sum, fee pool writes,
-    // and validate_position are omitted to stay within Soroban's 40 ledger-entry budget.
-    // For the first positions on an empty market these are all zero/no-op. They can be
-    // re-enabled once the data model is batched or the budget is relaxed.
+    // Compute position fee using the shared helper (rounds up for protocol protection)
+    let ds = DataStoreClient::new(env, p.data_store);
+    let fees = get_position_fees(
+        env,
+        p.data_store,
+        p.market,
+        &position,
+        p.collateral_price,
+        p.size_delta_usd,
+        p.for_positive_impact,
+    );
+    let fee_tokens = fees.total_cost_amount;
+    let net_collateral = if p.collateral_amount > fee_tokens {
+        p.collateral_amount - fee_tokens
+    } else {
+        0
+    };
+    if fee_tokens > 0 {
+        let pool_key = pool_amount_key(env, &p.market.market_token, p.collateral_token);
+        ds.apply_delta_to_u128(p.caller, &pool_key, &fee_tokens);
+        // Track claimable fees for claim_fees entrypoint
+        ds.apply_delta_to_u128(
+            p.caller,
+            &claimable_fee_amount_key(env, &p.market.market_token, p.collateral_token),
+            &(fee_tokens as i128),
+        );
+    }
+    position.collateral_amount += net_collateral;
 
-    // Update collateral (no fee deduction for now)
-    position.collateral_amount += p.collateral_amount;
+    // Credit collateral_sum so decrease_position_utils (which debits it on close)
+    // never underflows a bucket that increase_position never funded.
+    if net_collateral > 0 {
+        let col_sum_key = collateral_sum_key(env, &p.market.market_token, p.collateral_token, p.is_long);
+        ds.apply_delta_to_u128(p.caller, &col_sum_key, &net_collateral);
+    }
 
     // Update position size
     position.size_in_usd += p.size_delta_usd;
     position.size_in_tokens += new_size_in_tokens;
     position.increased_at_time = p.current_time;
+
+    // Issue #278: per-trader (this position), per-market, per-side max size cap.
+    // 0 means uncapped (default, no regression for existing markets).
+    let max_pos_size_key = max_position_size_usd_key(env, &p.market.market_token, p.is_long);
+    let max_position_size_usd = ds.get_u128(&max_pos_size_key) as i128;
+    if max_position_size_usd > 0 && position.size_in_usd > max_position_size_usd {
+        soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(3u32));
+    }
 
     // Open interest deltas
     apply_delta_to_open_interest(
@@ -164,12 +209,18 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
 
     // 14. Persist
     env.storage().persistent().set(&storage_key, &position);
+    // Issue #658: renew the position's own TTL on every touch, matching the
+    // account/global position-list indexes that already do so via
+    // add_bytes32_to_set, so the index can't outlive the entry it points to.
+    env.storage()
+        .persistent()
+        .extend_ttl(&storage_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
 
     // If brand-new position, add to the tracking sets
     if is_new {
-        let ds = DataStoreClient::new(env, p.data_store);
-        ds.add_bytes32_to_set(p.caller, &position_list_key(env), &pos_key);
-        ds.add_bytes32_to_set(
+        let ds2 = DataStoreClient::new(env, p.data_store);
+        ds2.add_bytes32_to_set(p.caller, &position_list_key(env), &pos_key);
+        ds2.add_bytes32_to_set(
             p.caller,
             &account_position_list_key(env, p.account),
             &pos_key,
@@ -211,6 +262,7 @@ mod tests {
     /// 1 whole token at 7-decimal Stellar precision.
     const ONE_TOKEN: i128 = 10_000_000; // 10^7
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,
@@ -258,19 +310,6 @@ mod tests {
         let vault = env.register(OrderVault, ());
         OVClient::new(&env, &vault).initialize(&admin, &rs);
 
-        // Market token (LP + pool custodian)
-        let market_tk = env.register(MarketToken, ());
-        MtClient::new(&env, &market_tk).initialize(
-            &admin,
-            &rs,
-            &7u32,
-            &soroban_sdk::String::from_str(&env, "SO4 Market"),
-            &soroban_sdk::String::from_str(&env, "GM"),
-        );
-
-        // Grant market_token CONTROLLER so it can be used as pool custodian
-        rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
-
         // Underlying tokens
         let long_tk = env
             .register_stellar_asset_contract_v2(admin.clone())
@@ -279,6 +318,21 @@ mod tests {
             .register_stellar_asset_contract_v2(admin.clone())
             .address();
         let index_tk = Address::generate(&env);
+
+        // Market token (LP + pool custodian)
+        let market_tk = env.register(MarketToken, ());
+        MtClient::new(&env, &market_tk).initialize(
+            &admin,
+            &rs,
+            &7u32,
+            &soroban_sdk::String::from_str(&env, "SO4 Market"),
+            &soroban_sdk::String::from_str(&env, "GM"),
+            &long_tk,
+            &short_tk,
+        );
+
+        // Grant market_token CONTROLLER so it can be used as pool custodian
+        rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
 
         // Register market in DataStore
         let ds_c = DsClient::new(&env, &ds);
@@ -441,6 +495,7 @@ mod tests {
                     index_token_price: &index_price_props,
                     collateral_price: index_price,
                     current_time: 1_000,
+                    for_positive_impact: true,
                 },
             )
         });
@@ -492,6 +547,7 @@ mod tests {
                     index_token_price: &index_price_props,
                     collateral_price: index_price,
                     current_time: 1_000,
+                    for_positive_impact: true,
                 },
             )
         });
@@ -550,6 +606,7 @@ mod tests {
                     index_token_price: &index_price_props,
                     collateral_price: index_price,
                     current_time: 1_000,
+                    for_positive_impact: true,
                 },
             )
         });
@@ -627,6 +684,7 @@ mod tests {
                     index_token_price: &index_price_props,
                     collateral_price: index_price,
                     current_time: 1_000,
+                    for_positive_impact: true,
                 },
             )
         });
@@ -662,6 +720,7 @@ mod tests {
             index_token_price: index_price_props,
             collateral_price: index_price,
             current_time: 1_000,
+            for_positive_impact: true,
         }
     }
 
@@ -827,6 +886,7 @@ mod tests {
             index_token_price: &price_props,
             collateral_price: index_price,
             current_time: 1_000,
+            for_positive_impact: true,
         };
         let short_pos = w
             .env
@@ -834,6 +894,239 @@ mod tests {
         assert!(
             short_pos.size_in_usd > 0,
             "short position must succeed when only long cap is set"
+        );
+    }
+
+    // ── Issue #278: max position size per trader ──────────────────────────────
+
+    /// A position increase beyond the configured max_position_size_usd cap must revert.
+    #[test]
+    #[should_panic]
+    fn max_position_size_over_cap_reverts() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let index_price = 2_000 * fp;
+
+        configure_market(&w, 10);
+        set_prices(&w, index_price);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(ONE_TOKEN * 500));
+
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::max_position_size_usd_key(&w.env, &w.market_tk, true),
+            &(50_000u128 * fp as u128),
+        );
+
+        let market = gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
+        let price_props = gmx_types::PriceProps { min: index_price, max: index_price };
+
+        // 60,000 USD position against a 50,000 USD cap must revert.
+        w.env.as_contract(&w.admin, || {
+            increase_position(
+                &w.env,
+                &open_params(&w, &market, &price_props, 60_000 * fp, index_price),
+            );
+        });
+    }
+
+    /// Two independent traders each opening a 40,000 USD position against a 50,000 USD
+    /// cap must both succeed — the cap is per position (per trader), not a shared total.
+    #[test]
+    fn max_position_size_two_traders_under_cap_both_succeed() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let index_price = 2_000 * fp;
+
+        configure_market(&w, 10);
+        set_prices(&w, index_price);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(ONE_TOKEN * 500));
+
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::max_position_size_usd_key(&w.env, &w.market_tk, true),
+            &(50_000u128 * fp as u128),
+        );
+
+        let market = gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
+        let price_props = gmx_types::PriceProps { min: index_price, max: index_price };
+
+        let trader_a = Address::generate(&w.env);
+        let params_a = IncreasePositionParams {
+            data_store: &w.ds,
+            caller: &w.admin,
+            account: &trader_a,
+            receiver: &trader_a,
+            market: &market,
+            collateral_token: &w.long_tk,
+            size_delta_usd: 40_000 * fp,
+            collateral_amount: ONE_TOKEN * 4_000,
+            acceptable_price: 0,
+            is_long: true,
+            index_token_price: &price_props,
+            collateral_price: index_price,
+            current_time: 1_000,
+            for_positive_impact: true,
+        };
+        let pos_a = w.env.as_contract(&w.admin, || increase_position(&w.env, &params_a));
+        assert_eq!(pos_a.size_in_usd, 40_000 * fp, "trader A's 40,000 USD position must succeed");
+
+        let trader_b = Address::generate(&w.env);
+        let params_b = IncreasePositionParams { account: &trader_b, receiver: &trader_b, ..params_a };
+        let pos_b = w.env.as_contract(&w.admin, || increase_position(&w.env, &params_b));
+        assert_eq!(pos_b.size_in_usd, 40_000 * fp, "trader B's own 40,000 USD position must independently succeed");
+    }
+
+    // ── Issue #284: maker/taker fee tier differentiation ─────────────────────
+
+    /// Maker (for_positive_impact=true) and taker (for_positive_impact=false) rates are
+    /// independent storage keys. When set to different values, the taker position has more
+    /// fee deducted and therefore less net collateral than the equivalent maker position.
+    #[test]
+    fn maker_fee_lower_than_taker_fee_when_rates_differ() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let index_price = 2_000 * fp;
+
+        // Set maker (positive impact) to 10 bps, taker (negative impact) to 30 bps
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::position_fee_factor_key(&w.env, &w.market_tk, true),
+            &(10 * fp as u128 / 10_000),
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::position_fee_factor_key(&w.env, &w.market_tk, false),
+            &(30 * fp as u128 / 10_000),
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::max_leverage_key(&w.env, &w.market_tk),
+            &(50 * fp as u128),
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk),
+            &(10_000 * ONE_TOKEN as u128),
+        );
+        set_prices(&w, index_price);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(ONE_TOKEN * 200));
+
+        let market = gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
+        let price_props = gmx_types::PriceProps { min: index_price, max: index_price };
+        let collateral = ONE_TOKEN * 10;
+        let size_delta = 1_000 * fp;
+
+        // Maker position
+        let maker_pos = w.env.as_contract(&w.admin, || {
+            increase_position(&w.env, &IncreasePositionParams {
+                data_store: &w.ds,
+                caller: &w.admin,
+                account: &w.user,
+                receiver: &w.user,
+                market: &market,
+                collateral_token: &w.long_tk,
+                size_delta_usd: size_delta,
+                collateral_amount: collateral,
+                acceptable_price: 0,
+                is_long: true,
+                index_token_price: &price_props,
+                collateral_price: index_price,
+                current_time: 1_000,
+                for_positive_impact: true,
+            })
+        });
+
+        // Taker position (separate account, same collateral and size)
+        let taker_pos = w.env.as_contract(&w.admin, || {
+            increase_position(&w.env, &IncreasePositionParams {
+                data_store: &w.ds,
+                caller: &w.admin,
+                account: &Address::generate(&w.env),
+                receiver: &w.user,
+                market: &market,
+                collateral_token: &w.long_tk,
+                size_delta_usd: size_delta,
+                collateral_amount: collateral,
+                acceptable_price: 0,
+                is_long: true,
+                index_token_price: &price_props,
+                collateral_price: index_price,
+                current_time: 1_000,
+                for_positive_impact: false,
+            })
+        });
+
+        // Taker pays 3× the fee, so has less collateral remaining
+        assert!(
+            maker_pos.collateral_amount > taker_pos.collateral_amount,
+            "maker collateral {} must exceed taker collateral {} (maker=10bps, taker=30bps)",
+            maker_pos.collateral_amount,
+            taker_pos.collateral_amount,
+        );
+    }
+
+    /// When maker and taker rates are identical, both positions produce equal net collateral
+    /// regardless of the for_positive_impact flag.
+    #[test]
+    fn equal_rates_give_equal_collateral_for_maker_and_taker() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let index_price = 2_000 * fp;
+
+        configure_market(&w, 20); // same 20 bps for both directions
+        set_prices(&w, index_price);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(ONE_TOKEN * 200));
+
+        let market = gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
+        let price_props = gmx_types::PriceProps { min: index_price, max: index_price };
+        let collateral = ONE_TOKEN * 10;
+        let size_delta = 1_000 * fp;
+
+        let maker_pos = w.env.as_contract(&w.admin, || {
+            increase_position(&w.env, &IncreasePositionParams {
+                data_store: &w.ds,
+                caller: &w.admin,
+                account: &w.user,
+                receiver: &w.user,
+                market: &market,
+                collateral_token: &w.long_tk,
+                size_delta_usd: size_delta,
+                collateral_amount: collateral,
+                acceptable_price: 0,
+                is_long: true,
+                index_token_price: &price_props,
+                collateral_price: index_price,
+                current_time: 1_000,
+                for_positive_impact: true,
+            })
+        });
+
+        let taker_pos = w.env.as_contract(&w.admin, || {
+            increase_position(&w.env, &IncreasePositionParams {
+                data_store: &w.ds,
+                caller: &w.admin,
+                account: &Address::generate(&w.env),
+                receiver: &w.user,
+                market: &market,
+                collateral_token: &w.long_tk,
+                size_delta_usd: size_delta,
+                collateral_amount: collateral,
+                acceptable_price: 0,
+                is_long: true,
+                index_token_price: &price_props,
+                collateral_price: index_price,
+                current_time: 1_000,
+                for_positive_impact: false,
+            })
+        });
+
+        assert_eq!(
+            maker_pos.collateral_amount,
+            taker_pos.collateral_amount,
+            "equal fee rates must produce equal net collateral for maker and taker"
         );
     }
 }

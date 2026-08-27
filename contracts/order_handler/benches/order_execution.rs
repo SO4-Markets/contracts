@@ -31,10 +31,12 @@ use gmx_types::{OrderType, TokenPrice};
 const FLOAT_PRECISION: i128 = 1_000_000_000_000_000_000_000_000_000_000;
 const TOKEN_PRECISION: i128 = 10_000_000;
 const INDEX_PRICE: i128 = 2_000 * TOKEN_PRECISION;
+#[allow(dead_code)]
 const COLLATERAL_PRICE: i128 = TOKEN_PRECISION; // stable = $1
 const COLLATERAL_AMOUNT: i128 = 100 * TOKEN_PRECISION; // 100 tokens
 const SIZE_USD: i128 = 500 * TOKEN_PRECISION; // 5× leverage
 
+#[allow(dead_code)]
 struct World {
     env: Env,
     keeper: Address,
@@ -71,6 +73,9 @@ fn setup() -> World {
     let vault = env.register(OrderVault, ());
     OrderVaultClient::new(&env, &vault).initialize(&admin, &rs);
 
+    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
     let market_tk = env.register(MarketToken, ());
     MarketTokenClient::new(&env, &market_tk).initialize(
         &admin,
@@ -78,6 +83,8 @@ fn setup() -> World {
         &7u32,
         &soroban_sdk::String::from_str(&env, "GMX Market Token"),
         &soroban_sdk::String::from_str(&env, "GM"),
+        &long_tk,
+        &short_tk,
     );
 
     let handler = env.register(OrderHandler, ());
@@ -87,8 +94,6 @@ fn setup() -> World {
 
     rs_c.grant_role(&admin, &handler, &roles::controller(&env));
 
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
     let index_tk = Address::generate(&env);
 
     let ds_c = DataStoreClient::new(&env, &ds);
@@ -137,6 +142,7 @@ fn do_create_order(w: &World, user: &Address) -> soroban_sdk::BytesN<32> {
             min_output_amount: 0,
             order_type: OrderType::MarketIncrease,
             is_long: true,
+            expiry_ledger: None,
         },
     )
 }
@@ -232,6 +238,7 @@ fn bench_full_cycle(c: &mut Criterion) {
                         min_output_amount: 0,
                         order_type: OrderType::MarketDecrease,
                         is_long: true,
+                        expiry_ledger: None,
                     },
                 );
                 OrderHandlerClient::new(&w.env, &w.handler)
@@ -260,6 +267,7 @@ fn bench_full_cycle(c: &mut Criterion) {
             min_output_amount: 0,
             order_type: OrderType::MarketDecrease,
             is_long: true,
+            expiry_ledger: None,
         },
     );
     w.env.cost_estimate().budget().reset_default();

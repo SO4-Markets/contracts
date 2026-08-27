@@ -3,11 +3,16 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
+use gmx_keys::{MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
     Bytes, BytesN, Env,
 };
 
+// ─── TTL constants (#297) ─────────────────────────────────────────────────────
+// Referral codes and trader links are long-lived; bump only when TTL < 15 days.
+// At 5 s/ledger: PERSISTENT_BUMP_TARGET ≈ 30 days, MIN_BUMP_THRESHOLD ≈ 15 days.
+// Values shared via gmx_keys (issue #659).
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum number of bytes in a referral code.
@@ -90,6 +95,8 @@ pub enum Error {
     CodeTooLong = 9,
     InvalidCodeCharacters = 10,
     EmptyCode = 11,
+    InvalidTierConfig = 12,
+    SelfReferralNotAllowed = 13,
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -159,6 +166,7 @@ impl ReferralStorage {
             panic_with_error!(&env, Error::CodeAlreadyTaken);
         }
         env.storage().persistent().set(&key, &caller);
+        env.storage().persistent().extend_ttl(&key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         env.events().publish_event(&CodeRegistered { caller, code });
     }
 
@@ -166,28 +174,37 @@ impl ReferralStorage {
     pub fn set_trader_referral_code(env: Env, trader: Address, code: Bytes) {
         trader.require_auth();
         // Validate code exists
-        if !env
-            .storage()
-            .persistent()
-            .has(&ReferralKey::CodeOwner(code.clone()))
-        {
-            panic_with_error!(&env, Error::CodeNotFound);
+        let owner_key = ReferralKey::CodeOwner(code.clone());
+        let owner: Address = match env.storage().persistent().get(&owner_key) {
+            Some(owner) => owner,
+            None => panic_with_error!(&env, Error::CodeNotFound),
+        };
+        // Reject self-referral: a trader may not link to a code they own,
+        // which would let them collect both the trader-side discount and
+        // the referrer-side rebate on their own volume.
+        if owner == trader {
+            panic_with_error!(&env, Error::SelfReferralNotAllowed);
         }
-        env.storage()
-            .persistent()
-            .set(&ReferralKey::TraderCode(trader.clone()), &code);
+        let trader_key = ReferralKey::TraderCode(trader.clone());
+        env.storage().persistent().set(&trader_key, &code);
+        env.storage().persistent().extend_ttl(&trader_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        // Also keep the code-owner entry alive while a trader references it.
+        env.storage().persistent().extend_ttl(&owner_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         env.events().publish_event(&TraderCodeSet { trader, code });
     }
 
     /// Look up the referral code for a trader, and return the referrer's address.
     pub fn get_trader_referrer(env: Env, trader: Address) -> Option<Address> {
-        let code: Bytes = env
-            .storage()
-            .persistent()
-            .get(&ReferralKey::TraderCode(trader))?;
-        env.storage()
-            .persistent()
-            .get(&ReferralKey::CodeOwner(code))
+        let trader_key = ReferralKey::TraderCode(trader);
+        // Issue #443: TraderCode is always stored as `Bytes` (referral codes are
+        // 1-20 bytes, never exactly 32), so this must read back as `Bytes`, not
+        // the fixed-size `BytesN<32>` the earlier version of this function used.
+        let code: Bytes = env.storage().persistent().get(&trader_key)?;
+        env.storage().persistent().extend_ttl(&trader_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        let owner_key = ReferralKey::CodeOwner(code);
+        let referrer: Address = env.storage().persistent().get(&owner_key)?;
+        env.storage().persistent().extend_ttl(&owner_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        Some(referrer)
     }
 
     /// Return the referral code for a trader, or None.
@@ -211,9 +228,9 @@ impl ReferralStorage {
         if tier > 2 {
             panic_with_error!(&env, Error::InvalidTier);
         }
-        env.storage()
-            .persistent()
-            .set(&ReferralKey::ReferrerTier(referrer), &tier);
+        let tier_key = ReferralKey::ReferrerTier(referrer);
+        env.storage().persistent().set(&tier_key, &tier);
+        env.storage().persistent().extend_ttl(&tier_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
     }
 
     /// Configure the rebate/discount parameters for a tier (admin only).
@@ -230,9 +247,18 @@ impl ReferralStorage {
         if tier > 2 {
             panic_with_error!(&env, Error::InvalidTier);
         }
+        let tier_key = ReferralKey::TierConfig(tier);
+        env.storage().persistent().set(&tier_key, &config);
+        env.storage().persistent().extend_ttl(&tier_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         // Validate config parameters
-        if config.total_rebate_bps > 10000 || config.discount_share_bps > 10000 {
-            panic_with_error!(&env, Error::InvalidInput);
+        let discount_bps = ((config.total_rebate_bps as u64) * (config.discount_share_bps as u64) / 10000) as u32;
+        let rebate_bps = if config.total_rebate_bps >= discount_bps {
+            config.total_rebate_bps - discount_bps
+        } else {
+            panic_with_error!(&env, Error::InvalidTierConfig);
+        };
+        if discount_bps > 10000 || rebate_bps > 10000 || config.total_rebate_bps > 10000 || config.discount_share_bps > 10000 {
+            panic_with_error!(&env, Error::InvalidTierConfig);
         }
         env.storage()
             .persistent()
@@ -259,6 +285,32 @@ impl ReferralStorage {
             .publish_event(&CodeOwnershipTransferred { code, from, to });
     }
 
+    /// Self-service keep-alive for a registered code (issue #445).
+    ///
+    /// `register_code` only sets the `CodeOwner` entry's initial TTL, and that
+    /// TTL is otherwise only bumped as a side effect of a trader interacting
+    /// with the code. A code nobody is actively trading with can therefore run
+    /// out its TTL; once archived, `register_code`'s existence check reads as
+    /// "unregistered" and a different address can claim the same code string,
+    /// silently taking over any trader still linked to it. Calling this lets
+    /// the current owner extend the TTL at will, independent of trader
+    /// activity. Only the current owner may call it.
+    pub fn renew_code(env: Env, caller: Address, code: Bytes) {
+        caller.require_auth();
+        let key = ReferralKey::CodeOwner(code);
+        let owner: Address = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::CodeNotFound));
+        if owner != caller {
+            panic_with_error!(&env, Error::NotCodeOwner);
+        }
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+    }
+
     /// Return the owner address for a given referral code, or None if unregistered.
     pub fn get_code_owner(env: Env, code: Bytes) -> Option<Address> {
         env.storage()
@@ -268,35 +320,36 @@ impl ReferralStorage {
 
     /// Return the fee discount bps for a trader given their referral code, or 0 if none.
     pub fn get_trader_discount_bps(env: Env, trader: Address) -> u32 {
-        let code: Bytes = match env
-            .storage()
-            .persistent()
-            .get(&ReferralKey::TraderCode(trader))
-        {
+        let trader_key = ReferralKey::TraderCode(trader);
+        // Issue #443: TraderCode is always stored as `Bytes` (referral codes are
+        // 1-20 bytes, never exactly 32), so this must read back as `Bytes`, not
+        // the fixed-size `BytesN<32>` the earlier version of this function used.
+        let code: Bytes = match env.storage().persistent().get(&trader_key) {
             Some(c) => c,
             None => return 0,
         };
-        let referrer: Address = match env
-            .storage()
-            .persistent()
-            .get(&ReferralKey::CodeOwner(code))
-        {
+        env.storage().persistent().extend_ttl(&trader_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+
+        let owner_key = ReferralKey::CodeOwner(code);
+        let referrer: Address = match env.storage().persistent().get(&owner_key) {
             Some(r) => r,
             None => return 0,
         };
-        let tier: u32 = env
-            .storage()
-            .persistent()
-            .get(&ReferralKey::ReferrerTier(referrer))
-            .unwrap_or(0);
-        let config: TierConfig = match env
-            .storage()
-            .persistent()
-            .get(&ReferralKey::TierConfig(tier))
-        {
+        env.storage().persistent().extend_ttl(&owner_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+
+        let tier_key = ReferralKey::ReferrerTier(referrer);
+        let tier: u32 = env.storage().persistent().get(&tier_key).unwrap_or(0);
+        if tier > 0 {
+            env.storage().persistent().extend_ttl(&tier_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        }
+
+        let config_key = ReferralKey::TierConfig(tier);
+        let config: TierConfig = match env.storage().persistent().get(&config_key) {
             Some(c) => c,
             None => return 0,
         };
+        env.storage().persistent().extend_ttl(&config_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+
         // discount = total_rebate * discount_share / 10_000
         config.total_rebate_bps * config.discount_share_bps / 10_000
     }
@@ -335,6 +388,12 @@ impl ReferralStorage {
         if tier == 0 || tier > 2 {
             panic_with_error!(&env, Error::InvalidTier);
         }
+        // Issue #636: a zero threshold would make increment_referrer_volume's
+        // `cumulative_volume >= threshold` check trivially true for any nonzero
+        // (unsigned) volume, instantly qualifying every referrer for this tier.
+        if threshold_usd == 0 {
+            panic_with_error!(&env, Error::InvalidInput);
+        }
         env.storage()
             .persistent()
             .set(&ReferralKey::TierUpgradeThreshold(tier), &threshold_usd);
@@ -346,6 +405,32 @@ impl ReferralStorage {
             .persistent()
             .get(&ReferralKey::ReferrerVolume(referrer))
             .unwrap_or(0u128)
+    }
+
+    /// Admin-only override for a referrer's stored lifetime volume (issue #444).
+    ///
+    /// `increment_referrer_volume`'s auto-upgrade re-evaluates tier thresholds
+    /// purely from this value, which otherwise only ever grows. A manual
+    /// `set_referrer_tier` downgrade is therefore not durable on its own: the
+    /// very next trade reads the unchanged, still-large cumulative volume and
+    /// silently re-upgrades the referrer right back to (or above) the tier an
+    /// admin just removed. Call this alongside a manual tier change to make
+    /// the downgrade (or any other volume correction) stick.
+    pub fn set_referrer_volume(env: Env, admin: Address, referrer: Address, volume_usd: u128) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if admin != stored_admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        let vol_key = ReferralKey::ReferrerVolume(referrer);
+        env.storage().persistent().set(&vol_key, &volume_usd);
+        env.storage()
+            .persistent()
+            .extend_ttl(&vol_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
     }
 
     /// Called by the authorized order_handler after each trade settlement.
@@ -372,6 +457,8 @@ impl ReferralStorage {
         let prev_volume: u128 = env.storage().persistent().get(&vol_key).unwrap_or(0u128);
         let cumulative_volume = prev_volume.saturating_add(volume_usd);
         env.storage().persistent().set(&vol_key, &cumulative_volume);
+        // Extend TTL so volume counter doesn't expire between trades
+        env.storage().persistent().extend_ttl(&vol_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
 
         // Auto-upgrade: find the highest tier whose threshold the referrer now qualifies for
         let old_tier: u32 = env
@@ -383,11 +470,14 @@ impl ReferralStorage {
         let mut new_tier = old_tier;
         let mut t = old_tier + 1;
         while t <= 2 {
+            let threshold_key = ReferralKey::TierUpgradeThreshold(t);
             if let Some(threshold) = env
                 .storage()
                 .persistent()
-                .get::<_, u128>(&ReferralKey::TierUpgradeThreshold(t))
+                .get::<_, u128>(&threshold_key)
             {
+                // Extend TTL on every read so config value doesn't expire
+                env.storage().persistent().extend_ttl(&threshold_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
                 if cumulative_volume >= threshold {
                     new_tier = t;
                 }
@@ -546,6 +636,41 @@ mod tests {
             discount_share_bps: 10_000,
         };
         client(&w).set_tier_config(&w.admin, &1u32, &cfg);
+    }
+
+    /// Unit test: valid tier config (1000 bps discount + 200 bps rebate) — succeeds
+    #[test]
+    fn set_tier_config_valid_discount_and_rebate_succeeds() {
+        let w = setup();
+        let cfg = TierConfig {
+            total_rebate_bps: 1200,      // total rebate (discount + rebate)
+            discount_share_bps: 8333,    // discount share (~83.33% of 1200 = 1000)
+        };
+        client(&w).set_tier_config(&w.admin, &0u32, &cfg);
+    }
+
+    /// Unit test: discount = 10_001 — reverts
+    #[test]
+    #[should_panic]
+    fn set_tier_config_discount_overflow_reverts() {
+        let w = setup();
+        let cfg = TierConfig {
+            total_rebate_bps: 10_001,
+            discount_share_bps: 10_000,
+        };
+        client(&w).set_tier_config(&w.admin, &0u32, &cfg);
+    }
+
+    /// Unit test: discount = 9_000, rebate = 2_000 (sum = 11_000) — reverts
+    #[test]
+    #[should_panic]
+    fn set_tier_config_sum_overflow_reverts() {
+        let w = setup();
+        let cfg = TierConfig {
+            total_rebate_bps: 11_000,
+            discount_share_bps: 8181,    // 9000 discount share (9000/11000 * 10000)
+        };
+        client(&w).set_tier_config(&w.admin, &0u32, &cfg);
     }
 
     // ─── Issue #89: valid configs persist and are readable ───────────────────
@@ -734,6 +859,53 @@ mod tests {
         assert_eq!(discount, 500);
     }
 
+    // ─── Issue #445: self-service code renewal ───────────────────────────────
+
+    /// The current owner can renew their own code without reverting.
+    #[test]
+    fn renew_code_owner_succeeds() {
+        let w = setup();
+        let alice = Address::generate(&w.env);
+        let code = make_code(&w.env, 0x10);
+        client(&w).register_code(&alice, &code);
+        client(&w).renew_code(&alice, &code);
+        assert_eq!(client(&w).get_code_owner(&code), Some(alice));
+    }
+
+    /// A non-owner attempting to renew someone else's code must revert with NotCodeOwner.
+    #[test]
+    fn renew_code_non_owner_rejected() {
+        let w = setup();
+        let alice = Address::generate(&w.env);
+        let mallory = Address::generate(&w.env);
+        let code = make_code(&w.env, 0x11);
+        client(&w).register_code(&alice, &code);
+
+        let result = client(&w).try_renew_code(&mallory, &code);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::NotCodeOwner as u32
+            )))
+        );
+    }
+
+    /// Renewing a code that was never registered must revert with CodeNotFound.
+    #[test]
+    fn renew_code_unregistered_rejected() {
+        let w = setup();
+        let alice = Address::generate(&w.env);
+        let code = make_code(&w.env, 0x12);
+
+        let result = client(&w).try_renew_code(&alice, &code);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::CodeNotFound as u32
+            )))
+        );
+    }
+
     // ─── Issue #236: referral code length and character set validation ────────
 
     /// Empty code must revert with EmptyCode.
@@ -781,6 +953,37 @@ mod tests {
                 Error::InvalidCodeCharacters as u32
             )))
         );
+    }
+
+    // ─── Issue #378: self-referral guard ─────────────────────────────────────
+
+    /// A trader linking to a code they own themselves must revert with
+    /// SelfReferralNotAllowed, preventing self-referral fee/rebate stacking.
+    #[test]
+    fn set_trader_referral_code_self_referral_reverts() {
+        let w = setup();
+        let trader = Address::generate(&w.env);
+        let code = make_code(&w.env, 1);
+        client(&w).register_code(&trader, &code);
+        let result = client(&w).try_set_trader_referral_code(&trader, &code);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::SelfReferralNotAllowed as u32
+            )))
+        );
+    }
+
+    /// A trader linking to a code owned by someone else must still succeed.
+    #[test]
+    fn set_trader_referral_code_third_party_succeeds() {
+        let w = setup();
+        let trader = Address::generate(&w.env);
+        let referrer = Address::generate(&w.env);
+        let code = make_code(&w.env, 2);
+        client(&w).register_code(&referrer, &code);
+        client(&w).set_trader_referral_code(&trader, &code);
+        assert_eq!(client(&w).get_trader_referrer(&trader), Some(referrer));
     }
 
     /// Code of exactly MAX_REFERRAL_CODE_LENGTH characters must succeed.
@@ -856,6 +1059,16 @@ mod tests {
         assert_eq!(client(&w).get_trader_discount_bps(&trader), 1_500);
     }
 
+    /// Issue #636: a zero threshold would make `cumulative_volume >= threshold`
+    /// trivially true for any nonzero (unsigned) volume, instantly qualifying
+    /// every referrer for that tier at their very first trade.
+    #[test]
+    #[should_panic]
+    fn set_tier_upgrade_threshold_rejects_zero() {
+        let w = setup();
+        client(&w).set_tier_upgrade_threshold(&w.admin, &1u32, &0u128);
+    }
+
     /// Volume never resets; tier only goes up.
     #[test]
     fn volume_accumulates_and_tier_never_decreases() {
@@ -873,5 +1086,111 @@ mod tests {
         // Another increment below threshold — tier stays at 1 (not reset)
         client(&w).increment_referrer_volume(&order_handler, &referrer, &1u128);
         assert_eq!(client(&w).get_referrer_cumulative_volume(&referrer), 2_001u128);
+    }
+
+    // ─── Issue #444: manual tier downgrade must be durable ───────────────────
+
+    /// Without a volume reset, the very next trade after a manual admin
+    /// downgrade silently re-upgrades the referrer — this is the bug being
+    /// fixed, captured so a regression is caught if the auto-upgrade path
+    /// changes.
+    #[test]
+    fn manual_downgrade_alone_is_reverted_by_next_trade() {
+        let w = setup();
+        let referrer = Address::generate(&w.env);
+        let order_handler = Address::generate(&w.env);
+
+        client(&w).set_order_handler(&w.admin, &order_handler);
+        client(&w).set_tier_upgrade_threshold(&w.admin, &1u32, &1_000u128);
+
+        client(&w).increment_referrer_volume(&order_handler, &referrer, &1_000u128);
+        client(&w).set_referrer_tier(&w.admin, &referrer, &0u32);
+
+        // Cumulative volume (1_000) still clears the tier-1 threshold, so an
+        // ordinary trade re-upgrades the referrer even though admin just
+        // downgraded them.
+        client(&w).increment_referrer_volume(&order_handler, &referrer, &1u128);
+        let code = Bytes::from_slice(&w.env, b"REFCODE2");
+        let trader = Address::generate(&w.env);
+        client(&w).register_code(&referrer, &code);
+        client(&w).set_tier_config(
+            &w.admin,
+            &1u32,
+            &TierConfig { total_rebate_bps: 2_000, discount_share_bps: 5_000 },
+        );
+        client(&w).set_trader_referral_code(&trader, &code);
+        assert_eq!(
+            client(&w).get_trader_discount_bps(&trader),
+            1_000,
+            "tier 1 discount must be back in effect: downgrade was reverted by the next trade"
+        );
+    }
+
+    /// Pairing the admin downgrade with `set_referrer_volume` makes it stick:
+    /// the next trade no longer re-crosses the threshold, so the referrer
+    /// stays at the admin-assigned tier.
+    #[test]
+    fn manual_downgrade_with_volume_reset_is_durable() {
+        let w = setup();
+        let referrer = Address::generate(&w.env);
+        let order_handler = Address::generate(&w.env);
+
+        client(&w).set_order_handler(&w.admin, &order_handler);
+        client(&w).set_tier_upgrade_threshold(&w.admin, &1u32, &1_000u128);
+
+        client(&w).increment_referrer_volume(&order_handler, &referrer, &1_000u128);
+        client(&w).set_referrer_tier(&w.admin, &referrer, &0u32);
+        client(&w).set_referrer_volume(&w.admin, &referrer, &0u128);
+
+        client(&w).increment_referrer_volume(&order_handler, &referrer, &1u128);
+        let code = Bytes::from_slice(&w.env, b"REFCODE3");
+        let trader = Address::generate(&w.env);
+        client(&w).register_code(&referrer, &code);
+        client(&w).set_tier_config(
+            &w.admin,
+            &1u32,
+            &TierConfig { total_rebate_bps: 2_000, discount_share_bps: 5_000 },
+        );
+        client(&w).set_trader_referral_code(&trader, &code);
+        assert_eq!(
+            client(&w).get_trader_discount_bps(&trader),
+            0,
+            "tier 0 must hold: volume reset stops the auto-upgrade from re-crossing the threshold"
+        );
+        assert_eq!(client(&w).get_referrer_cumulative_volume(&referrer), 1u128);
+    }
+
+    /// A non-admin caller must not be able to override a referrer's stored volume.
+    #[test]
+    #[should_panic]
+    fn set_referrer_volume_non_admin_reverts() {
+        let w = setup();
+        let referrer = Address::generate(&w.env);
+        let impostor = Address::generate(&w.env);
+        ReferralStorageClient::new(&w.env, &w.handler).set_referrer_volume(
+            &impostor, &referrer, &0u128,
+        );
+    }
+
+    /// Persistent referral-code storage survives an upgrade (Soroban host
+    /// guarantee). Requires a compiled WASM binary to invoke
+    /// update_current_contract_wasm; not runnable in unit-test mode.
+    #[test]
+    #[ignore]
+    fn upgrade_preserves_referral_code_storage() {
+        let w = setup();
+        let referrer = Address::generate(&w.env);
+        let code = Bytes::from_slice(&w.env, b"UPGRADE1");
+        client(&w).register_code(&referrer, &code);
+
+        assert_eq!(client(&w).get_code_owner(&code), Some(referrer.clone()));
+
+        client(&w).upgrade(&BytesN::from_array(&w.env, &[0u8; 32]));
+
+        assert_eq!(
+            client(&w).get_code_owner(&code),
+            Some(referrer),
+            "referral code ownership must survive upgrade"
+        );
     }
 }

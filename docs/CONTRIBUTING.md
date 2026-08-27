@@ -93,7 +93,8 @@ Before opening a review request, confirm every item below. Reviewers will use th
 ### Upgrade Safety (for contracts with an `upgrade` entrypoint)
 
 - [ ] The `upgrade` function follows the admin-gated pattern in [Upgrade Rules](#upgrade-rules).
-- [ ] A test verifies that an unauthorized caller reverts and that storage is intact after a successful upgrade.
+- [ ] A test verifies that an unauthorized caller reverts (this half runs under a plain `cargo test` and is enforced today).
+- [ ] A `#[ignore]`d test verifies storage is intact after a successful upgrade, following the pattern in `deposit_handler`/`fee_handler`/`liquidation_handler`/`order_handler`/`withdrawal_handler`/`referral_storage`/`reader`. **Note:** this half requires a compiled WASM binary and `cargo test -- --ignored` to actually run — it is not exercised by a plain `cargo test` or by any CI workflow today (see issue #646), so treat it as a manual step you must remember to run locally, not an automatically-enforced guarantee.
 
 ## Architectural Guidelines
 
@@ -169,7 +170,7 @@ Prices for the index token must be signed by a registered keeper. See [docs/orac
 
 ```bash
 # Compute the data_store key for keeper index 0
-KEY_HEX=$(python3 scripts/compute_key.py keeper_pubkey_key 0)
+KEY_HEX=$(python3 scripts/compute_key.py keeper_public_key 0)
 
 # Register the 32-byte ed25519 public key (CONTROLLER role required)
 stellar contract invoke \

@@ -25,6 +25,7 @@ use soroban_sdk::{
     Address, Env, Vec,
 };
 
+#[allow(dead_code)]
 struct World {
     env: Env,
     admin: Address,
@@ -47,7 +48,7 @@ struct World {
 fn setup() -> World {
     let env = Env::default();
     env.mock_all_auths();
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
 
     let admin = Address::generate(&env);
     let keeper = Address::generate(&env);
@@ -94,6 +95,8 @@ fn setup() -> World {
         &7u32,
         &soroban_sdk::String::from_str(&env, "WETH-USDC Market"),
         &soroban_sdk::String::from_str(&env, "GM1"),
+        &weth,
+        &usdc,
     );
     rs_c.grant_role(&admin, &market1_tk, &roles::controller(&env));
 
@@ -110,6 +113,8 @@ fn setup() -> World {
         &7u32,
         &soroban_sdk::String::from_str(&env, "WBTC-USDC Market"),
         &soroban_sdk::String::from_str(&env, "GM2"),
+        &wbtc,
+        &usdc,
     );
     rs_c.grant_role(&admin, &market2_tk, &roles::controller(&env));
 
@@ -228,6 +233,7 @@ fn two_hop_swap_weth_to_wbtc() {
             min_output_amount: 0,
             order_type: OrderType::MarketSwap,
             is_long: false,
+            expiry_ledger: None,
         },
     );
 
@@ -286,6 +292,7 @@ fn two_hop_swap_min_output_not_met_reverts() {
             min_output_amount: 1_000 * TOKEN_PRECISION, // unreachably high
             order_type: OrderType::MarketSwap,
             is_long: false,
+            expiry_ledger: None,
         },
     );
 
@@ -320,6 +327,7 @@ fn swap_duplicate_market_in_path_reverts() {
             min_output_amount: 0,
             order_type: OrderType::MarketSwap,
             is_long: false,
+            expiry_ledger: None,
         },
     );
 
@@ -353,6 +361,7 @@ fn single_hop_swap_weth_to_usdc() {
             min_output_amount: 0,
             order_type: OrderType::MarketSwap,
             is_long: false,
+            expiry_ledger: None,
         },
     );
 

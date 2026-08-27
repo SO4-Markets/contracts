@@ -2,17 +2,19 @@
 name = "gmx-integration-tests"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 [dependencies]
-soroban-sdk = { workspace = true }
+soroban-sdk = { workspace = true, features = ["testutils"] }
 gmx-types = { path = "../libs/types" }
 gmx-keys = { path = "../libs/keys" }
 gmx-math = { path = "../libs/math" }
+gmx-market-utils = { path = "../libs/market_utils" }
 
 # Contracts
 data-store = { path = "../contracts/data_store" }
 role-store = { path = "../contracts/role_store" }
-oracle = { path = "../contracts/oracle" }
+oracle = { path = "../contracts/oracle", features = ["testutils"] }
 order-handler = { path = "../contracts/order_handler" }
 order-vault = { path = "../contracts/order_vault" }
 deposit-vault = { path = "../contracts/deposit_vault" }
@@ -23,10 +25,17 @@ liquidation-handler = { path = "../contracts/liquidation_handler" }
 adl-handler = { path = "../contracts/adl_handler" }
 fee-handler = { path = "../contracts/fee_handler" }
 market-token = { path = "../contracts/market_token" }
+reader = { path = "../contracts/reader" }
+order-cleanup = { path = "../contracts/order_cleanup" }
+exchange-router = { path = "../contracts/exchange_router" }
+market-factory = { path = "../contracts/market_factory" }
+insurance-fund-router = { path = "../contracts/insurance_fund_router" }
+fee-batch-sweeper = { path = "../contracts/fee_batch_sweeper" }
+referral-storage = { path = "../contracts/referral_storage" }
 
 [lib]
 path = "lib.rs"
-crate-type = ["cdylib"]
+crate-type = ["lib"]
 
 [[test]]
 name = "stop_loss"
@@ -47,3 +56,55 @@ path = "take_profit.rs"
 [[test]]
 name = "lifecycle_long"
 path = "lifecycle_long.rs"
+
+[[test]]
+name = "funding_rate"
+path = "funding_rate.rs"
+
+[[test]]
+name = "keeper_window"
+path = "keeper_window.rs"
+
+[[test]]
+name = "adl"
+path = "adl.rs"
+
+[[test]]
+name = "liquidation"
+path = "liquidation.rs"
+
+[[test]]
+name = "zero_amount_validation"
+path = "zero_amount_validation.rs"
+
+[[test]]
+name = "contract_upgrade"
+path = "contract_upgrade.rs"
+
+[[test]]
+name = "multi_market_execution"
+path = "multi_market_execution.rs"
+
+[[test]]
+name = "short_position_lifecycle"
+path = "short_position_lifecycle.rs"
+
+[[test]]
+name = "lp_fee_distribution"
+path = "lp_fee_distribution.rs"
+
+[[test]]
+name = "multi_market_funding_isolation"
+path = "multi_market_funding_isolation.rs"
+
+[[test]]
+name = "funding_conservation_e2e"
+path = "funding_conservation_e2e.rs"
+
+[[test]]
+name = "order_cleanup"
+path = "order_cleanup.rs"
+
+[[test]]
+name = "router_and_factory_coverage"
+path = "router_and_factory_coverage.rs"

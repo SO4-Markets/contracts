@@ -663,6 +663,7 @@ dependencies = [
  "gmx-keys",
  "role-store",
  "soroban-sdk",
+ "test-token",
 ]
 
 [[package]]
@@ -843,6 +844,7 @@ dependencies = [
  "data-store",
  "deposit-handler",
  "deposit-vault",
+ "fee-handler",
  "gmx-keys",
  "gmx-math",
  "gmx-types",
@@ -1025,18 +1027,29 @@ version = "0.1.0"
 dependencies = [
  "adl-handler",
  "data-store",
+ "deposit-handler",
  "deposit-vault",
+ "exchange-router",
+ "fee-batch-sweeper",
  "fee-handler",
  "gmx-keys",
+ "gmx-market-utils",
  "gmx-math",
  "gmx-types",
+ "insurance-fund-router",
  "liquidation-handler",
+ "market-factory",
  "market-token",
  "oracle",
+ "order-cleanup",
  "order-handler",
  "order-vault",
+ "reader",
+ "referral-storage",
  "role-store",
  "soroban-sdk",
+ "withdrawal-handler",
+ "withdrawal-vault",
 ]
 
 [[package]]
@@ -1273,6 +1286,9 @@ checksum = "8e04e2fd2b8188ea827b32ef11de88377086d690286ab35747ef7f9bf3ccb590"
 name = "insurance-fund-router"
 version = "0.1.0"
 dependencies = [
+ "data-store",
+ "gmx-keys",
+ "role-store",
  "soroban-sdk",
 ]
 
@@ -1417,9 +1433,16 @@ dependencies = [
 name = "market-util-reader"
 version = "0.1.0"
 dependencies = [
+ "data-store",
+ "deposit-handler",
+ "deposit-vault",
  "gmx-keys",
  "gmx-market-utils",
+ "gmx-math",
  "gmx-types",
+ "market-token",
+ "oracle",
+ "role-store",
  "soroban-sdk",
 ]
 
@@ -1492,7 +1515,9 @@ version = "0.1.0"
 dependencies = [
  "data-store",
  "gmx-keys",
+ "gmx-math",
  "gmx-types",
+ "oracle",
  "role-store",
  "soroban-sdk",
 ]
@@ -1536,7 +1561,6 @@ name = "order-vault"
 version = "0.1.0"
 dependencies = [
  "gmx-keys",
- "role-store",
  "soroban-sdk",
 ]
 
@@ -1790,6 +1814,7 @@ dependencies = [
  "gmx-position-utils",
  "gmx-pricing-utils",
  "gmx-types",
+ "market-token",
  "oracle",
  "order-handler",
  "order-vault",
@@ -2779,6 +2804,7 @@ dependencies = [
  "gmx-keys",
  "role-store",
  "soroban-sdk",
+ "test-token",
 ]
 
 [[package]]

@@ -328,7 +328,8 @@ for CONTRACT in \
   "$LIQUIDATION_HANDLER" \
   "$ADL_HANDLER" \
   "$FEE_HANDLER" \
-  "$EXCHANGE_ROUTER"
+  "$EXCHANGE_ROUTER" \
+  "$ORACLE"
 do
   invoke "$ROLE_STORE" grant_role \
     --caller "$ADMIN" \

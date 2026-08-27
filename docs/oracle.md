@@ -16,16 +16,13 @@ Each submitted price is valid for **exactly one ledger sequence window** (at mos
 
 ## 2. Price Pair (Min / Max)
 
-Keepers submit both a `min_price` and a `max_price` for each token. The spread represents oracle uncertainty (bid/ask spread or aggregator confidence interval).
+Keepers submit both a `min_price` and a `max_price` for each token. The spread represents oracle uncertainty (bid/ask spread or aggregator confidence interval). The pair is used differently depending on what's being computed — it is **not** used to pick the base execution price for a market increase/decrease.
 
-| Scenario | Price used | Rationale |
-|---|---|---|
-| Long increase (open long) | `max_price` | Worst case for the buyer |
-| Long decrease (close long) | `min_price` | Worst case for the seller |
-| Short increase (open short) | `min_price` | Worst case for the buyer |
-| Short decrease (close short) | `max_price` | Worst case for the seller |
+**Market increase/decrease execution price** (`increase_position_utils` / `decrease_position_utils`, via `pricing_utils::get_execution_price`): both start from `index_token_price.mid_price()` — the average of `min_price` and `max_price`, not either bound — then adjust that single mid-price by the computed price impact for the trade's direction (`is_buy = is_long == is_increase`). Front-running resistance here comes from the price-impact adjustment, not from picking a conservative oracle bound.
 
-This ensures users always trade at the price least favourable to themselves, preventing oracle-based front-running.
+**Trigger-price checks for limit/stop orders** (`order_handler::execute_order`'s dispatch): these *do* use the min/max pair directly, e.g. `index_price.min > order.trigger_price` for a limit-increase, `index_price.max < order.trigger_price` for a long stop, picking whichever bound is conservative for whether the trigger condition has genuinely been met.
+
+**PnL calculation** (`OraclePrice::pick_price_for_pnl(is_long, maximize)`): also uses the min/max pair directly, choosing whichever bound maximizes or minimizes the reported PnL depending on the caller's intent.
 
 ---
 
@@ -59,7 +56,7 @@ The value at that key is the raw 32-byte ed25519 public key (`BytesN<32>`).
 Use `scripts/compute_key.py` to derive the `data_store_key`:
 
 ```bash
-python3 scripts/compute_key.py keeper_pubkey_key <keeper_index>
+python3 scripts/compute_key.py keeper_public_key <keeper_index>
 ```
 
 ### Verification call
@@ -106,7 +103,7 @@ EOF "G..."
 
 ```bash
 KEEPER_INDEX=0    # increment for each additional keeper
-KEY_HEX=$(python3 scripts/compute_key.py keeper_pubkey_key "$KEEPER_INDEX")
+KEY_HEX=$(python3 scripts/compute_key.py keeper_public_key "$KEEPER_INDEX")
 echo "data_store key: $KEY_HEX"
 ```
 
@@ -131,16 +128,53 @@ stellar contract invoke \
 bash scripts/submit_prices.sh testnet my-keeper
 ```
 
-`submit_prices.sh` signs a test price bundle for the configured token and calls `oracle.set_prices`. If the signature or key lookup fails the invocation will revert.
+`submit_prices.sh` calls `oracle.set_prices_simple` — the unsigned test-only price path, gated behind the `testutils` feature — for the configured token. It does not sign a price bundle or exercise the signature/key-lookup path at all; that path is only reached via the real `set_prices` entrypoint, not this script.
 
 ---
 
 ## 5. Signer Key Rotation
 
-If a keeper private key is compromised, rotate it immediately:
+If a keeper private key is compromised, rotate it immediately.
+
+### OracleSignerRotated event
+
+Every successful rotation emits an `OracleSignerRotated` event:
+
+```
+topic:  sig_rot
+payload:
+  keeper_index : u32         — the slot index whose key was replaced
+  old_signer   : BytesN<32>  — the 32-byte pubkey that was overwritten
+  new_signer   : BytesN<32>  — the 32-byte pubkey that now holds the slot
+```
+
+Off-chain monitoring services can subscribe to this event to audit key changes in real time and invalidate any in-flight price bundles signed by the old key before they are submitted.
+
+### Option A — Use oracle.rotate_signer (recommended)
+
+`oracle.rotate_signer` reads the old key, writes the new key, and emits `OracleSignerRotated` atomically. The caller must be the oracle admin.
+
+```bash
+NEW_PUBKEY_HEX="<new-32-byte-pubkey-hex>"
+
+stellar contract invoke \
+  --id   "$ORACLE" \
+  --source "$ADMIN_SOURCE" \
+  --network testnet \
+  -- rotate_signer \
+  --caller        "$ADMIN" \
+  --keeper_index  "$KEEPER_INDEX" \
+  --new_pubkey    "$NEW_PUBKEY_HEX"
+```
+
+The `OracleSignerRotated` event is emitted containing both the old and new public keys, giving a complete audit trail in the ledger history.
+
+### Option B — Direct data_store overwrite
+
+For manual or emergency rotation without going through the oracle contract:
 
 1. Generate a new keypair (Step 1 above).
-2. Overwrite the same `keeper_index` slot in `data_store` with the new 32-byte public key (same `set_bytes32` command as Step 3, same `KEY_HEX`, new `--value`).
+2. Overwrite the same `keeper_index` slot in `data_store` with the new 32-byte public key.
 
 ```bash
 stellar contract invoke \
@@ -153,6 +187,8 @@ stellar contract invoke \
   --value  "<new-32-byte-pubkey-hex>"
 ```
 
-The overwrite is atomic at the Soroban transaction level. Any price bundle signed by the old key that has not yet been submitted will be rejected once the key is replaced (the signature will no longer verify against the stored pubkey).
+Note: Option B does **not** emit an `OracleSignerRotated` event. Prefer Option A for all routine rotations so audit logs remain complete.
+
+The overwrite is atomic at the Soroban transaction level. Any price bundle signed by the old key that has not yet been submitted will be rejected once the key is replaced.
 
 For a more complete treatment of key management and multi-signer setups, see `docs/SECURITY_REVIEW.md`.

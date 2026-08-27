@@ -2,6 +2,7 @@
 name = "market-util-reader"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 publish = false
 
 [lib]
@@ -15,3 +16,10 @@ gmx-market-utils = { path = "../../libs/market_utils" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+role-store        = { path = "../role_store" }
+data-store        = { path = "../data_store" }
+oracle            = { path = "../oracle", features = ["testutils"] }
+market-token      = { path = "../market_token" }
+deposit-handler   = { path = "../deposit_handler" }
+deposit-vault     = { path = "../deposit_vault" }
+gmx-math          = { path = "../../libs/math" }

@@ -14,6 +14,9 @@ members = [
   "tests",
 ]
 
+[workspace.package]
+license = "MIT"
+
 [workspace.dependencies]
 soroban-sdk = "25.3.1"
 

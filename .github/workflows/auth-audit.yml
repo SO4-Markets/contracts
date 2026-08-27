@@ -1,0 +1,28 @@
+name: Auth Audit Check
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "contracts/**/src/lib.rs"
+      - "docs/auth-audit.md"
+      - "scripts/gen_auth_audit.py"
+      - "scripts/test_gen_auth_audit.py"
+
+permissions:
+  contents: read
+
+jobs:
+  check-auth-audit:
+    name: docs/auth-audit.md in sync
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run gen_auth_audit.py unit tests
+        run: python3 scripts/test_gen_auth_audit.py -v
+
+      - name: Verify auth-audit.md matches source
+        run: python3 scripts/gen_auth_audit.py --check

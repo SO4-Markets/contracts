@@ -1,0 +1,177 @@
+name: WASM Size Budget
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  pull-requests: write   # needed to post the size-change comment
+  contents: read
+
+jobs:
+  wasm-size:
+    name: Build & check WASM sizes
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so we can checkout the base
+
+      # ── Rust toolchain ────────────────────────────────────────────────────
+
+      - name: Install Rust stable + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # ── Binaryen (wasm-opt) ───────────────────────────────────────────────
+
+      - name: Install wasm-opt
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y binaryen
+
+      # ── Build HEAD (PR branch) ────────────────────────────────────────────
+
+      - name: Build contracts (PR)
+        run: cargo build --target wasm32v1-none --release
+
+      - name: Optimise WASM files (PR)
+        run: |
+          for f in target/wasm32v1-none/release/*.wasm; do
+            wasm-opt -O3 -o "$f" "$f"
+          done
+
+      - name: Record PR sizes
+        id: pr_sizes
+        run: |
+          mkdir -p /tmp/wasm-sizes
+          for f in target/wasm32v1-none/release/*.wasm; do
+            name=$(basename "$f" .wasm)
+            size=$(wc -c < "$f")
+            echo "$size" > "/tmp/wasm-sizes/pr_${name}"
+          done
+
+      # ── Build BASE (target branch) ────────────────────────────────────────
+
+      - name: Checkout base branch
+        run: git checkout "${{ github.base_ref }}"
+
+      - name: Build contracts (base)
+        run: cargo build --target wasm32v1-none --release
+
+      - name: Optimise WASM files (base)
+        run: |
+          for f in target/wasm32v1-none/release/*.wasm; do
+            wasm-opt -O3 -o "$f" "$f"
+          done
+
+      - name: Record base sizes
+        run: |
+          for f in target/wasm32v1-none/release/*.wasm; do
+            name=$(basename "$f" .wasm)
+            size=$(wc -c < "$f")
+            echo "$size" > "/tmp/wasm-sizes/base_${name}"
+          done
+
+      # ── Compare and report ────────────────────────────────────────────────
+
+      - name: Compare sizes and determine outcome
+        id: compare
+        run: |
+          python3 - <<'PYEOF'
+          import os, sys
+
+          size_dir = "/tmp/wasm-sizes"
+          files = set()
+
+          # Keep in sync with TEST_CONTRACTS in scripts/gen_baseline.py: these
+          # crates are test fixtures, not production contracts, and are exempt
+          # from the size budget.
+          TEST_CONTRACTS = {"test_faucet", "test_token"}
+
+          for fname in os.listdir(size_dir):
+              if fname.startswith("pr_"):
+                  name = fname[3:]   # strip "pr_" prefix to get contract name
+                  if name not in TEST_CONTRACTS:
+                      files.add(name)
+
+          WARN_THRESHOLD  = 0.05   # 5%
+          BLOCK_THRESHOLD = 0.10   # 10%
+
+          rows = []
+          worst_ratio = 0.0
+          block = False
+
+          for contract in sorted(files):
+              pr_file   = os.path.join(size_dir, f"pr_{contract}")
+              base_file = os.path.join(size_dir, f"base_{contract}")
+
+              pr_size = int(open(pr_file).read().strip())
+
+              if os.path.exists(base_file):
+                  base_size = int(open(base_file).read().strip())
+                  delta     = pr_size - base_size
+                  ratio     = delta / base_size if base_size else 0
+                  pct       = ratio * 100
+
+                  if ratio > BLOCK_THRESHOLD:
+                      status = "🔴 BLOCK"
+                      block  = True
+                  elif ratio > WARN_THRESHOLD:
+                      status = "🟡 WARN"
+                  elif delta < 0:
+                      status = "🟢"
+                  else:
+                      status = "✅"
+
+                  rows.append(f"| `{contract}` | {base_size:,} | {pr_size:,} | {delta:+,} | {pct:+.1f}% | {status} |")
+                  worst_ratio = max(worst_ratio, ratio)
+              else:
+                  rows.append(f"| `{contract}` | — | {pr_size:,} | +{pr_size:,} | new | 🆕 |")
+
+          table = "\n".join(rows)
+
+          comment = f"""## WASM Size Report
+
+          | Contract | Base (bytes) | PR (bytes) | Delta | Change | Status |
+          |---|---|---|---|---|---|
+          {table}
+
+          **Thresholds:** warn at +5%, block at +10% growth.
+          """
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"block={'true' if block else 'false'}\n")
+              # Write multi-line output using a heredoc delimiter
+              delimiter = "EOF_SIZE_REPORT"
+              f.write(f"comment<<{delimiter}\n{comment}\n{delimiter}\n")
+
+          sys.exit(1 if block else 0)
+          PYEOF
+
+      # ── Post comment ──────────────────────────────────────────────────────
+
+      - name: Post size report as PR comment
+        if: always()
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: wasm-size-report
+          message: ${{ steps.compare.outputs.comment }}
+
+      # The compare step already exits 1 when block=true, so the job fails.
+      # The sticky comment step runs regardless (if: always()) so reviewers
+      # always see the table even when the build is blocked.

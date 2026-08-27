@@ -1,8 +1,10 @@
-//! Order vault — holds collateral and LP tokens during order lifecycle.
+//! Order vault — holds collateral during order lifecycle.
 //! Mirrors GMX's OrderVault pattern (same balance-snapshot pattern as deposit/withdrawal vaults).
 //!
-//! Collateral for market/limit increase orders and LP tokens for decrease orders
-//! are held here between create_order and execute_order.
+//! Collateral for market/limit increase orders and swaps is held here between
+//! create_order and execute_order. Decrease and liquidation orders never
+//! transfer funds through this vault — the position's own collateral is paid
+//! out directly on close.
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
@@ -21,7 +23,7 @@ pub enum Error {
     AlreadyInitialized = 1,
     NotInitialized = 2,
     Unauthorized = 3,
-    NegativeAmount = 4,
+    InvalidAmount = 4,
 }
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
@@ -114,7 +116,7 @@ impl OrderVault {
     ) {
         caller.require_auth();
         if amount <= 0 {
-            panic_with_error!(&env, Error::NegativeAmount);
+            panic_with_error!(&env, Error::InvalidAmount);
         }
         require_controller(&env, &caller);
         token::Client::new(&env, &token).transfer(
@@ -135,5 +137,157 @@ impl OrderVault {
             .persistent()
             .get(&DataKey::TokenBalance(token))
             .unwrap_or(0)
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gmx_keys::roles;
+    use role_store::{RoleStore, RoleStoreClient as RsClient};
+    use soroban_sdk::{testutils::Address as _, Env};
+    use test_token::{TestToken, TestTokenClient};
+
+    fn setup(env: &Env) -> (Address, Address, Address) {
+        let admin = Address::generate(env);
+        let rs = env.register(RoleStore, ());
+        RsClient::new(env, &rs).initialize(&admin);
+        RsClient::new(env, &rs).grant_role(&admin, &admin, &roles::controller(env));
+
+        let vault = env.register(OrderVault, ());
+        OrderVaultClient::new(env, &vault).initialize(&admin, &rs);
+        (admin, rs, vault)
+    }
+
+    fn register_token(env: &Env) -> (Address, Address) {
+        let token = env.register(TestToken, ());
+        let owner = Address::generate(env);
+        TestTokenClient::new(env, &token).initialize(
+            &owner,
+            &7u32,
+            &soroban_sdk::String::from_str(env, "Test Token"),
+            &soroban_sdk::String::from_str(env, "TST"),
+        );
+        (token, owner)
+    }
+
+    #[test]
+    fn initialize_works() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, _, vault) = setup(&env);
+        let _ = vault;
+    }
+
+    #[test]
+    fn record_transfer_in_zero_when_nothing_sent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, _, vault) = setup(&env);
+        let token = Address::generate(&env);
+        let recorded = OrderVaultClient::new(&env, &vault).get_recorded_balance(&token);
+        assert_eq!(recorded, 0);
+    }
+
+    #[test]
+    fn record_transfer_in_tracks_balance_delta() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, _, vault) = setup(&env);
+        let (token, token_owner) = register_token(&env);
+
+        let vault_client = OrderVaultClient::new(&env, &vault);
+        let token_client = TestTokenClient::new(&env, &token);
+
+        token_client.mint(&token_owner, &vault, &10_000_000_i128);
+
+        let delta = vault_client.record_transfer_in(&token);
+        assert_eq!(delta, 10_000_000);
+
+        let recorded = vault_client.get_recorded_balance(&token);
+        assert_eq!(recorded, 10_000_000);
+
+        token_client.mint(&token_owner, &vault, &5_000_000_i128);
+        let delta2 = vault_client.record_transfer_in(&token);
+        assert_eq!(delta2, 5_000_000);
+
+        let recorded2 = vault_client.get_recorded_balance(&token);
+        assert_eq!(recorded2, 15_000_000);
+    }
+
+    #[test]
+    fn transfer_out_by_non_controller_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, _, vault) = setup(&env);
+        let (token, token_owner) = register_token(&env);
+        let receiver = Address::generate(&env);
+
+        let vault_client = OrderVaultClient::new(&env, &vault);
+        let token_client = TestTokenClient::new(&env, &token);
+        token_client.mint(&token_owner, &vault, &10_000_000_i128);
+        vault_client.record_transfer_in(&token);
+
+        let non_controller = Address::generate(&env);
+        let result = vault_client.try_transfer_out(&non_controller, &token, &receiver, &10_000_000);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn transfer_out_zero_amount_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, vault) = setup(&env);
+        let (token, token_owner) = register_token(&env);
+        let receiver = Address::generate(&env);
+
+        let vault_client = OrderVaultClient::new(&env, &vault);
+        let token_client = TestTokenClient::new(&env, &token);
+        token_client.mint(&token_owner, &vault, &10_000_000_i128);
+        vault_client.record_transfer_in(&token);
+
+        let result = vault_client.try_transfer_out(&admin, &token, &receiver, &0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn transfer_out_negative_amount_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, vault) = setup(&env);
+        let (token, token_owner) = register_token(&env);
+        let receiver = Address::generate(&env);
+
+        let vault_client = OrderVaultClient::new(&env, &vault);
+        let token_client = TestTokenClient::new(&env, &token);
+        token_client.mint(&token_owner, &vault, &10_000_000_i128);
+        vault_client.record_transfer_in(&token);
+
+        let result = vault_client.try_transfer_out(&admin, &token, &receiver, &(-1i128));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn transfer_out_controller_can_transfer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, vault) = setup(&env);
+        let (token, token_owner) = register_token(&env);
+        let receiver = Address::generate(&env);
+
+        let vault_client = OrderVaultClient::new(&env, &vault);
+        let token_client = TestTokenClient::new(&env, &token);
+        token_client.mint(&token_owner, &vault, &10_000_000_i128);
+        vault_client.record_transfer_in(&token);
+
+        vault_client.transfer_out(&admin, &token, &receiver, &4_000_000);
+
+        assert_eq!(token_client.balance(&receiver), 4_000_000);
+        assert_eq!(token_client.balance(&vault), 6_000_000);
+
+        let recorded = vault_client.get_recorded_balance(&token);
+        assert_eq!(recorded, 6_000_000);
     }
 }
