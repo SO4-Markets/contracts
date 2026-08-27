@@ -573,7 +573,7 @@ pub fn get_market_token_price(
         maximize,
     );
     if info.pool_value <= 0 {
-        return FLOAT_PRECISION;
+        return 0;
     }
 
     // price = poolValue × TOKEN_PRECISION / supply  (result is FLOAT_PRECISION)

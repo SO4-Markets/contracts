@@ -644,14 +644,7 @@ pub fn ui_fee_factor_key(env: &Env, ui_fee_receiver: &Address) -> BytesN<32> {
     sha256(env, &b)
 }
 
-/// ADL enabled flag per (market, is_long)
-pub fn is_adl_enabled_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "IS_ADL_ENABLED");
-    push_addr(&mut b, env, market);
-    push_bool(&mut b, env, is_long);
-    sha256(env, &b)
-}
+
 
 /// Max PnL factor for ADL triggering
 /// sha256("POSITION_MANAGER" ‖ owner ‖ market)

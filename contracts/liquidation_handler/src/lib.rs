@@ -8,7 +8,7 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    market_index_token_key, market_long_token_key, market_short_token_key, position_key, roles,
+    is_market_paused_key, market_index_token_key, market_long_token_key, market_short_token_key, position_key, roles,
 };
 use gmx_position_utils::is_liquidatable;
 use gmx_types::{MarketProps, PositionProps, PriceProps};
@@ -38,6 +38,7 @@ pub enum Error {
     AlreadyInitialized = 1,
     NotInitialized = 2,
     Unauthorized = 3,
+    MarketPaused = 6,
     NotLiquidatable = 5,
 }
 
@@ -52,6 +53,7 @@ trait IRoleStore {
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
+    fn get_bool(env: Env, key: BytesN<32>) -> bool;
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
 }
@@ -210,6 +212,11 @@ impl LiquidationHandler {
             .instance()
             .get(&InstanceKey::OrderHandler)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+
+        let data_store_client = DataStoreClient::new(&env, &data_store);
+        if data_store_client.get_bool(&is_market_paused_key(&env, &market)) {
+            panic_with_error!(&env, Error::MarketPaused);
+        }
 
         let market_props = load_market_props(&env, &data_store, &market);
         let oracle_client = OracleClient::new(&env, &oracle);
