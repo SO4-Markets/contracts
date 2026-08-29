@@ -257,6 +257,14 @@ impl MarketFactory {
         // 4. Add to market list
         ds_client.add_address_to_set(&factory, &market_list_key(&env), &market_token_address);
 
+        // 5. Populate the circuit-breaker reverse index (#592 / #380) so
+        //    check_circuit_breaker can use O(1) lookups instead of a full
+        //    market-list scan on every price submission.
+        for token in [&index_token, &long_token, &short_token] {
+            let cb_key = token_circuit_markets_key(&env, token);
+            ds_client.add_address_to_set(&factory, &cb_key, &market_token_address);
+        }
+
         env.events().publish(
             (symbol_short!("mkt_new"),),
             (
@@ -329,6 +337,21 @@ fn require_market_keeper(env: &Env, caller: &Address) {
     if !client.has_role(caller, &role) {
         panic_with_error!(env, Error::Unauthorized);
     }
+}
+
+/// sha256("CB_TOKEN_MARKETS" ‖ token) — same key the oracle uses for its
+/// circuit-breaker reverse index.  Replicated here so `create_market` can
+/// populate the index at deployment time without a cross-contract call (#592).
+fn token_circuit_markets_key(env: &Env, token: &Address) -> BytesN<32> {
+    let mut buf = Bytes::new(env);
+    let prefix = Bytes::from_slice(env, b"CB_TOKEN_MARKETS");
+    buf.append(&prefix);
+    let s: soroban_sdk::String = token.to_string();
+    let str_len = s.len() as usize;
+    let mut raw = [0u8; 64];
+    s.copy_into_slice(&mut raw[..str_len]);
+    buf.append(&Bytes::from_slice(env, &raw[..str_len]));
+    env.crypto().sha256(&buf).into()
 }
 
 /// Deterministic market salt: sha256("GMX_MARKET" ‖ index ‖ long ‖ short ‖ type)
