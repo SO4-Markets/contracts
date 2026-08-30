@@ -342,6 +342,15 @@ mod tests {
     use super::*;
     use soroban_sdk::{testutils::Address as _, Env};
 
+    fn vec_contains_addr(vec: &Vec<Address>, item: &Address) -> bool {
+        for i in 0..vec.len() {
+            if vec.get_unchecked(i) == *item {
+                return true;
+            }
+        }
+        false
+    }
+
     fn setup() -> (Env, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
@@ -531,5 +540,80 @@ mod tests {
         client.grant_role(&admin, &controller_addr, &ctrl);
         // CONTROLLER tries to grant ROLE_ADMIN to victim — must panic Unauthorized
         client.grant_role(&controller_addr, &victim, &admin_role);
+    }
+
+    // ── Issue #564: revoke-side member-count/enumeration bookkeeping ─────────
+
+    /// Revoke must decrement `get_role_member_count` by exactly one and remove
+    /// the revoked account from `get_role_members`, while the remaining member
+    /// is still present.
+    #[test]
+    fn test_revoke_decrements_count_and_removes_from_members() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let k1 = Address::generate(&env);
+        let k2 = Address::generate(&env);
+
+        client.grant_role(&admin, &k1, &ctrl);
+        client.grant_role(&admin, &k2, &ctrl);
+        assert_eq!(client.get_role_member_count(&ctrl), 2);
+
+        client.revoke_role(&admin, &k1, &ctrl);
+
+        assert_eq!(client.get_role_member_count(&ctrl), 1);
+        let members = client.get_role_members(&ctrl, &0, &10);
+        assert_eq!(members.len(), 1);
+        assert_eq!(members.get_unchecked(0), k2);
+        assert!(!client.has_role(&k1, &ctrl));
+        assert!(client.has_role(&k2, &ctrl));
+    }
+
+    /// Revoking one member from a multi-member role must preserve the others —
+    /// `vec_remove_addr` must remove only the target, not corrupt the list.
+    #[test]
+    fn test_revoke_from_multi_member_preserves_others() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let k1 = Address::generate(&env);
+        let k2 = Address::generate(&env);
+        let k3 = Address::generate(&env);
+
+        client.grant_role(&admin, &k1, &ctrl);
+        client.grant_role(&admin, &k2, &ctrl);
+        client.grant_role(&admin, &k3, &ctrl);
+        assert_eq!(client.get_role_member_count(&ctrl), 3);
+
+        // Revoke the middle member
+        client.revoke_role(&admin, &k2, &ctrl);
+
+        assert_eq!(client.get_role_member_count(&ctrl), 2);
+        let members = client.get_role_members(&ctrl, &0, &10);
+        assert_eq!(members.len(), 2);
+        assert!(vec_contains_addr(&members, &k1));
+        assert!(vec_contains_addr(&members, &k3));
+        assert!(!vec_contains_addr(&members, &k2));
+    }
+
+    /// Revoking a role from an account that does not hold it is a harmless
+    /// no-op — the count must not go negative or decrement twice.
+    #[test]
+    fn test_idempotent_revoke() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let keeper = Address::generate(&env);
+
+        client.grant_role(&admin, &keeper, &ctrl);
+        assert_eq!(client.get_role_member_count(&ctrl), 1);
+
+        client.revoke_role(&admin, &keeper, &ctrl);
+        assert_eq!(client.get_role_member_count(&ctrl), 0);
+
+        // Second revoke is a no-op — count must not go negative
+        client.revoke_role(&admin, &keeper, &ctrl);
+        assert_eq!(client.get_role_member_count(&ctrl), 0);
+        assert!(!client.has_role(&keeper, &ctrl));
     }
 }
