@@ -11,6 +11,7 @@ crate-type = ["cdylib", "lib"]
 [dependencies]
 soroban-sdk = { workspace = true }
 gmx-keys    = { path = "../../libs/keys" }
+gmx-math    = { path = "../../libs/math" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

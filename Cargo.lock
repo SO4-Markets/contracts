@@ -1561,7 +1561,9 @@ name = "order-vault"
 version = "0.1.0"
 dependencies = [
  "gmx-keys",
+ "role-store",
  "soroban-sdk",
+ "test-token",
 ]
 
 [[package]]

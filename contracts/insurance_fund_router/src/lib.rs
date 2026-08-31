@@ -12,7 +12,6 @@ use soroban_sdk::{
     Address, Bytes, BytesN, Env,
 };
 
-const BPS_DIVISOR: u128 = 10_000;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -134,7 +133,7 @@ impl InsuranceFundRouter {
         allocation_bps: u32,
     ) {
         require_controller(&env, &role_store, &caller);
-        if allocation_bps > BPS_DIVISOR as u32 {
+        if allocation_bps > gmx_math::BPS_DIVISOR as u32 {
             panic_with_error!(&env, Error::AllocationTooHigh);
         }
 
@@ -192,7 +191,7 @@ impl InsuranceFundRouter {
         require_controller(&env, &role_store, &source);
         let ds = DataStoreClient::new(&env, &data_store);
         let allocation_bps = ds.get_u128(&insurance_fund_allocation_bps_key(&env, &market));
-        let insurance_share = liquidation_penalty.saturating_mul(allocation_bps) / BPS_DIVISOR;
+        let insurance_share = liquidation_penalty.saturating_mul(allocation_bps) / gmx_math::BPS_DIVISOR;
         let treasury_share = liquidation_penalty.saturating_sub(insurance_share);
 
         let token_client = token::TokenClient::new(&env, &token);
@@ -280,7 +279,7 @@ impl InsuranceFundRouter {
     ) -> PenaltySplit {
         let allocation_bps = DataStoreClient::new(&env, &data_store)
             .get_u128(&insurance_fund_allocation_bps_key(&env, &market));
-        let insurance_share = liquidation_penalty.saturating_mul(allocation_bps) / BPS_DIVISOR;
+        let insurance_share = liquidation_penalty.saturating_mul(allocation_bps) / gmx_math::BPS_DIVISOR;
         PenaltySplit {
             insurance_share,
             treasury_share: liquidation_penalty.saturating_sub(insurance_share),
@@ -370,7 +369,7 @@ mod tests {
     fn zero_bps_routes_all_penalty_to_treasury() {
         let liquidation_penalty = 1_000u128;
         let allocation_bps = 0u128;
-        let insurance_share = liquidation_penalty * allocation_bps / BPS_DIVISOR;
+        let insurance_share = liquidation_penalty * allocation_bps / gmx_math::BPS_DIVISOR;
         assert_eq!(insurance_share, 0);
         assert_eq!(liquidation_penalty - insurance_share, 1_000);
     }
@@ -379,7 +378,7 @@ mod tests {
     fn allocation_splits_penalty_by_bps() {
         let liquidation_penalty = 10_000u128;
         let allocation_bps = 2_500u128;
-        let insurance_share = liquidation_penalty * allocation_bps / BPS_DIVISOR;
+        let insurance_share = liquidation_penalty * allocation_bps / gmx_math::BPS_DIVISOR;
         assert_eq!(insurance_share, 2_500);
         assert_eq!(liquidation_penalty - insurance_share, 7_500);
     }

@@ -11,6 +11,9 @@ const SQRT_FLOAT_PRECISION: i128 = 1_000_000_000_000_000; // 10^15
 /// Stellar standard token precision: 1 token = 10^7 stroops.
 pub const TOKEN_PRECISION: i128 = 10_000_000; // 10^7
 
+/// 100% in basis points (10,000)
+pub const BPS_DIVISOR: u128 = 10_000;
+
 // ─── Core arithmetic ─────────────────────────────────────────────────────────
 
 /// (a × b) / denominator using i128. Fast path; panics on denominator=0.

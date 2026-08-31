@@ -487,7 +487,7 @@ mod tests {
     fn position_fee_matches_bps_formula() {
         let w = setup();
         let fee_bps: i128 = 30; // 30 bps
-        let fee_factor = fee_bps * FP / 10_000;
+        let fee_factor = fee_bps * FP / (gmx_math::BPS_DIVISOR as i128);
         let ds_c = DsClient::new(&w.env, &w.ds);
         ds_c.set_u128(
             &w.admin,
@@ -1132,7 +1132,7 @@ mod tests {
         let ds_c = DsClient::new(&w.env, &w.ds);
 
         let fee_bps: i128 = 30;
-        let fee_factor: i128 = fee_bps * FP / 10_000; // 30 bps in FP units
+        let fee_factor: i128 = fee_bps * FP / (gmx_math::BPS_DIVISOR as i128); // 30 bps in FP units
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::position_fee_factor_key(&w.env, &w.market_tk, true),

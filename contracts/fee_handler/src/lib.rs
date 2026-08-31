@@ -1248,7 +1248,7 @@ mod tests {
 
             // fee_factor: 1 bps .. 200 bps
             let bps = (r2.abs() % 200).max(1);
-            let fee_factor = bps * fp / 10_000;
+            let fee_factor = bps * fp / (gmx_math::BPS_DIVISOR as i128);
 
             // collateral_price: $1 .. $100,000 in FP units
             let collateral_price = ((r3.abs() % (100_000 * fp / fp)).max(1)) * fp;
