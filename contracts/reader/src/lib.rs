@@ -60,7 +60,6 @@ enum InstanceKey {
 pub enum Error {
     NotInitialized = 1,
     AlreadyInitialized = 2,
-    Unauthorized = 3,
     /// `get_protocol_stats` was passed more than `MAX_STATS_MARKETS` markets.
     TooManyMarkets = 4,
     /// The supplied market address is not registered in data_store —

@@ -45,7 +45,6 @@ pub enum Error {
     StalePrice = 5,   // timestamp too old
     PriceNotFound = 6,
     InvalidSignature = 7,
-    NoKeepers = 8,
     /// clear_prices called with more than MAX_CLEAR_PRICES_BATCH_SIZE tokens (issue #619).
     BatchSizeLimitExceeded = 9,
 }

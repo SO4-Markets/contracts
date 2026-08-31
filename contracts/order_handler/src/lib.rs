@@ -86,14 +86,12 @@ pub enum Error {
     OrderNotFound = 4,
     InvalidOrderType = 5,
     UnsatisfiedTrigger = 6,
-    PriceTooHigh = 7,
     PriceTooLow = 8,
     OrderFrozen = 9,
     /// Increase/swap orders require collateral to have been transferred to
     /// order_vault (via exchange_router SendTokens) before calling create_order.
     /// record_transfer_in returned zero, meaning no collateral arrived.
     ZeroCollateral = 10,
-    UnauthorizedPositionManager = 11,
     /// `flag_stale_keeper` was called but the role's last activity is still
     /// within the configured heartbeat timeout (issue #249).
     KeeperNotStale = 12,
