@@ -272,7 +272,7 @@ trait IOracle {
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "OrderVaultClient")]
 trait IOrderVault {
-    fn record_transfer_in(env: Env, token: Address) -> i128;
+    fn record_transfer_in(env: Env, caller: Address, token: Address) -> i128;
     fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128);
 }
 
@@ -686,7 +686,8 @@ impl OrderHandler {
             );
 
             let collateral_delta_amount = if is_increase_or_swap {
-                let received = vault_client.record_transfer_in(&params.initial_collateral_token);
+                let received =
+                    vault_client.record_transfer_in(&handler, &params.initial_collateral_token);
                 if received <= 0 {
                     panic_with_error!(&env, Error::ZeroCollateral);
                 }
@@ -907,7 +908,7 @@ impl OrderHandler {
         // Reverts with ZeroCollateral if caller skipped the SendTokens pre-step.
         let collateral_delta_amount = if is_increase_or_swap {
             let received = OrderVaultClient::new(&env, &order_vault)
-                .record_transfer_in(&params.initial_collateral_token);
+                .record_transfer_in(&handler, &params.initial_collateral_token);
             if received <= 0 {
                 panic_with_error!(&env, Error::ZeroCollateral);
             }

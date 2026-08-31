@@ -125,7 +125,7 @@ fn setup() -> World {
 fn do_create_order(w: &World, user: &Address) -> soroban_sdk::BytesN<32> {
     StellarAssetClient::new(&w.env, &w.long_tk).mint(user, &COLLATERAL_AMOUNT);
     OrderVaultClient::new(&w.env, &w.handler)
-        .record_transfer_in(&w.long_tk); // simulate vault receipt
+        .record_transfer_in(&w.handler, &w.long_tk); // simulate vault receipt
 
     OrderHandlerClient::new(&w.env, &w.handler).create_order(
         user,
