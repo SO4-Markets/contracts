@@ -13,7 +13,7 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    last_keeper_activity_key, market_index_token_key, market_long_token_key,
+    is_market_paused_key, last_keeper_activity_key, market_index_token_key, market_long_token_key,
     market_short_token_key, position_key, roles,
 };
 use gmx_position_utils::is_liquidatable;
@@ -51,7 +51,7 @@ pub enum Error {
     /// Mirrors the InvalidMarket pattern in deposit_handler/withdrawal_handler
     /// (issue #371) so callers can match this condition as a typed error
     /// instead of a generic execution failure.
-    InvalidMarket = 6,
+    InvalidMarket = 7,
 }
 
 // ─── External clients ─────────────────────────────────────────────────────────
@@ -93,6 +93,18 @@ pub struct LiquidatePositionResult {
     pub pnl_usd: i128,
 }
 
+/// Mirrors `order_handler::PartialLiquidatePositionResult` field-for-field
+/// (issue #533), for the same hand-kept-in-sync reason as `LiquidatePositionResult`
+/// above.
+#[contracttype]
+pub struct PartialLiquidatePositionResult {
+    pub execution_price: i128,
+    pub keeper_execution_fee: i128,
+    pub pnl_usd: i128,
+    pub liquidated_size_usd: i128,
+    pub remaining_size_usd: i128,
+}
+
 #[contractevent(topics = ["part_liq"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PartialLiquidationExecuted {
@@ -118,6 +130,15 @@ trait IOrderHandler {
         collateral_token: Address,
         is_long: bool,
     ) -> LiquidatePositionResult;
+    fn partial_liquidate_position(
+        env: Env,
+        keeper: Address,
+        account: Address,
+        market: Address,
+        collateral_token: Address,
+        is_long: bool,
+        liquidation_factor_bps: u128,
+    ) -> PartialLiquidatePositionResult;
     fn get_position(env: Env, key: BytesN<32>) -> Option<PositionProps>;
 }
 
@@ -393,11 +414,20 @@ impl LiquidationHandler {
             panic_with_error!(&env, Error::NotLiquidatable);
         }
 
-        let size_in_usd = position.size_in_usd;
         let factor = (liquidation_factor_bps.min(gmx_math::BPS_DIVISOR as u32)) as i128;
-        let liquidated_size = (size_in_usd * factor) / (gmx_math::BPS_DIVISOR as i128);
-        let remaining_size = size_in_usd.saturating_sub(liquidated_size);
-        let liquidation_fee = (liquidated_size * 50) / (gmx_math::BPS_DIVISOR as i128); // 50 bps fee
+
+        // Issue #533: delegate the actual close to order_handler (positions live
+        // there) instead of only computing what a close *would* look like. Every
+        // field below reflects order_handler's real, applied post-close state,
+        // not a value re-derived here and never confirmed to have taken effect.
+        let result = OrderHandlerClient::new(&env, &order_handler).partial_liquidate_position(
+            &keeper,
+            &account,
+            &market,
+            &collateral_token,
+            &is_long,
+            &(factor as u128),
+        );
 
         // Issue #614: record LIQUIDATION_KEEPER activity so check_keeper_heartbeat
         // can report this role as alive.
@@ -415,12 +445,12 @@ impl LiquidationHandler {
             collateral_token,
             is_long,
             liquidation_factor_bps: factor as u128,
-            liquidated_size_usd: liquidated_size as u128,
-            remaining_size_usd: remaining_size as u128,
-            liquidation_fee: liquidation_fee as u128,
+            liquidated_size_usd: result.liquidated_size_usd as u128,
+            remaining_size_usd: result.remaining_size_usd as u128,
+            liquidation_fee: result.keeper_execution_fee as u128,
         });
 
-        liquidated_size as u128
+        result.liquidated_size_usd as u128
     }
 }
 
@@ -1230,6 +1260,174 @@ mod tests {
         assert!(
             !result,
             "check_liquidatable must return false for a healthy, well-collateralised position"
+        );
+    }
+
+    // ── Issue #533: execute_partial_liquidation must actually reduce the position ──
+
+    /// execute_partial_liquidation must actually reduce the position's
+    /// size_in_usd in order_handler storage — not just compute what a partial
+    /// close would look like and emit an event, as the pre-fix stub did.
+    #[test]
+    fn execute_partial_liquidation_reduces_position_size() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let entry_price = 2_000 * fp;
+        set_prices(&w, entry_price);
+
+        let collateral = ONE_TOKEN;
+        let size_usd = 20_000 * fp; // 10x leverage
+        open_long_position(&w, collateral, size_usd);
+
+        let pos_key = gmx_keys::position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true);
+        let before = OHClient::new(&w.env, &w.ord_handler)
+            .get_position(&pos_key)
+            .expect("position must exist before partial liquidation");
+        assert_eq!(before.size_in_usd, size_usd);
+
+        // Crash price so the position is liquidatable.
+        set_prices(&w, 100 * fp);
+
+        // Close 60% of the position — enough that the retained collateral
+        // (issue #533: collateral is kept, not released proportionally, on a
+        // liquidation-driven partial close) covers the reduced position's min
+        // collateral requirement with room to spare, rather than landing exactly
+        // on the boundary a 50% close would.
+        let claimed = LiquidationHandlerClient::new(&w.env, &w.liq_handler)
+            .execute_partial_liquidation(
+                &w.liq_keeper,
+                &w.user,
+                &w.market_tk,
+                &w.long_tk,
+                &true,
+                &6_000u128,
+            );
+
+        let expected_liquidated = (size_usd * 6) / 10;
+        assert_eq!(
+            claimed, expected_liquidated as u128,
+            "returned liquidated size must match the 60% factor"
+        );
+
+        let after = OHClient::new(&w.env, &w.ord_handler)
+            .get_position(&pos_key)
+            .expect("position must still exist after a 60% partial liquidation");
+        assert_eq!(
+            after.size_in_usd,
+            size_usd - expected_liquidated,
+            "position size_in_usd must actually decrease by the liquidated amount"
+        );
+        assert!(
+            after.size_in_usd < before.size_in_usd,
+            "position must be smaller after partial liquidation"
+        );
+        assert_eq!(
+            after.collateral_amount, before.collateral_amount,
+            "issue #533: collateral must be retained (not released proportionally) on \
+             a liquidation-driven partial close, since that's what lets the reduced \
+             position actually pass the post-close health check"
+        );
+    }
+
+    /// A 100% factor must behave like a full close: the position key is removed
+    /// from order_handler storage entirely, exactly as `decrease_position`
+    /// already handles a full close for `liquidate_position`.
+    #[test]
+    fn execute_partial_liquidation_with_full_factor_closes_position() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let entry_price = 2_000 * fp;
+        set_prices(&w, entry_price);
+
+        let collateral = ONE_TOKEN;
+        let size_usd = 20_000 * fp;
+        open_long_position(&w, collateral, size_usd);
+
+        set_prices(&w, 100 * fp);
+
+        LiquidationHandlerClient::new(&w.env, &w.liq_handler).execute_partial_liquidation(
+            &w.liq_keeper,
+            &w.user,
+            &w.market_tk,
+            &w.long_tk,
+            &true,
+            &10_000u128,
+        );
+
+        let pos_key = gmx_keys::position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true);
+        assert!(
+            OHClient::new(&w.env, &w.ord_handler)
+                .get_position(&pos_key)
+                .is_none(),
+            "a 100% factor must fully close and remove the position"
+        );
+    }
+
+    /// execute_partial_liquidation on a healthy position must revert.
+    #[test]
+    #[should_panic]
+    fn execute_partial_liquidation_on_healthy_position_reverts() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let entry_price = 2_000 * fp;
+        set_prices(&w, entry_price);
+
+        let collateral = ONE_TOKEN * 10; // very well-collateralised
+        let size_usd = 10_000 * fp;
+        open_long_position(&w, collateral, size_usd);
+
+        set_prices(&w, entry_price); // stays healthy
+
+        LiquidationHandlerClient::new(&w.env, &w.liq_handler).execute_partial_liquidation(
+            &w.liq_keeper,
+            &w.user,
+            &w.market_tk,
+            &w.long_tk,
+            &true,
+            &5_000u128,
+        );
+    }
+
+    /// A configured liquidation execution fee must actually be paid to the
+    /// keeper on a partial liquidation, exactly as it is on a full liquidation.
+    #[test]
+    fn execute_partial_liquidation_pays_configured_keeper_fee() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let entry_price = 2_000 * fp;
+        set_prices(&w, entry_price);
+
+        let collateral = ONE_TOKEN;
+        let size_usd = 20_000 * fp;
+        open_long_position(&w, collateral, size_usd);
+
+        let fee_amount = ONE_TOKEN / 100;
+        DsClient::new(&w.env, &w.ds).set_u128(
+            &w.admin,
+            &gmx_keys::liquidation_execution_fee_key(&w.env, &w.market_tk),
+            &(fee_amount as u128),
+        );
+
+        set_prices(&w, 100 * fp);
+
+        let keeper_balance_before =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.liq_keeper);
+
+        LiquidationHandlerClient::new(&w.env, &w.liq_handler).execute_partial_liquidation(
+            &w.liq_keeper,
+            &w.user,
+            &w.market_tk,
+            &w.long_tk,
+            &true,
+            &6_000u128,
+        );
+
+        let keeper_balance_after =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.liq_keeper);
+        assert_eq!(
+            keeper_balance_after - keeper_balance_before,
+            fee_amount,
+            "keeper must receive the configured execution fee on a partial liquidation"
         );
     }
 }

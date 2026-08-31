@@ -90,6 +90,21 @@ pub struct DecreasePositionParams<'a> {
     pub swap_path: Vec<Address>,
     /// Oracle address, used when swap_path is non-empty.
     pub oracle: &'a Address,
+    /// Issue #533: when true and this is a genuinely *partial* close (not a full
+    /// close), no collateral is released proportionally to the closed size — it
+    /// all stays with the remaining position instead of being paid out. A normal
+    /// (voluntary or ADL) partial decrease releases collateral proportionally to
+    /// the size closed, which leaves the position's collateral/size ratio — and
+    /// therefore `validate_position`'s health check — exactly unchanged; that
+    /// makes a proportional partial close structurally incapable of curing an
+    /// already-unhealthy position. Liquidation-driven partial closes need the
+    /// opposite: shrink size while keeping collateral fixed, which improves the
+    /// ratio and lets the position actually pass the health check afterward.
+    /// Ignored (behaves exactly like `false`) when the close turns out to be a
+    /// full close, since a full close bypasses `validate_position` entirely and
+    /// must still return the position's full remaining value like any other
+    /// full close (e.g. `liquidate_position`).
+    pub retain_collateral: bool,
 }
 
 // ─── Main entry ───────────────────────────────────────────────────────────────
@@ -256,8 +271,14 @@ pub fn decrease_position(env: &Env, p: &DecreasePositionParams) -> DecreasePosit
     }
 
     // 9. Compute output amount
-    // For a partial close, we return the collateral proportional to the size delta
-    let collateral_delta = if position.size_in_usd > 0 {
+    // For a partial close, we return the collateral proportional to the size delta —
+    // unless this is a liquidation-driven partial close (issue #533), in which case
+    // no collateral is released; it stays with the remaining, now-less-leveraged
+    // position instead (see `retain_collateral`'s doc comment on `DecreasePositionParams`).
+    let is_full_close = size_delta_usd == position.size_in_usd;
+    let collateral_delta = if p.retain_collateral && !is_full_close {
+        0
+    } else if position.size_in_usd > 0 {
         mul_div_wide(
             env,
             position.collateral_amount,
@@ -633,6 +654,7 @@ mod tests {
                     current_time: 2_000,
                     swap_path: Vec::new(&w.env),
                     oracle: &w.admin, // unused; no swap path
+                    retain_collateral: false,
                 },
             )
         });
@@ -708,6 +730,7 @@ mod tests {
                     current_time: 2_000,
                     swap_path: Vec::new(&w.env),
                     oracle: &w.admin,
+                    retain_collateral: false,
                 },
             )
         });
@@ -759,6 +782,7 @@ mod tests {
                     current_time: 2_000,
                     swap_path: Vec::new(&w.env),
                     oracle: &w.admin,
+                    retain_collateral: false,
                 },
             )
         });
@@ -822,6 +846,7 @@ mod tests {
                     current_time: 2_000,
                     swap_path: Vec::new(&w.env),
                     oracle: &w.admin,
+                    retain_collateral: false,
                 },
             )
         });
@@ -916,6 +941,7 @@ mod tests {
                     current_time: 2_000,
                     swap_path: Vec::new(&w.env),
                     oracle: &w.admin,
+                    retain_collateral: false,
                 },
             )
         });
@@ -953,6 +979,7 @@ mod tests {
                     current_time: 2_000,
                     swap_path: Vec::new(&w.env),
                     oracle: &w.admin,
+                    retain_collateral: false,
                 },
             )
         });
@@ -989,6 +1016,7 @@ mod tests {
                     current_time: 2_000,
                     swap_path: Vec::new(&w.env),
                     oracle: &w.admin,
+                    retain_collateral: false,
                 },
             )
         });
@@ -1026,6 +1054,7 @@ mod tests {
                     current_time: 2_000,
                     swap_path: Vec::new(&w.env),
                     oracle: &w.admin,
+                    retain_collateral: false,
                 },
             )
         });
