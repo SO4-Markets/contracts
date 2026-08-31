@@ -51,7 +51,12 @@ pub enum Error {
     /// Mirrors the InvalidMarket pattern in deposit_handler/withdrawal_handler
     /// (issue #371) so callers can match this condition as a typed error
     /// instead of a generic execution failure.
-    InvalidMarket = 6,
+    InvalidMarket = 7,
+    /// Issue #643: update_oracle called with the current oracle address
+    /// (no-op) or with this contract's own address / another of its stored
+    /// instance addresses (order_handler, data_store, role_store, admin) —
+    /// almost certainly a copy-paste mistake, not an intentional rotation.
+    InvalidOracle = 8,
 }
 
 // ─── External clients ─────────────────────────────────────────────────────────
@@ -165,6 +170,46 @@ impl LiquidationHandler {
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    pub fn update_oracle(env: Env, caller: Address, new_oracle: Address) {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if caller != admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        // Issue #643: reject a no-op call and the most likely copy-paste
+        // mistakes — pointing the oracle at this contract itself or at one
+        // of its own other stored instance addresses.
+        if new_oracle == env.current_contract_address() {
+            panic_with_error!(&env, Error::InvalidOracle);
+        }
+        for key in [
+            InstanceKey::Oracle,
+            InstanceKey::Admin,
+            InstanceKey::RoleStore,
+            InstanceKey::DataStore,
+            InstanceKey::OrderHandler,
+        ] {
+            if let Some(other) = env.storage().instance().get::<_, Address>(&key) {
+                if other == new_oracle {
+                    panic_with_error!(&env, Error::InvalidOracle);
+                }
+            }
+        }
+        let old_oracle: Address = env.storage().instance().get(&InstanceKey::Oracle).unwrap();
+        env.storage().instance().set(&InstanceKey::Oracle, &new_oracle);
+        // Issue #605: the oracle address every subsequent price validation
+        // relies on just changed — emit an event so off-chain monitoring has
+        // an audit trail for this admin action.
+        env.events().publish(
+            (symbol_short!("orcl_set"),),
+            (old_oracle, new_oracle),
+        );
     }
 
     /// Check if a position is currently liquidatable.

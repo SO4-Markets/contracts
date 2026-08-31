@@ -51,6 +51,11 @@ pub enum Error {
     /// Max PnL factor for ADL is not configured (0) for the requested market/side.
     /// Callers must set a non-zero value via DataStore before ADL can be evaluated.
     MissingMaxPnlConfig = 8,
+    /// Issue #643: update_oracle called with the current oracle address
+    /// (no-op) or with this contract's own address / another of its stored
+    /// instance addresses (order_handler, data_store, role_store, admin) —
+    /// almost certainly a copy-paste mistake, not an intentional rotation.
+    InvalidOracle = 10,
 }
 
 // ─── External clients ─────────────────────────────────────────────────────────
@@ -124,6 +129,46 @@ impl AdlHandler {
         env.storage()
             .instance()
             .set(&InstanceKey::OrderHandler, &order_handler);
+    }
+
+    pub fn update_oracle(env: Env, caller: Address, new_oracle: Address) {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if caller != admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        // Issue #643: reject a no-op call and the most likely copy-paste
+        // mistakes — pointing the oracle at this contract itself or at one
+        // of its own other stored instance addresses.
+        if new_oracle == env.current_contract_address() {
+            panic_with_error!(&env, Error::InvalidOracle);
+        }
+        for key in [
+            InstanceKey::Oracle,
+            InstanceKey::Admin,
+            InstanceKey::RoleStore,
+            InstanceKey::DataStore,
+            InstanceKey::OrderHandler,
+        ] {
+            if let Some(other) = env.storage().instance().get::<_, Address>(&key) {
+                if other == new_oracle {
+                    panic_with_error!(&env, Error::InvalidOracle);
+                }
+            }
+        }
+        let old_oracle: Address = env.storage().instance().get(&InstanceKey::Oracle).unwrap();
+        env.storage().instance().set(&InstanceKey::Oracle, &new_oracle);
+        // Issue #605: the oracle address every subsequent price validation
+        // relies on just changed — emit an event so off-chain monitoring has
+        // an audit trail for this admin action.
+        env.events().publish(
+            (symbol_short!("orcl_set"),),
+            (old_oracle, new_oracle),
+        );
     }
 
     /// Check whether ADL is currently required for the given market side.
