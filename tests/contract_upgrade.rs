@@ -197,6 +197,7 @@ fn upgrade_preserves_pending_order_and_position_storage() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 

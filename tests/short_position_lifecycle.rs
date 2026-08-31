@@ -244,6 +244,7 @@ fn short_position_lifecycle_winning_short_pays_pnl_from_pool() {
             order_type: OrderType::MarketIncrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &open_key);
@@ -286,6 +287,7 @@ fn short_position_lifecycle_winning_short_pays_pnl_from_pool() {
             order_type: OrderType::MarketDecrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &close_key);
@@ -359,6 +361,7 @@ fn short_position_lifecycle_close_pays_delegated_recipient_not_owner() {
             order_type: OrderType::MarketIncrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &open_key);
@@ -390,6 +393,7 @@ fn short_position_lifecycle_close_pays_delegated_recipient_not_owner() {
             order_type: OrderType::MarketDecrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &close_key);
@@ -444,6 +448,7 @@ fn short_position_lifecycle_losing_short_forfeits_collateral_to_pool() {
             order_type: OrderType::MarketIncrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &open_key);
@@ -481,6 +486,7 @@ fn short_position_lifecycle_losing_short_forfeits_collateral_to_pool() {
             order_type: OrderType::MarketDecrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &close_key);

@@ -231,6 +231,7 @@ fn permissionless_cancel_expired_order_succeeds() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: Some(expiry_ledger),
+            on_behalf_of: None,
         },
     );
 
@@ -367,6 +368,7 @@ fn preview_expired_order_reports_correctly() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: Some(expiry_ledger),
+            on_behalf_of: None,
         },
     );
 
@@ -432,6 +434,7 @@ fn set_order_expiry_overrides_default_for_configured_order_type() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: Some(expiry_ledger),
+            on_behalf_of: None,
         },
     );
 
@@ -453,6 +456,7 @@ fn set_order_expiry_overrides_default_for_configured_order_type() {
             order_type: OrderType::LimitIncrease,
             is_long: true,
             expiry_ledger: Some(expiry_ledger),
+            on_behalf_of: None,
         },
     );
 

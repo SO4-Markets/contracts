@@ -195,6 +195,7 @@ fn lp_fees_split_proportionally_between_two_equal_depositors() {
             order_type: OrderType::MarketIncrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &open_key);
@@ -222,6 +223,7 @@ fn lp_fees_split_proportionally_between_two_equal_depositors() {
             order_type: OrderType::MarketDecrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &close_key);

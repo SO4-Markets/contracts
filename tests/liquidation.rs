@@ -261,6 +261,7 @@ fn open_long_position(w: &TestWorld, collateral_tokens: i128, size_usd: i128) {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
@@ -285,6 +286,7 @@ fn open_short_position(w: &TestWorld, collateral_tokens: i128, size_usd: i128) {
             order_type: OrderType::MarketIncrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);

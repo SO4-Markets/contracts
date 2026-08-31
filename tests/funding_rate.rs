@@ -249,6 +249,7 @@ fn open_long_position(w: &TestWorld, size_usd: i128, collateral: i128) -> BytesN
         order_type: OrderType::MarketIncrease,
         is_long: true,
         expiry_ledger: None,
+        on_behalf_of: None,
     });
 
     oh_c.execute_order(&w.keeper, &order_key);
@@ -280,6 +281,7 @@ fn open_short_position(w: &TestWorld, size_usd: i128, collateral: i128) -> Bytes
         order_type: OrderType::MarketIncrease,
         is_long: false,
         expiry_ledger: None,
+        on_behalf_of: None,
     });
 
     oh_c.execute_order(&w.keeper, &order_key);
@@ -342,6 +344,7 @@ fn funding_rate_longs_pay_shorts_when_long_oi_exceeds_short() {
         order_type: OrderType::MarketDecrease,
         is_long: true,
         expiry_ledger: None,
+        on_behalf_of: None,
     });
     oh_c.execute_order(&w.keeper, &close_key);
 
@@ -443,6 +446,7 @@ fn funding_rate_shorts_pay_longs_when_short_oi_exceeds_long() {
         order_type: OrderType::MarketDecrease,
         is_long: false,
         expiry_ledger: None,
+        on_behalf_of: None,
     });
     oh_c.execute_order(&w.keeper, &close_key);
 
@@ -522,6 +526,7 @@ fn funding_rate_zero_when_oi_balanced() {
         order_type: OrderType::MarketDecrease,
         is_long: true,
         expiry_ledger: None,
+        on_behalf_of: None,
     });
     oh_c.execute_order(&w.keeper, &close_key);
 
@@ -596,6 +601,7 @@ fn funding_rate_zero_when_no_oi() {
         order_type: OrderType::MarketDecrease,
         is_long: true,
         expiry_ledger: None,
+        on_behalf_of: None,
     });
     oh_c.execute_order(&w.keeper, &close_key);
 
@@ -670,6 +676,7 @@ fn funding_settlement_accumulates_claimable_amount() {
         order_type: OrderType::MarketDecrease,
         is_long: true,
         expiry_ledger: None,
+        on_behalf_of: None,
     });
     oh_c.execute_order(&w.keeper, &close_key);
 
@@ -741,6 +748,7 @@ fn funding_rate_ramps_proportionally_to_dt() {
         order_type: OrderType::MarketDecrease,
         is_long: true,
         expiry_ledger: None,
+        on_behalf_of: None,
     });
     oh_c.execute_order(&w.keeper, &close_key);
 
@@ -777,6 +785,7 @@ fn funding_rate_ramps_proportionally_to_dt() {
         order_type: OrderType::MarketDecrease,
         is_long: true,
         expiry_ledger: None,
+        on_behalf_of: None,
     });
     oh_c.execute_order(&w.keeper, &close_key2);
 
@@ -880,6 +889,7 @@ fn test_funding_rate_accumulation_and_settlement_integration() {
         order_type: OrderType::MarketIncrease,
         is_long: true,
         expiry_ledger: None,
+        on_behalf_of: None,
     });
     oh_c.execute_order(&w.keeper, &seed_key);
 
