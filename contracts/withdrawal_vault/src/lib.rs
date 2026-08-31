@@ -56,7 +56,10 @@ impl WithdrawalVault {
             .set(&InstanceKey::RoleStore, &role_store);
     }
 
-    pub fn record_transfer_in(env: Env, token: Address) -> i128 {
+    pub fn record_transfer_in(env: Env, caller: Address, token: Address) -> i128 {
+        caller.require_auth();
+        require_controller(&env, &caller);
+
         let current = token::Client::new(&env, &token).balance(&env.current_contract_address());
         let recorded: i128 = env
             .storage()

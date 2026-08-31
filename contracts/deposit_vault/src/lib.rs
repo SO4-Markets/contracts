@@ -70,7 +70,11 @@ impl DepositVault {
     /// Snapshot the balance of `token` in this vault.
     /// Returns the amount received since the last snapshot (delta).
     /// Called by deposit_handler right after the user's transfer lands.
-    pub fn record_transfer_in(env: Env, token: Address) -> i128 {
+    /// Only callable by a CONTROLLER (deposit_handler).
+    pub fn record_transfer_in(env: Env, caller: Address, token: Address) -> i128 {
+        caller.require_auth();
+        require_controller(&env, &caller);
+
         let current = token::Client::new(&env, &token).balance(&env.current_contract_address());
         let recorded: i128 = env
             .storage()
