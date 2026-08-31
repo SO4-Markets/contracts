@@ -5,6 +5,7 @@
 // (issue #529 is compilation-restoration only).
 #![allow(deprecated)]
 
+use gmx_keys::roles;
 use gmx_types::{OrderProps, OrderType};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
@@ -13,12 +14,21 @@ use soroban_sdk::{
 
 const DEFAULT_ORDER_EXPIRY: u64 = 14_400;
 
+#[contracttype]
+enum InstanceKey {
+    Initialized,
+    RoleStore,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
     OrderNotFound = 1,
     NotYetExpired = 2,
+    AlreadyInitialized = 3,
+    NotInitialized = 4,
+    Unauthorized = 5,
 }
 
 #[allow(dead_code)]
@@ -26,6 +36,12 @@ pub enum Error {
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
+}
+
+#[allow(dead_code)]
+#[soroban_sdk::contractclient(name = "RoleStoreClient")]
+trait IRoleStore {
+    fn has_role(env: Env, account: Address, role: BytesN<32>) -> bool;
 }
 
 #[allow(dead_code)]
@@ -61,6 +77,19 @@ pub struct OrderCleanup;
 
 #[contractimpl]
 impl OrderCleanup {
+    pub fn initialize(env: Env, admin: Address, role_store: Address) {
+        admin.require_auth();
+        if env.storage().instance().has(&InstanceKey::Initialized) {
+            panic_with_error!(&env, Error::AlreadyInitialized);
+        }
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Initialized, &true);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::RoleStore, &role_store);
+    }
+
     pub fn set_order_expiry(
         env: Env,
         data_store: Address,
@@ -84,7 +113,6 @@ impl OrderCleanup {
         key: BytesN<32>,
     ) {
         caller.require_auth();
-        let helper = env.current_contract_address();
         let order_client = OrderHandlerClient::new(&env, &order_handler);
         let order = order_client
             .get_order(&key)
@@ -98,7 +126,10 @@ impl OrderCleanup {
         }
 
         let cleanup_fee = cleanup_fee_from_execution_fee(order.execution_fee);
-        order_client.cleanup_expired_order(&helper, &key);
+        // Forward the real external caller (issue #536) so order_handler pays the
+        // cleanup incentive to whoever actually did the work, not to this helper
+        // contract's own address (which has no way to withdraw it).
+        order_client.cleanup_expired_order(&caller, &key);
 
         env.events().publish_event(&ExpiredOrderCancelled {
             key,
@@ -119,6 +150,19 @@ impl OrderCleanup {
         reason: BytesN<32>,
     ) {
         admin.require_auth();
+
+        // Issue #537: require_auth only proves `admin` signed this call — anyone
+        // can pass their own address as `admin`. Bind the audit event to an actual
+        // protocol admin/controller so it can't be spoofed by an arbitrary caller.
+        let role_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::RoleStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if !RoleStoreClient::new(&env, &role_store).has_role(&admin, &roles::controller(&env)) {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+
         env.events().publish(
             (soroban_sdk::symbol_short!("man_ref"),),
             (admin, token, receiver, amount, reason),
