@@ -1742,7 +1742,7 @@ impl OrderHandler {
         // Load position to get size
         use gmx_keys::position_key;
         let pk = position_key(&env, &account, &market, &collateral_token, is_long);
-        let position: PositionProps = env
+        let mut position: PositionProps = env
             .storage()
             .persistent()
             .get(&PositionStorageKey::Position(pk.clone()))
@@ -1798,6 +1798,18 @@ impl OrderHandler {
                     &collateral_token,
                     -fee_to_transfer,
                 );
+
+                // Issue #540: the fee just paid out came directly from this
+                // position's collateral, but `position` in storage was never
+                // updated to reflect that. Without this write-back,
+                // decrease_position (called below) re-reads the full,
+                // un-reduced collateral_amount and pays the trader as though
+                // the fee were never taken — silently making the pool absorb
+                // the fee's cost instead of the liquidated trader.
+                position.collateral_amount -= fee_to_transfer;
+                env.storage()
+                    .persistent()
+                    .set(&PositionStorageKey::Position(pk.clone()), &position);
             }
         }
 
@@ -3772,6 +3784,97 @@ mod tests {
             pool_amount_with_fee,
             pool_amount_without_fee - keeper_fee as u128,
             "pool_amount must drop by exactly the keeper's liquidation_execution_fee"
+        );
+    }
+
+    /// Issue #540: the keeper fee is withdrawn straight from the position's
+    /// own collateral, but `position.collateral_amount` in storage was never
+    /// reduced to reflect it — decrease_position (called right after) re-read
+    /// the full, un-reduced amount and paid the trader as though the fee
+    /// never happened, so the pool absorbed the fee's cost instead of the
+    /// liquidated trader.
+    ///
+    /// Verified the same way as `liquidate_position_keeper_fee_decrements_pool_amount`
+    /// (compare an otherwise-identical liquidation with and without the fee
+    /// configured, so the position's own — potentially large — pnl/price-impact
+    /// bookkeeping cancels out identically in both runs). With the fix, the
+    /// fee is paid entirely out of the trader's own collateral: pool_amount
+    /// drops by the fee (already covered by
+    /// `liquidate_position_keeper_fee_decrements_pool_amount`) but
+    /// collateral_sum drops by exactly that much less, so the *combined*
+    /// ledger (pool_amount + collateral_sum) — and the pool's real token
+    /// balance — end up identical whether or not a keeper fee is configured.
+    /// The fee only ever changes who receives the money (keeper vs. trader),
+    /// never how much leaves the pool or how the pool's own accounting reads.
+    #[test]
+    fn liquidate_position_keeper_fee_ledger_matches_real_balance() {
+        let fp = gmx_math::FLOAT_PRECISION;
+        let keeper_fee = 1_000i128;
+
+        let run = |configure_fee: bool| -> (i128, i128) {
+            let w = setup();
+            set_prices(&w, 2_000 * fp);
+            seed_pool(&w);
+            set_prices(&w, 2_000 * fp);
+
+            let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+            hc.execute_order(&w.keeper, &key);
+
+            if configure_fee {
+                DsClient::new(&w.env, &w.ds).set_u128(
+                    &w.admin,
+                    &gmx_keys::liquidation_execution_fee_key(&w.env, &w.market_tk),
+                    &(keeper_fee as u128),
+                );
+            }
+
+            // Require 10% maintenance margin so the position is liquidatable
+            // well before it's fully insolvent, leaving room for a non-zero
+            // output. Without a min_collateral_factor configured (as in the
+            // other liquidation tests above), is_liquidatable only trips once
+            // remaining collateral is already negative — the same boundary
+            // decrease_position's own `raw_output.max(0)` clamp sits on, which
+            // would swamp the fee-sized signal this test is isolating.
+            DsClient::new(&w.env, &w.ds).set_u128(
+                &w.admin,
+                &gmx_keys::min_collateral_factor_key(&w.env, &w.market_tk),
+                &((fp / 10) as u128),
+            );
+
+            // Crash price so the position is liquidatable, but mild enough
+            // that it stays solvent (collateral - loss - fee > 0).
+            set_prices(&w, 1_050 * fp);
+
+            hc.liquidate_position(&w.keeper, &w.user, &w.market_tk, &w.long_tk, &true);
+
+            let ds_c = DsClient::new(&w.env, &w.ds);
+            let ledger_total = ds_c
+                .get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk))
+                as i128
+                + ds_c.get_u128(&gmx_keys::collateral_sum_key(
+                    &w.env,
+                    &w.market_tk,
+                    &w.long_tk,
+                    true,
+                )) as i128;
+            let real_balance =
+                soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.market_tk);
+
+            (ledger_total, real_balance)
+        };
+
+        let (ledger_without_fee, real_without_fee) = run(false);
+        let (ledger_with_fee, real_with_fee) = run(true);
+
+        assert_eq!(
+            ledger_without_fee, ledger_with_fee,
+            "the combined ledger (pool_amount + collateral_sum) must be unaffected by whether \
+             a keeper fee was configured — the fee reassigns who gets paid, it doesn't cost the pool"
+        );
+        assert_eq!(
+            real_without_fee, real_with_fee,
+            "the pool's real token balance must be unaffected by whether a keeper fee was \
+             configured — the fee comes out of the trader's own payout, not the pool"
         );
     }
 
