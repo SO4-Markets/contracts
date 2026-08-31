@@ -1760,7 +1760,7 @@ impl OrderHandler {
         // Load position to get size
         use gmx_keys::position_key;
         let pk = position_key(&env, &account, &market, &collateral_token, is_long);
-        let position: PositionProps = env
+        let mut position: PositionProps = env
             .storage()
             .persistent()
             .get(&PositionStorageKey::Position(pk.clone()))
