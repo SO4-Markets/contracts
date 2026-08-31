@@ -85,6 +85,7 @@ impl MarketProps {
 ///   long_claim_fnd_per_size  = longTokenClaimableFundingAmountPerSize
 ///   short_claim_fnd_per_size = shortTokenClaimableFundingAmountPerSize
 #[contracttype]
+#[derive(Clone)]
 pub struct PositionProps {
     pub account: Address,
     pub market: Address,

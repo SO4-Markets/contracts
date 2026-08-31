@@ -116,6 +116,12 @@ pub struct PartialLiquidationExecuted {
     pub liquidation_factor_bps: u128,
     pub liquidated_size_usd: u128,
     pub remaining_size_usd: u128,
+    /// The admin-configured, flat `liquidation_execution_fee` actually paid to
+    /// `keeper` out of the position's collateral (issue #533) — the same
+    /// per-market keeper gas-reimbursement `liquidate_position` pays, often 0
+    /// unless configured. Prior to the #533 fix this field held a synthetic
+    /// 50-bps-of-closed-size value that was computed but never actually paid
+    /// to anyone; it is not comparable to that old value.
     pub liquidation_fee: u128,
 }
 
@@ -1410,6 +1416,11 @@ mod tests {
 
         set_prices(&w, 100 * fp);
 
+        let pos_key = gmx_keys::position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true);
+        let before = OHClient::new(&w.env, &w.ord_handler)
+            .get_position(&pos_key)
+            .expect("position must exist before partial liquidation");
+
         let keeper_balance_before =
             soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.liq_keeper);
 
@@ -1428,6 +1439,20 @@ mod tests {
             keeper_balance_after - keeper_balance_before,
             fee_amount,
             "keeper must receive the configured execution fee on a partial liquidation"
+        );
+
+        // The fee actually withdrawn from pool custody must be reflected in the
+        // position's own stored collateral, not just in the real token balances —
+        // otherwise the position's on-chain collateral figure stays permanently
+        // overstated by every fee ever paid out against it, and the same fee can
+        // be harvested again on a later partial liquidation of the same position.
+        let after = OHClient::new(&w.env, &w.ord_handler)
+            .get_position(&pos_key)
+            .expect("position must still exist after a 60% partial liquidation");
+        assert_eq!(
+            after.collateral_amount,
+            before.collateral_amount - fee_amount,
+            "the keeper fee must be deducted from the position's stored collateral"
         );
     }
 }
