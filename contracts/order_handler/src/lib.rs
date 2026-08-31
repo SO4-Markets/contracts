@@ -956,9 +956,6 @@ impl OrderHandler {
             MIN_BUMP_THRESHOLD,
             PERSISTENT_BUMP_TARGET,
         );
-        env.storage()
-            .persistent()
-            .set(&OrderStorageKey::Order(key.clone()), &order);
 
         ds.add_bytes32_to_set(&handler, &order_list_key(&env), &key);
         ds.add_bytes32_to_set(&handler, &account_order_list_key(&env, &actual_owner), &key);
@@ -1647,9 +1644,6 @@ impl OrderHandler {
             MIN_BUMP_THRESHOLD,
             PERSISTENT_BUMP_TARGET,
         );
-        env.storage()
-            .persistent()
-            .set(&OrderStorageKey::Order(key.clone()), &order);
 
         // Clear frozen flag if set (order is being updated = re-enabled)
         env.storage()
@@ -1689,9 +1683,6 @@ impl OrderHandler {
             MIN_BUMP_THRESHOLD,
             PERSISTENT_BUMP_TARGET,
         );
-        env.storage()
-            .persistent()
-            .set(&OrderStorageKey::OrderFrozen(key.clone()), &true);
 
         // Issue #441: include the affected account and the freezing keeper.
         env.events()
