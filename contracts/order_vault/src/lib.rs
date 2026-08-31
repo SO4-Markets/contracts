@@ -92,7 +92,9 @@ impl OrderVault {
     /// recorded balance always equals the actual on-chain balance.  This prevents
     /// double-counting: a second `record_transfer_in` before any new deposit
     /// returns 0, which order_handler will reject.
-    pub fn record_transfer_in(env: Env, token: Address) -> i128 {
+    pub fn record_transfer_in(env: Env, caller: Address, token: Address) -> i128 {
+        caller.require_auth();
+        require_controller(&env, &caller);
         let current = token::Client::new(&env, &token).balance(&env.current_contract_address());
         let recorded: i128 = env
             .storage()
@@ -195,7 +197,7 @@ mod tests {
     fn record_transfer_in_tracks_balance_delta() {
         let env = Env::default();
         env.mock_all_auths();
-        let (_, _, vault) = setup(&env);
+        let (admin, _, vault) = setup(&env);
         let (token, token_owner) = register_token(&env);
 
         let vault_client = OrderVaultClient::new(&env, &vault);
@@ -203,32 +205,52 @@ mod tests {
 
         token_client.mint(&token_owner, &vault, &10_000_000_i128);
 
-        let delta = vault_client.record_transfer_in(&token);
+        let delta = vault_client.record_transfer_in(&admin, &token);
         assert_eq!(delta, 10_000_000);
 
         let recorded = vault_client.get_recorded_balance(&token);
         assert_eq!(recorded, 10_000_000);
 
         token_client.mint(&token_owner, &vault, &5_000_000_i128);
-        let delta2 = vault_client.record_transfer_in(&token);
+        let delta2 = vault_client.record_transfer_in(&admin, &token);
         assert_eq!(delta2, 5_000_000);
 
         let recorded2 = vault_client.get_recorded_balance(&token);
         assert_eq!(recorded2, 15_000_000);
     }
 
+    /// Issue #386/#541: record_transfer_in must be CONTROLLER-gated like
+    /// transfer_out, so an arbitrary caller cannot front-run a victim's
+    /// deposit by resyncing the recorded balance before the victim's own
+    /// create_order call observes the delta.
+    #[test]
+    fn record_transfer_in_by_non_controller_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, _, vault) = setup(&env);
+        let (token, token_owner) = register_token(&env);
+
+        let vault_client = OrderVaultClient::new(&env, &vault);
+        let token_client = TestTokenClient::new(&env, &token);
+        token_client.mint(&token_owner, &vault, &10_000_000_i128);
+
+        let non_controller = Address::generate(&env);
+        let result = vault_client.try_record_transfer_in(&non_controller, &token);
+        assert!(result.is_err());
+    }
+
     #[test]
     fn transfer_out_by_non_controller_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let (_, _, vault) = setup(&env);
+        let (admin, _, vault) = setup(&env);
         let (token, token_owner) = register_token(&env);
         let receiver = Address::generate(&env);
 
         let vault_client = OrderVaultClient::new(&env, &vault);
         let token_client = TestTokenClient::new(&env, &token);
         token_client.mint(&token_owner, &vault, &10_000_000_i128);
-        vault_client.record_transfer_in(&token);
+        vault_client.record_transfer_in(&admin, &token);
 
         let non_controller = Address::generate(&env);
         let result = vault_client.try_transfer_out(&non_controller, &token, &receiver, &10_000_000);
@@ -246,7 +268,7 @@ mod tests {
         let vault_client = OrderVaultClient::new(&env, &vault);
         let token_client = TestTokenClient::new(&env, &token);
         token_client.mint(&token_owner, &vault, &10_000_000_i128);
-        vault_client.record_transfer_in(&token);
+        vault_client.record_transfer_in(&admin, &token);
 
         let result = vault_client.try_transfer_out(&admin, &token, &receiver, &0);
         assert!(result.is_err());
@@ -263,7 +285,7 @@ mod tests {
         let vault_client = OrderVaultClient::new(&env, &vault);
         let token_client = TestTokenClient::new(&env, &token);
         token_client.mint(&token_owner, &vault, &10_000_000_i128);
-        vault_client.record_transfer_in(&token);
+        vault_client.record_transfer_in(&admin, &token);
 
         let result = vault_client.try_transfer_out(&admin, &token, &receiver, &(-1i128));
         assert!(result.is_err());
@@ -280,7 +302,7 @@ mod tests {
         let vault_client = OrderVaultClient::new(&env, &vault);
         let token_client = TestTokenClient::new(&env, &token);
         token_client.mint(&token_owner, &vault, &10_000_000_i128);
-        vault_client.record_transfer_in(&token);
+        vault_client.record_transfer_in(&admin, &token);
 
         vault_client.transfer_out(&admin, &token, &receiver, &4_000_000);
 

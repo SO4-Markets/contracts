@@ -12,7 +12,7 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    last_keeper_activity_key, market_index_token_key, market_long_token_key,
+    is_market_paused_key, last_keeper_activity_key, market_index_token_key, market_long_token_key,
     market_short_token_key, position_key, roles,
 };
 use gmx_position_utils::get_position_pnl_usd;
@@ -549,6 +549,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         OHClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);

@@ -182,6 +182,7 @@ fn funding_conserves_real_token_balances_between_two_opposite_side_positions() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &alice_open);
@@ -205,6 +206,7 @@ fn funding_conserves_real_token_balances_between_two_opposite_side_positions() {
             order_type: OrderType::MarketIncrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &bob_open);
@@ -251,6 +253,7 @@ fn funding_conserves_real_token_balances_between_two_opposite_side_positions() {
             order_type: OrderType::MarketDecrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &alice_close);
@@ -282,6 +285,7 @@ fn funding_conserves_real_token_balances_between_two_opposite_side_positions() {
             order_type: OrderType::MarketDecrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &bob_close);

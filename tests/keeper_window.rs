@@ -228,6 +228,7 @@ fn execute_order_at_current_ledger(w: &TestWorld) -> OHClient<'_> {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     oh_c.execute_order(&w.keeper, &key);

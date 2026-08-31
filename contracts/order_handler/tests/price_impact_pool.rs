@@ -177,6 +177,7 @@ fn execute_swap_long_to_short(w: &World, amount: i128) {
             order_type: OrderType::MarketSwap,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     set_prices(w, 2000 * FLOAT_PRECISION);
@@ -356,6 +357,7 @@ fn balancing_swap_rebate_capped_at_pool_balance() {
             order_type: OrderType::MarketSwap,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     set_prices(&w, 2000 * fp);
