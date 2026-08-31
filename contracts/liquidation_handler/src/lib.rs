@@ -394,10 +394,10 @@ impl LiquidationHandler {
         }
 
         let size_in_usd = position.size_in_usd;
-        let factor = (liquidation_factor_bps.min(10000)) as i128;
-        let liquidated_size = (size_in_usd * factor) / 10000;
+        let factor = (liquidation_factor_bps.min(gmx_math::BPS_DIVISOR as u32)) as i128;
+        let liquidated_size = (size_in_usd * factor) / (gmx_math::BPS_DIVISOR as i128);
         let remaining_size = size_in_usd.saturating_sub(liquidated_size);
-        let liquidation_fee = (liquidated_size * 50) / 10000; // 50 bps fee
+        let liquidation_fee = (liquidated_size * 50) / (gmx_math::BPS_DIVISOR as i128); // 50 bps fee
 
         // Issue #614: record LIQUIDATION_KEEPER activity so check_keeper_heartbeat
         // can report this role as alive.

@@ -11,7 +11,7 @@ use soroban_sdk::{
     Bytes, BytesN, Env,
 };
 
-const DEFAULT_ORDER_EXPIRY: u64 = 2_880;
+const DEFAULT_ORDER_EXPIRY: u64 = 14_400;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -197,8 +197,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_expiry_matches_four_hour_ledger_target() {
-        assert_eq!(DEFAULT_ORDER_EXPIRY, 2_880);
+    fn expiry_time_validation() {
+        use soroban_sdk::testutils::{Address as _, Ledger};
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let data_store_id = env.register(MockDataStore, ());
+        let order_handler_id = env.register(MockOrderHandler, ());
+        let cleanup_id = env.register(OrderCleanup, ());
+        let client = OrderCleanupClient::new(&env, &cleanup_id);
+
+        let caller = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0; 32]);
+
+        // order.updated_at_time is 100_000 in the mock
+        env.ledger().set_timestamp(114_399); // 14,399 seconds later
+        let res = client.try_cancel_expired_order(&data_store_id, &order_handler_id, &caller, &key);
+        assert_eq!(res.unwrap_err().unwrap(), Error::NotYetExpired);
+
+        env.ledger().set_timestamp(114_400); // 14,400 seconds later
+        let res2 = client.try_cancel_expired_order(&data_store_id, &order_handler_id, &caller, &key);
+        assert!(res2.is_ok());
+    }
+
+    #[contract]
+    struct MockDataStore;
+    #[contractimpl]
+    impl MockDataStore {
+        pub fn get_u128(_env: Env, _key: BytesN<32>) -> u128 { 0 }
+    }
+
+    #[contract]
+    struct MockOrderHandler;
+    #[contractimpl]
+    impl MockOrderHandler {
+        pub fn get_order(env: Env, _key: BytesN<32>) -> Option<OrderProps> {
+            Some(OrderProps {
+                account: Address::generate(&env),
+                receiver: Address::generate(&env),
+                market: Address::generate(&env),
+                initial_collateral_token: Address::generate(&env),
+                swap_path: soroban_sdk::vec![&env, Address::generate(&env)],
+                size_delta_usd: 0,
+                collateral_delta_amount: 0,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 1000,
+                min_output_amount: 0,
+                order_type: OrderType::MarketSwap,
+                is_long: true,
+                updated_at_time: 100_000,
+            })
+        }
+        pub fn cleanup_expired_order(_env: Env, _caller: Address, _key: BytesN<32>) {}
     }
 
     #[test]

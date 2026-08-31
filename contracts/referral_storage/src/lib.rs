@@ -251,13 +251,13 @@ impl ReferralStorage {
         env.storage().persistent().set(&tier_key, &config);
         env.storage().persistent().extend_ttl(&tier_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         // Validate config parameters
-        let discount_bps = ((config.total_rebate_bps as u64) * (config.discount_share_bps as u64) / 10000) as u32;
+        let discount_bps = ((config.total_rebate_bps as u64) * (config.discount_share_bps as u64) / (gmx_math::BPS_DIVISOR as u64)) as u32;
         let rebate_bps = if config.total_rebate_bps >= discount_bps {
             config.total_rebate_bps - discount_bps
         } else {
             panic_with_error!(&env, Error::InvalidTierConfig);
         };
-        if discount_bps > 10000 || rebate_bps > 10000 || config.total_rebate_bps > 10000 || config.discount_share_bps > 10000 {
+        if discount_bps > (gmx_math::BPS_DIVISOR as u32) || rebate_bps > (gmx_math::BPS_DIVISOR as u32) || config.total_rebate_bps > (gmx_math::BPS_DIVISOR as u32) || config.discount_share_bps > (gmx_math::BPS_DIVISOR as u32) {
             panic_with_error!(&env, Error::InvalidTierConfig);
         }
         env.storage()
@@ -351,7 +351,7 @@ impl ReferralStorage {
         env.storage().persistent().extend_ttl(&config_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
 
         // discount = total_rebate * discount_share / 10_000
-        config.total_rebate_bps * config.discount_share_bps / 10_000
+        config.total_rebate_bps * config.discount_share_bps / (gmx_math::BPS_DIVISOR as u32)
     }
 
     // ── Issue #217: referral tier auto-upgrade ────────────────────────────────

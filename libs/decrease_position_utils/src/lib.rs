@@ -510,7 +510,7 @@ mod tests {
 
     fn configure_market(w: &World, fee_bps: i128) {
         let ds_c = DsClient::new(&w.env, &w.ds);
-        let fee_factor = fee_bps * FP / 10_000;
+        let fee_factor = fee_bps * FP / (gmx_math::BPS_DIVISOR as i128);
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::position_fee_factor_key(&w.env, &w.market_tk, true),
@@ -638,7 +638,7 @@ mod tests {
         });
 
         // Expected position fee: size_delta × fee_factor / FLOAT_PRECISION / collateral_price × TOKEN_PRECISION
-        let fee_factor = fee_bps * FP / 10_000;
+        let fee_factor = fee_bps * FP / (gmx_math::BPS_DIVISOR as i128);
         let fee_usd = gmx_math::mul_div_wide(&w.env, size_delta, fee_factor, FP);
         let expected_fee_tok =
             gmx_math::mul_div_wide(&w.env, fee_usd, TOKEN_PRECISION, index_price);
