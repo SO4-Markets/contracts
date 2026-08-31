@@ -105,6 +105,8 @@ OrderCleanup         ──► cancels expired orders, previews cleanup fees
 | `fee_batch_sweeper` | Batches `fee_handler.claim_fees` across many market/token pairs in one call. Stateless — delegates auth and accounting to `fee_handler`. |
 | `insurance_fund_router` | Configures per-market insurance funds and routes liquidation penalties / shortfall coverage between pool, treasury, and fund. |
 | `order_cleanup` | Cancels orders that have sat unexecuted past their configured expiry and previews the resulting cleanup fee. |
+| `test_faucet` | Test-only faucet that dispenses configured token amounts to callers. Excluded from production builds and WASM size budget. |
+| `test_token` | Test-only SEP-41 token used alongside `test_faucet` for testnet bootstrap workflows. Excluded from production builds and WASM size budget. |
 
 `market_util_reader`, `fee_batch_sweeper`, `insurance_fund_router`, and
 `order_cleanup` are stateless periphery contracts: none of them expose an
@@ -1101,7 +1103,9 @@ contracts/
 │   ├── market_util_reader/       # stateless OI-to-pool-depth view (periphery)
 │   ├── fee_batch_sweeper/        # batches fee_handler claims (periphery)
 │   ├── insurance_fund_router/    # liquidation penalty routing (periphery)
-│   └── order_cleanup/            # expired order cancellation (periphery)
+│   ├── order_cleanup/            # expired order cancellation (periphery)
+│   ├── test_faucet/              # test-only token faucet (excluded from budget)
+│   └── test_token/               # test-only SEP-41 token (excluded from budget)
 │
 └── libs/
     ├── types/                    # shared #[contracttype] structs
