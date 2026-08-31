@@ -148,6 +148,12 @@ pub enum Error {
     /// (issue #371) so callers can match this condition as a typed error
     /// instead of a generic execution failure.
     InvalidMarket = 28,
+    /// partial_liquidate_position referenced a position that is not currently
+    /// liquidatable (issue #533) — re-validated here, not just in the
+    /// liquidation_handler wrapper, so the real mutating entry point can't be
+    /// forced by a caller who bypasses liquidation_handler entirely (mirrors
+    /// AdlRequirementNotMet's rationale for execute_adl).
+    NotLiquidatable = 29,
 }
 
 
@@ -217,6 +223,20 @@ pub struct LiquidatePositionResult {
     pub execution_price: i128,
     pub keeper_execution_fee: i128,
     pub pnl_usd: i128,
+}
+
+/// Result of `partial_liquidate_position` returned to `liquidation_handler`
+/// (issue #533). `liquidated_size_usd` / `remaining_size_usd` reflect the
+/// position's actual post-close state, computed from the same clamp
+/// `decrease_position` itself applies, rather than a value liquidation_handler
+/// derives independently and never confirms was actually applied.
+#[contracttype]
+pub struct PartialLiquidatePositionResult {
+    pub execution_price: i128,
+    pub keeper_execution_fee: i128,
+    pub pnl_usd: i128,
+    pub liquidated_size_usd: i128,
+    pub remaining_size_usd: i128,
 }
 
 // ─── Funding rate snapshot event (issue #286) ─────────────────────────────────
@@ -1359,6 +1379,7 @@ impl OrderHandler {
                         current_time: env.ledger().timestamp(),
                         swap_path: order.swap_path.clone(),
                         oracle: &oracle,
+                        retain_collateral: false,
                     },
                 );
 
@@ -1798,6 +1819,18 @@ impl OrderHandler {
                     &collateral_token,
                     -fee_to_transfer,
                 );
+
+                // Reflect the fee already paid out of pool custody in the
+                // position's own stored collateral before decrease_position
+                // re-reads it fresh from storage — otherwise decrease_position
+                // computes the account's payout off the pre-fee collateral,
+                // double-paying this same fee out of the pool a second time.
+                let mut position_after_fee = position.clone();
+                position_after_fee.collateral_amount =
+                    position.collateral_amount.saturating_sub(fee_to_transfer);
+                env.storage()
+                    .persistent()
+                    .set(&PositionStorageKey::Position(pk.clone()), &position_after_fee);
             }
         }
 
@@ -1819,6 +1852,7 @@ impl OrderHandler {
                 current_time: env.ledger().timestamp(),
                 swap_path: soroban_sdk::Vec::new(&env),
                 oracle: &oracle,
+                retain_collateral: false,
             },
         );
 
@@ -1842,6 +1876,165 @@ impl OrderHandler {
             execution_price: result.execution_price,
             keeper_execution_fee: fee_to_transfer,
             pnl_usd: result.pnl_usd,
+        }
+    }
+
+    /// Partially close a liquidatable position (issue #533). Called by
+    /// liquidation_handler after role/health checks, mirroring `liquidate_position`
+    /// and `execute_adl`'s delegation pattern: positions live in order_handler
+    /// storage, so the actual size reduction — and the keeper execution fee, paid
+    /// the same way `liquidate_position` pays it — must happen here, not in the
+    /// wrapper. Unlike a full liquidation, the position is left open at its
+    /// reduced size rather than removed.
+    pub fn partial_liquidate_position(
+        env: Env,
+        keeper: Address, // must have LIQUIDATION_KEEPER role
+        account: Address,
+        market: Address,
+        collateral_token: Address,
+        is_long: bool,
+        liquidation_factor_bps: u128,
+    ) -> PartialLiquidatePositionResult {
+        keeper.require_auth();
+        require_liquidation_keeper(&env, &keeper);
+
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let oracle: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Oracle)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let handler = env.current_contract_address();
+
+        let market_props = load_market_props(&env, &data_store, &market);
+        let oracle_client = OracleClient::new(&env, &oracle);
+        let index_price = oracle_client.get_primary_price(&market_props.index_token);
+        let collateral_price = oracle_client
+            .get_primary_price(&collateral_token)
+            .mid_price();
+
+        let pk = position_key(&env, &account, &market, &collateral_token, is_long);
+        let position: PositionProps = env
+            .storage()
+            .persistent()
+            .get(&PositionStorageKey::Position(pk.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, Error::PositionNotFound));
+
+        // Re-validate liquidatability — a caller that bypasses liquidation_handler
+        // and calls this entry point directly must not be able to partially close
+        // a healthy position.
+        if !gmx_position_utils::is_liquidatable(
+            &env,
+            &data_store,
+            &position,
+            &market_props,
+            collateral_price,
+            &index_price,
+        ) {
+            panic_with_error!(&env, Error::NotLiquidatable);
+        }
+
+        let factor = (liquidation_factor_bps.min(10_000)) as i128;
+        // size_in_usd is FLOAT_PRECISION-scaled (10^30) — a naive `size * factor`
+        // overflows i128 well before the division by 10_000 brings it back down,
+        // so this must go through the same wide-multiply helper every other
+        // FLOAT_PRECISION-scaled computation in this codebase uses.
+        let liquidated_size_usd = mul_div_wide(&env, position.size_in_usd, factor, 10_000);
+        let remaining_size_usd = position.size_in_usd.saturating_sub(liquidated_size_usd);
+
+        // Handle keeper execution fee (mirrors liquidate_position's #208 handling):
+        // deduct from position collateral first, capped at what the position holds.
+        let ds = DataStoreClient::new(&env, &data_store);
+        let keeper_fee_key = liquidation_execution_fee_key(&env, &market);
+        let keeper_execution_fee = ds.get_u128(&keeper_fee_key);
+
+        let mut fee_to_transfer: i128 = 0;
+        if keeper_execution_fee > 0 {
+            let keeper_fee_i128 = keeper_execution_fee as i128;
+            fee_to_transfer = if keeper_fee_i128 <= position.collateral_amount {
+                keeper_fee_i128
+            } else {
+                position.collateral_amount
+            };
+
+            if fee_to_transfer > 0 {
+                MarketTokenClient::new(&env, &market_props.market_token).withdraw_from_pool(
+                    &handler,
+                    &collateral_token,
+                    &keeper,
+                    &fee_to_transfer,
+                );
+                gmx_market_utils::apply_delta_to_pool_amount(
+                    &env,
+                    &data_store,
+                    &handler,
+                    &market_props,
+                    &collateral_token,
+                    -fee_to_transfer,
+                );
+
+                // Reflect the fee already paid out of pool custody in the
+                // position's own stored collateral before decrease_position
+                // re-reads it fresh from storage. Without this, retain_collateral
+                // (below) would keep the *pre-fee* collateral figure with the
+                // position forever — silently overstating what actually backs
+                // it and letting the same fee be harvested again on a later
+                // partial liquidation of the same position — and a 100%-factor
+                // close would double-pay the fee out of the pool exactly as a
+                // full `liquidate_position` close would without this fix.
+                let mut position_after_fee = position.clone();
+                position_after_fee.collateral_amount =
+                    position.collateral_amount.saturating_sub(fee_to_transfer);
+                env.storage()
+                    .persistent()
+                    .set(&PositionStorageKey::Position(pk.clone()), &position_after_fee);
+            }
+        }
+
+        let result = decrease_position(
+            &env,
+            &DecreasePositionParams {
+                data_store: &data_store,
+                caller: &handler,
+                account: &account,
+                receiver: &account,
+                market: &market_props,
+                collateral_token: &collateral_token,
+                size_delta_usd: liquidated_size_usd,
+                acceptable_price: 0,
+                is_long,
+                index_token_price: &index_price,
+                collateral_price,
+                current_time: env.ledger().timestamp(),
+                swap_path: soroban_sdk::Vec::new(&env),
+                oracle: &oracle,
+                retain_collateral: true,
+            },
+        );
+
+        env.events().publish(
+            (symbol_short!("prt_liq"),),
+            (
+                pk,
+                account,
+                liquidated_size_usd,
+                remaining_size_usd,
+                result.execution_price,
+                fee_to_transfer,
+                result.pnl_usd,
+            ),
+        );
+
+        PartialLiquidatePositionResult {
+            execution_price: result.execution_price,
+            keeper_execution_fee: fee_to_transfer,
+            pnl_usd: result.pnl_usd,
+            liquidated_size_usd,
+            remaining_size_usd,
         }
     }
 
@@ -1930,6 +2123,7 @@ impl OrderHandler {
                 current_time: env.ledger().timestamp(),
                 swap_path: soroban_sdk::Vec::new(&env),
                 oracle: &oracle,
+                retain_collateral: false,
             },
         );
 
@@ -3772,6 +3966,70 @@ mod tests {
             pool_amount_with_fee,
             pool_amount_without_fee - keeper_fee as u128,
             "pool_amount must drop by exactly the keeper's liquidation_execution_fee"
+        );
+    }
+
+    /// A configured keeper execution fee must be deducted from what the account
+    /// receives, not paid out of the pool *in addition to* the position's full
+    /// collateral value. Before this fix, `liquidate_position` withdrew the
+    /// keeper's fee from the pool and then separately called `decrease_position`,
+    /// which re-read the position's *pre-fee* collateral from storage and paid
+    /// that full amount to the account — double-paying the fee out of the pool.
+    /// Forces liquidatability via a steep `min_collateral_factor` instead of a
+    /// price crash so realised PnL stays ~0, making the fee's effect on the
+    /// account's payout directly observable instead of masked by a clamp-to-zero
+    /// loss.
+    #[test]
+    fn liquidate_position_with_keeper_fee_does_not_double_pay_account() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+
+        let keeper_fee = 1_000_000i128; // 0.1 long_tk
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::liquidation_execution_fee_key(&w.env, &w.market_tk),
+            &(keeper_fee as u128),
+        );
+        // 150% of size required as collateral — the position (opened at 1x
+        // leverage) is now liquidatable purely by configuration, with the price
+        // unchanged since entry, so realised PnL on close is ~0.
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::min_collateral_factor_key(&w.env, &w.market_tk),
+            &((fp * 3 / 2) as u128),
+        );
+
+        let account_balance_before =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.user);
+
+        hc.liquidate_position(&w.keeper, &w.user, &w.market_tk, &w.long_tk, &true);
+
+        let account_balance_after =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.user);
+        let account_payout = account_balance_after - account_balance_before;
+
+        assert!(
+            account_payout <= COLLATERAL - keeper_fee,
+            "account payout ({account_payout}) must not exceed the position's collateral \
+             minus the keeper fee already paid out of the pool — got more than \
+             collateral - fee ({}), meaning the fee was paid twice",
+            COLLATERAL - keeper_fee
+        );
+        // With ~0 realised PnL and no other fees configured, the payout should
+        // land at (or just under, for any residual rounding/borrowing fee)
+        // exactly collateral - fee, not merely somewhere under it.
+        assert!(
+            account_payout >= COLLATERAL - keeper_fee - 10,
+            "account payout ({account_payout}) is unexpectedly far below collateral - fee \
+             ({}); expected ~= collateral - fee with ~0 realised PnL",
+            COLLATERAL - keeper_fee
         );
     }
 
