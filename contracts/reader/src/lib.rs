@@ -23,7 +23,7 @@ use gmx_keys::{
 use gmx_market_utils::{get_open_interest_for_side, get_pool_value};
 use gmx_math::{mul_div_wide, FLOAT_PRECISION, TOKEN_PRECISION};
 use gmx_position_utils::{get_position_fees, get_position_pnl_usd, is_liquidatable};
-use gmx_pricing_utils::{get_execution_price, get_position_price_impact};
+use gmx_pricing_utils::{get_execution_price, get_position_price_impact, get_swap_price_impact};
 use gmx_types::{
     AdlCandidate, DepositProps, FundingAmountResult, FundingInfo, FundingRateInfo,
     KeeperHeartbeatStatus, LiquidatablePosition, MarketProps, OrderProps, PoolValueInfo,
@@ -1382,26 +1382,27 @@ impl Reader {
                 short_price
             };
 
-            let input_usd =
-                mul_div_wide(&env, current_amount as i128, input_price, TOKEN_PRECISION);
-
-            let impact_usd = get_position_price_impact(
-                &env,
-                &data_store,
-                &market_props,
-                false,
-                input_usd,
-                true,
-                index_price,
-            );
-
-            total_impact_usd += impact_usd;
-
             let output_price = if output_token == market_props.long_token {
                 long_price
             } else {
                 short_price
             };
+
+            let input_usd =
+                mul_div_wide(&env, current_amount as i128, input_price, TOKEN_PRECISION);
+
+            let impact_usd = get_swap_price_impact(
+                &env,
+                &data_store,
+                &market_props,
+                &input_token,
+                &output_token,
+                current_amount as i128,
+                input_price,
+                output_price,
+            );
+
+            total_impact_usd += impact_usd;
 
             let output_usd = input_usd + impact_usd;
 
