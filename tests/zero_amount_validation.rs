@@ -161,6 +161,7 @@ fn market_increase_with_zero_size_reverts() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 
@@ -196,6 +197,7 @@ fn limit_increase_with_zero_size_reverts() {
             order_type: OrderType::LimitIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 
@@ -228,6 +230,7 @@ fn market_decrease_with_zero_size_reverts() {
             order_type: OrderType::MarketDecrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 
@@ -264,6 +267,7 @@ fn swap_order_with_zero_size_succeeds() {
             order_type: OrderType::MarketSwap,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 

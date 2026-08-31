@@ -187,6 +187,7 @@ fn cancel_usdc_order_refunds_exact_short_token() {
             order_type: OrderType::MarketIncrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 
@@ -235,6 +236,7 @@ fn cancel_xlm_order_refunds_exact_long_token() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 
@@ -282,6 +284,7 @@ fn keeper_freeze_then_user_cancel_refunds_exact_collateral() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 
@@ -326,6 +329,7 @@ fn cancel_removes_order_from_all_storage_lists() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 
@@ -370,6 +374,7 @@ fn non_owner_cannot_cancel_order() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 

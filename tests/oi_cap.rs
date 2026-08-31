@@ -212,6 +212,7 @@ fn open_real_position(
             order_type: OrderType::MarketIncrease,
             is_long,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     oh_c.execute_order(&w.keeper, &order_key);
@@ -248,6 +249,7 @@ fn try_real_increase(
             order_type: OrderType::MarketIncrease,
             is_long,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     oh_c.try_execute_order(&w.keeper, &order_key).is_ok()
@@ -358,6 +360,7 @@ fn oi_cap_decrease_always_allowed() {
             order_type: OrderType::MarketDecrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 

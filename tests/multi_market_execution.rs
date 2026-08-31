@@ -235,6 +235,7 @@ fn keeper_executes_orders_on_two_markets_in_same_ledger() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 
@@ -260,6 +261,7 @@ fn keeper_executes_orders_on_two_markets_in_same_ledger() {
             order_type: OrderType::MarketIncrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 

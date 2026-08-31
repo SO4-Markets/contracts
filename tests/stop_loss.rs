@@ -155,6 +155,7 @@ fn stop_loss_not_triggered_above_trigger_price() {
         order_type: OrderType::StopLossDecrease,
         is_long: true,
         expiry_ledger: None,
+        on_behalf_of: None,
     });
 
     // Step 3: Oracle submits price above trigger (1,950 USD)
@@ -209,6 +210,7 @@ fn stop_loss_triggers_at_exact_trigger_price() {
         order_type: OrderType::StopLossDecrease,
         is_long: true,
         expiry_ledger: None,
+        on_behalf_of: None,
     });
 
     // Create a mock position first (simplified)
@@ -265,6 +267,7 @@ fn stop_loss_triggers_below_trigger_price() {
         order_type: OrderType::StopLossDecrease,
         is_long: true,
         expiry_ledger: None,
+        on_behalf_of: None,
     });
 
     // Oracle submits price below trigger (1,890 USD)
@@ -318,6 +321,7 @@ fn stop_loss_slippage_protection_rejects_worse_price() {
         order_type: OrderType::StopLossDecrease,
         is_long: true,
         expiry_ledger: None,
+        on_behalf_of: None,
     });
 
     // Oracle submits price below acceptable (1,840 USD - worse than 1,850)

@@ -198,6 +198,7 @@ fn borrowing_factor_accrues_over_time() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 
@@ -239,6 +240,7 @@ fn borrowing_factor_accrues_over_time() {
             order_type: OrderType::MarketDecrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 
@@ -298,6 +300,7 @@ fn position_borrowing_factor_snapshot_updated_on_partial_decrease() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 
@@ -335,6 +338,7 @@ fn position_borrowing_factor_snapshot_updated_on_partial_decrease() {
             order_type: OrderType::MarketDecrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     set_prices(&w, price);
@@ -404,6 +408,7 @@ fn pool_receives_borrowing_fee_on_position_decrease() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     w.env.ledger().set_timestamp(500);
@@ -440,6 +445,7 @@ fn pool_receives_borrowing_fee_on_position_decrease() {
             order_type: OrderType::MarketDecrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     set_prices(&w, price);

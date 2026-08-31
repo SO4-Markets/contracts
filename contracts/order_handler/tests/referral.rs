@@ -276,6 +276,7 @@ fn execute_order_increments_referrer_volume() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     set_prices(&w, price);
@@ -329,6 +330,7 @@ fn referrer_volume_accumulates_across_orders() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     set_prices(&w, price);
@@ -353,6 +355,7 @@ fn referrer_volume_accumulates_across_orders() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     set_prices(&w, price);
@@ -402,6 +405,7 @@ fn swap_order_does_not_increment_referrer_volume() {
             order_type: OrderType::MarketSwap,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     set_prices(&w, 2000 * fp);
@@ -481,6 +485,7 @@ fn auto_tier_upgrade_via_execute_order_volume() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     set_prices(&w, price);

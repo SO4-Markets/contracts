@@ -143,6 +143,7 @@ fn do_create_order(w: &World, user: &Address) -> soroban_sdk::BytesN<32> {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     )
 }
@@ -239,6 +240,7 @@ fn bench_full_cycle(c: &mut Criterion) {
                         order_type: OrderType::MarketDecrease,
                         is_long: true,
                         expiry_ledger: None,
+                        on_behalf_of: None,
                     },
                 );
                 OrderHandlerClient::new(&w.env, &w.handler)
@@ -268,6 +270,7 @@ fn bench_full_cycle(c: &mut Criterion) {
             order_type: OrderType::MarketDecrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     w.env.cost_estimate().budget().reset_default();

@@ -700,6 +700,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -733,6 +734,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);

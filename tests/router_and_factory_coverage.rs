@@ -234,6 +234,7 @@ fn exchange_router_multicall_opens_position() {
                     order_type: OrderType::MarketIncrease,
                     is_long: true,
                     expiry_ledger: None,
+                    on_behalf_of: None,
                 }),
             ],
         ),

@@ -701,15 +701,19 @@ impl OrderHandler {
                 params.collateral_delta_amount
             };
 
-            // Issue #620: apply the same position-manager owner/receiver
-            // redirection create_order applies, so the two order-creation
-            // entrypoints agree on who owns an order created on someone else's
-            // behalf. (The lookup direction itself is reversed per #385/#535 —
-            // that is a separate, already-tracked defect; this mirrors
-            // create_order's current behavior as-is, not a fix for #385.)
+            // Issue #620/#385/#535: apply the same position-manager
+            // owner/receiver resolution create_order applies, so the two
+            // order-creation entrypoints agree on who owns an order created
+            // on someone else's behalf.
             let (actual_owner, actual_receiver) = if is_position_order {
-                match ds.get_position_manager(&caller, &params.market) {
-                    Some(owner) => (owner.clone(), owner),
+                match &params.on_behalf_of {
+                    Some(owner) => {
+                        if ds.get_position_manager(owner, &params.market) != Some(caller.clone())
+                        {
+                            panic_with_error!(&env, Error::UnauthorizedPositionManager);
+                        }
+                        (owner.clone(), owner.clone())
+                    }
                     None => (caller.clone(), params.receiver.clone()),
                 }
             } else {
@@ -872,31 +876,23 @@ impl OrderHandler {
             panic_with_error!(&env, Error::ZeroSizeDelta);
         }
 
-        // Position manager authorization:
-        // For position orders, verify caller is either the owner OR an authorized manager for this market.
-        // If caller is a manager, receiver must be the owner (cannot redirect funds).
-        //
-        // ISSUE #385: This logic is currently REVERSED and needs fixing.
-        // Current code incorrectly calls get_position_manager(&caller, market) which looks up
-        // "who is the manager FOR caller" — but we need to check "is caller a manager FOR the owner".
-        //
-        // REQUIRED FIX: Add on_behalf_of: Option<Address> field to CreateOrderParams.
-        // Then verify: if on_behalf_of is present, check get_position_manager(&on_behalf_of, market) == Some(caller).
-        // When absent, caller must be the owner.
-        //
-        // For now, this preserves existing behavior but the logic is inverted and needs the refactor above.
+        // Position manager authorization (issue #385/#535):
+        // For position orders, the caller either acts for themselves
+        // (params.on_behalf_of == None) or names the owner they're acting
+        // for; in the latter case the named owner must have registered the
+        // caller as their manager via get_position_manager(owner, market).
+        // A caller with their own registered manager is never redirected by
+        // that fact alone — only an explicit on_behalf_of triggers delegation.
         let (actual_owner, actual_receiver) = if is_position_order {
-            // TODO(#385): This logic is reversed. See comment above for required fix.
-            match ds.get_position_manager(&caller, &params.market) {
+            match &params.on_behalf_of {
                 Some(owner) => {
-                    // Caller is a manager; position owner is stored in data_store
-                    // Receiver must be the owner (cannot redirect)
-                    (owner.clone(), owner)
+                    if ds.get_position_manager(owner, &params.market) != Some(caller.clone()) {
+                        panic_with_error!(&env, Error::UnauthorizedPositionManager);
+                    }
+                    // Receiver must be the owner (cannot redirect funds).
+                    (owner.clone(), owner.clone())
                 }
-                None => {
-                    // Caller is not a manager; must be the owner
-                    (caller.clone(), params.receiver)
-                }
+                None => (caller.clone(), params.receiver),
             }
         } else {
             // For swap orders, no position manager check needed
@@ -2304,6 +2300,7 @@ mod tests {
                 order_type,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         (hc, key)
@@ -2337,6 +2334,7 @@ mod tests {
                 order_type: OrderType::StopIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         )
     }
@@ -2446,6 +2444,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
     }
@@ -2508,6 +2507,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
     }
@@ -2627,6 +2627,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -2672,6 +2673,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -2731,6 +2733,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         assert!(hc.get_order(&key).is_some());
@@ -2782,6 +2785,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         assert!(hc.get_order(&key).is_some());
@@ -3024,6 +3028,7 @@ mod tests {
                 order_type: OrderType::LimitSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         )
     }
@@ -3250,6 +3255,7 @@ mod tests {
                 order_type: OrderType::MarketSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -3293,6 +3299,7 @@ mod tests {
                 order_type: OrderType::MarketSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -3453,6 +3460,7 @@ mod tests {
                 order_type: OrderType::MarketSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -3632,6 +3640,7 @@ mod tests {
                 order_type: OrderType::MarketSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -3956,6 +3965,7 @@ mod tests {
                 order_type: OrderType::MarketDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             });
         }
         hc.create_orders(&w.user, &requests);
@@ -3992,6 +4002,7 @@ mod tests {
                     order_type: OrderType::MarketIncrease,
                     is_long: true,
                     expiry_ledger: None,
+                    on_behalf_of: None,
                 },
                 // Stop-loss: StopLossDecrease
                 CreateOrderParams {
@@ -4008,6 +4019,7 @@ mod tests {
                     order_type: OrderType::StopLossDecrease,
                     is_long: true,
                     expiry_ledger: None,
+                    on_behalf_of: None,
                 },
                 // Take-profit: LimitDecrease
                 CreateOrderParams {
@@ -4024,6 +4036,7 @@ mod tests {
                     order_type: OrderType::LimitDecrease,
                     is_long: true,
                     expiry_ledger: None,
+                    on_behalf_of: None,
                 },
             ],
         );
@@ -4053,30 +4066,117 @@ mod tests {
         assert_eq!(tp.trigger_price, 2500 * fp);
     }
 
-    /// Issue #620: create_orders must apply the same position-manager
-    /// owner/receiver redirection create_order applies, so a position order
-    /// created through the batch entrypoint is attributed the same way as one
-    /// created through the singular entrypoint. (The redirection direction
-    /// itself is the separately-tracked #385/#535 bug — this only confirms
-    /// create_orders mirrors create_order's current behavior, not that the
-    /// lookup direction is correct.)
+    /// Issue #385/#535/#620: a trader who has registered a manager for
+    /// themselves (i.e. delegated to a bot) must still be able to create
+    /// orders for themselves directly — registering a manager must never
+    /// silently hijack the trader's own direct order-creation calls, in
+    /// either create_order or the create_orders batch entrypoint.
     #[test]
-    fn create_orders_applies_position_manager_redirection() {
+    fn trader_with_registered_manager_can_still_create_orders_for_self() {
         let w = setup();
         let fp = gmx_math::FLOAT_PRECISION;
         let ds_c = DsClient::new(&w.env, &w.ds);
 
-        let redirected_to = Address::generate(&w.env);
-        // Mirrors create_order's current (pre-#385-fix) lookup direction:
-        // ds.get_position_manager(&caller, &market).
-        ds_c.set_position_manager(&w.user, &w.market_tk, &redirected_to);
+        let bot = Address::generate(&w.env);
+        // w.user delegates to `bot` as their manager...
+        ds_c.set_position_manager(&w.user, &w.market_tk, &bot);
+
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &(COLLATERAL * 2));
+
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let base_params = CreateOrderParams {
+            receiver: w.user.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: Vec::new(&w.env),
+            size_delta_usd: 2000 * fp,
+            collateral_delta_amount: COLLATERAL,
+            trigger_price: 0,
+            acceptable_price: 0,
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketIncrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        };
+
+        // ...but calling create_order directly (no on_behalf_of) must still
+        // open the position for w.user themselves, not `bot`.
+        let key = hc.create_order(&w.user, &base_params);
+        let order = hc.get_order(&key).unwrap();
+        assert_eq!(order.account, w.user);
+        assert_eq!(order.receiver, w.user);
+
+        // Same for the batch entrypoint (fresh collateral: record_transfer_in
+        // already consumed the first mint's delta above).
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+        let keys = hc.create_orders(&w.user, &Vec::from_array(&w.env, [base_params]));
+        let batch_order = hc.get_order(&keys.get_unchecked(0)).unwrap();
+        assert_eq!(batch_order.account, w.user);
+        assert_eq!(batch_order.receiver, w.user);
+    }
+
+    /// Issue #385/#535/#620: a registered manager can create an order
+    /// on_behalf_of the owner who registered them — the order opens a
+    /// position for the owner (not the manager), and the manager must name
+    /// the correct owner to succeed.
+    #[test]
+    fn registered_manager_can_create_order_on_behalf_of_owner() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        let ds_c = DsClient::new(&w.env, &w.ds);
+
+        let bot = Address::generate(&w.env);
+        ds_c.set_position_manager(&w.user, &w.market_tk, &bot);
 
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
 
         let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
-        let requests = Vec::from_array(
-            &w.env,
-            [CreateOrderParams {
+        let key = hc.create_order(
+            &bot,
+            &CreateOrderParams {
+                receiver: bot.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                size_delta_usd: 2000 * fp,
+                collateral_delta_amount: COLLATERAL,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketIncrease,
+                is_long: true,
+                expiry_ledger: None,
+                on_behalf_of: Some(w.user.clone()),
+            },
+        );
+
+        let order = hc.get_order(&key).unwrap();
+        assert_eq!(
+            order.account, w.user,
+            "position must open for the owner, not the delegate manager"
+        );
+        assert_eq!(order.receiver, w.user, "receiver cannot be redirected to the manager");
+    }
+
+    /// Issue #385/#535: naming an owner in on_behalf_of who never registered
+    /// the caller as their manager must revert, not silently succeed or fall
+    /// back to treating the caller as the owner.
+    #[test]
+    #[should_panic]
+    fn create_order_on_behalf_of_unregistered_owner_panics() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+
+        let stranger = Address::generate(&w.env);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        hc.create_order(
+            &w.user,
+            &CreateOrderParams {
                 receiver: w.user.clone(),
                 market: w.market_tk.clone(),
                 initial_collateral_token: w.long_tk.clone(),
@@ -4090,17 +4190,9 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
-            }],
+                on_behalf_of: Some(stranger),
+            },
         );
-
-        let keys = hc.create_orders(&w.user, &requests);
-        let order = hc.get_order(&keys.get_unchecked(0)).unwrap();
-
-        assert_eq!(
-            order.account, redirected_to,
-            "create_orders must redirect account the same way create_order does"
-        );
-        assert_eq!(order.receiver, redirected_to);
     }
 
     /// Issue #454: two MarketIncrease legs sharing the same collateral token in one
@@ -4130,6 +4222,7 @@ mod tests {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         };
         let requests = Vec::from_array(&w.env, [leg.clone(), leg]);
         hc.create_orders(&w.user, &requests);
@@ -4159,6 +4252,7 @@ mod tests {
                 order_type: OrderType::MarketDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
     }
@@ -4199,6 +4293,7 @@ mod tests {
                 order_type: OrderType::MarketDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
     }
@@ -4247,6 +4342,7 @@ mod tests {
                 order_type: OrderType::MarketSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         assert!(
@@ -4288,6 +4384,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         set_prices(&w, 2000 * gmx_math::FLOAT_PRECISION);
@@ -4337,6 +4434,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
     }
@@ -4366,6 +4464,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         assert!(
@@ -4403,6 +4502,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         set_prices(&w, 2000 * fp);
@@ -4443,6 +4543,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         let before = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.user);
@@ -4511,6 +4612,7 @@ mod tests {
                 order_type: OrderType::MarketDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -4551,6 +4653,7 @@ mod tests {
                 order_type: OrderType::LimitDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         set_prices(&w, trigger); // price == trigger → must execute
@@ -4589,6 +4692,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &inc_key);
@@ -4611,6 +4715,7 @@ mod tests {
                 order_type: OrderType::LimitDecrease,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         set_prices(&w, trigger); // price == trigger → must execute
@@ -4650,6 +4755,7 @@ mod tests {
                 order_type: OrderType::StopLossDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         set_prices(&w, trigger); // price == trigger → must execute
