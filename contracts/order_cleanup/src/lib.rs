@@ -239,10 +239,11 @@ fn order_type_code(order_type: &OrderType) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Address as _;
 
     #[test]
     fn expiry_time_validation() {
-        use soroban_sdk::testutils::{Address as _, Ledger};
+        use soroban_sdk::testutils::Ledger;
         let env = Env::default();
         env.mock_all_auths();
 
@@ -257,7 +258,7 @@ mod tests {
         // order.updated_at_time is 100_000 in the mock
         env.ledger().set_timestamp(114_399); // 14,399 seconds later
         let res = client.try_cancel_expired_order(&data_store_id, &order_handler_id, &caller, &key);
-        assert_eq!(res.unwrap_err().unwrap(), Error::NotYetExpired);
+        assert_eq!(res.unwrap_err().unwrap(), Error::NotYetExpired.into());
 
         env.ledger().set_timestamp(114_400); // 14,400 seconds later
         let res2 = client.try_cancel_expired_order(&data_store_id, &order_handler_id, &caller, &key);

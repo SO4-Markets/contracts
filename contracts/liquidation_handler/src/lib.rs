@@ -420,7 +420,7 @@ impl LiquidationHandler {
             panic_with_error!(&env, Error::NotLiquidatable);
         }
 
-        let factor = (liquidation_factor_bps.min(gmx_math::BPS_DIVISOR as u32)) as i128;
+        let factor = liquidation_factor_bps.min(gmx_math::BPS_DIVISOR);
 
         // Issue #533: delegate the actual close to order_handler (positions live
         // there) instead of only computing what a close *would* look like. Every
@@ -432,7 +432,7 @@ impl LiquidationHandler {
             &market,
             &collateral_token,
             &is_long,
-            &(factor as u128),
+            &factor,
         );
 
         // Issue #614: record LIQUIDATION_KEEPER activity so check_keeper_heartbeat
@@ -450,7 +450,7 @@ impl LiquidationHandler {
             market,
             collateral_token,
             is_long,
-            liquidation_factor_bps: factor as u128,
+            liquidation_factor_bps: factor,
             liquidated_size_usd: result.liquidated_size_usd as u128,
             remaining_size_usd: result.remaining_size_usd as u128,
             liquidation_fee: result.keeper_execution_fee as u128,

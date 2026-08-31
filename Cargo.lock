@@ -1292,6 +1292,7 @@ version = "0.1.0"
 dependencies = [
  "data-store",
  "gmx-keys",
+ "gmx-math",
  "role-store",
  "soroban-sdk",
 ]
@@ -1855,6 +1856,7 @@ name = "referral-storage"
 version = "0.1.0"
 dependencies = [
  "gmx-keys",
+ "gmx-math",
  "soroban-sdk",
 ]
 
