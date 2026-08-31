@@ -592,16 +592,21 @@ mod tests {
         client(&w).set_tier_config(&w.admin, &0u32, &cfg);
     }
 
-    /// total_rebate_bps > 10_000 must revert with InvalidInput.
+    /// total_rebate_bps > 10_000 must revert with InvalidTierConfig.
     #[test]
-    #[should_panic]
     fn set_tier_config_rebate_bps_overflow_reverts() {
         let w = setup();
         let cfg = TierConfig {
             total_rebate_bps: 10_001,
             discount_share_bps: 0,
         };
-        client(&w).set_tier_config(&w.admin, &0u32, &cfg);
+        let result = client(&w).try_set_tier_config(&w.admin, &0u32, &cfg);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::InvalidTierConfig as u32
+            )))
+        );
     }
 
     /// discount_share_bps == 10_000 is the maximum; must be accepted.
@@ -615,16 +620,21 @@ mod tests {
         client(&w).set_tier_config(&w.admin, &0u32, &cfg);
     }
 
-    /// discount_share_bps > 10_000 must revert with InvalidInput.
+    /// discount_share_bps > 10_000 must revert with InvalidTierConfig.
     #[test]
-    #[should_panic]
     fn set_tier_config_discount_share_bps_overflow_reverts() {
         let w = setup();
         let cfg = TierConfig {
             total_rebate_bps: 0,
             discount_share_bps: 10_001,
         };
-        client(&w).set_tier_config(&w.admin, &0u32, &cfg);
+        let result = client(&w).try_set_tier_config(&w.admin, &0u32, &cfg);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::InvalidTierConfig as u32
+            )))
+        );
     }
 
     /// Both fields at maximum must be accepted (10_000, 10_000).
