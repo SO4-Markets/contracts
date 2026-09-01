@@ -129,7 +129,7 @@ trait IOracle {
 trait IDepositVault {
     fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128);
     fn get_recorded_balance(env: Env, token: Address) -> i128;
-    fn record_transfer_in(env: Env, token: Address) -> i128;
+    fn record_transfer_in(env: Env, caller: Address, token: Address) -> i128;
 }
 
 #[allow(dead_code)]
@@ -316,7 +316,7 @@ impl DepositHandler {
             );
             // Snapshot the vault's balance so execute_deposit's recorded-balance
             // check (guard against fee-on-transfer tokens) sees the funds just received.
-            vault_client.record_transfer_in(&params.initial_long_token);
+            vault_client.record_transfer_in(&handler, &params.initial_long_token);
         }
         if params.short_token_amount > 0 {
             token::Client::new(&env, &params.initial_short_token).transfer(
@@ -324,7 +324,7 @@ impl DepositHandler {
                 &deposit_vault,
                 &params.short_token_amount,
             );
-            vault_client.record_transfer_in(&params.initial_short_token);
+            vault_client.record_transfer_in(&handler, &params.initial_short_token);
         }
 
         // Issue #370: collect execution_fee in the long token.
@@ -334,7 +334,7 @@ impl DepositHandler {
                 &deposit_vault,
                 &exec_fee,
             );
-            vault_client.record_transfer_in(&params.initial_long_token);
+            vault_client.record_transfer_in(&handler, &params.initial_long_token);
         }
 
         // Allocate deposit key from nonce

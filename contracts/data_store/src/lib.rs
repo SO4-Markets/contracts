@@ -175,21 +175,23 @@ impl DataStore {
     // ── u128 operations ──────────────────────────────────────────────────────
 
     pub fn get_u128(env: Env, key: BytesN<32>) -> u128 {
+        let dk = DataKey::U128(key);
+        let val: u128 = env.storage().persistent().get(&dk).unwrap_or(0);
         env.storage()
             .persistent()
-            .get(&DataKey::U128(key))
-            .unwrap_or(0)
+            .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        val
     }
 
     /// Read multiple u128 values in one call to reduce cross-contract call overhead.
     pub fn get_u128_batch(env: Env, keys: Vec<BytesN<32>>) -> Vec<u128> {
         let mut results = Vec::new(&env);
         for key in keys.iter() {
-            let val: u128 = env
-                .storage()
+            let dk = DataKey::U128(key);
+            let val: u128 = env.storage().persistent().get(&dk).unwrap_or(0);
+            env.storage()
                 .persistent()
-                .get(&DataKey::U128(key))
-                .unwrap_or(0);
+                .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
             results.push_back(val);
         }
         results
@@ -234,7 +236,11 @@ impl DataStore {
     pub fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128 {
         caller.require_auth();
         require_controller(&env, &caller);
-        env.storage().persistent().set(&DataKey::U128(key), &value);
+        let dk = DataKey::U128(key);
+        env.storage().persistent().set(&dk, &value);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         value
     }
 
@@ -248,7 +254,11 @@ impl DataStore {
     pub fn set_u128_config(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128 {
         caller.require_auth();
         require_controller(&env, &caller);
-        env.storage().persistent().set(&DataKey::U128(key.clone()), &value);
+        let dk = DataKey::U128(key.clone());
+        env.storage().persistent().set(&dk, &value);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         env.storage().instance().set(&DataKey::InstanceU128(key), &value);
         value
     }
@@ -266,11 +276,11 @@ impl DataStore {
     /// `set_u128_config`, the next `get_u128_cached` call will detect the
     /// divergence and return the fresh persistent value, updating the cache.
     pub fn get_u128_cached(env: Env, key: BytesN<32>) -> u128 {
-        let persistent_val: u128 = env
-            .storage()
+        let dk = DataKey::U128(key.clone());
+        let persistent_val: u128 = env.storage().persistent().get(&dk).unwrap_or(0);
+        env.storage()
             .persistent()
-            .get(&DataKey::U128(key.clone()))
-            .unwrap_or(0);
+            .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         env.storage()
             .instance()
             .set(&DataKey::InstanceU128(key), &persistent_val);
@@ -305,11 +315,8 @@ impl DataStore {
     pub fn apply_delta_to_u128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> u128 {
         caller.require_auth();
         require_controller(&env, &caller);
-        let current: u128 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::U128(key.clone()))
-            .unwrap_or(0);
+        let dk = DataKey::U128(key);
+        let current: u128 = env.storage().persistent().get(&dk).unwrap_or(0);
         let next = if delta >= 0 {
             current.saturating_add(delta as u128)
         } else {
@@ -319,52 +326,61 @@ impl DataStore {
             }
             current - sub
         };
-        env.storage().persistent().set(&DataKey::U128(key), &next);
+        env.storage().persistent().set(&dk, &next);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         next
     }
 
     pub fn increment_u128(env: Env, caller: Address, key: BytesN<32>, amount: u128) -> u128 {
         caller.require_auth();
         require_controller(&env, &caller);
-        let current: u128 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::U128(key.clone()))
-            .unwrap_or(0);
+        let dk = DataKey::U128(key);
+        let current: u128 = env.storage().persistent().get(&dk).unwrap_or(0);
         let next = current.saturating_add(amount);
-        env.storage().persistent().set(&DataKey::U128(key), &next);
+        env.storage().persistent().set(&dk, &next);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         next
     }
 
     pub fn decrement_u128(env: Env, caller: Address, key: BytesN<32>, amount: u128) -> u128 {
         caller.require_auth();
         require_controller(&env, &caller);
-        let current: u128 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::U128(key.clone()))
-            .unwrap_or(0);
+        let dk = DataKey::U128(key);
+        let current: u128 = env.storage().persistent().get(&dk).unwrap_or(0);
         if amount > current {
             panic_with_error!(&env, Error::Underflow);
         }
         let next = current - amount;
-        env.storage().persistent().set(&DataKey::U128(key), &next);
+        env.storage().persistent().set(&dk, &next);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         next
     }
 
     // ── i128 operations ──────────────────────────────────────────────────────
 
     pub fn get_i128(env: Env, key: BytesN<32>) -> i128 {
+        let dk = DataKey::I128(key);
+        let val: i128 = env.storage().persistent().get(&dk).unwrap_or(0);
         env.storage()
             .persistent()
-            .get(&DataKey::I128(key))
-            .unwrap_or(0)
+            .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        val
     }
 
     pub fn set_i128(env: Env, caller: Address, key: BytesN<32>, value: i128) -> i128 {
         caller.require_auth();
         require_controller(&env, &caller);
-        env.storage().persistent().set(&DataKey::I128(key), &value);
+        let dk = DataKey::I128(key);
+        env.storage().persistent().set(&dk, &value);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         value
     }
 
@@ -377,26 +393,35 @@ impl DataStore {
     pub fn apply_delta_to_i128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> i128 {
         caller.require_auth();
         require_controller(&env, &caller);
-        let current: i128 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::I128(key.clone()))
-            .unwrap_or(0);
+        let dk = DataKey::I128(key);
+        let current: i128 = env.storage().persistent().get(&dk).unwrap_or(0);
         let next = current.saturating_add(delta);
-        env.storage().persistent().set(&DataKey::I128(key), &next);
+        env.storage().persistent().set(&dk, &next);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         next
     }
 
     // ── Address operations ────────────────────────────────────────────────────
 
     pub fn get_address(env: Env, key: BytesN<32>) -> Option<Address> {
-        env.storage().persistent().get(&DataKey::Addr(key))
+        let dk = DataKey::Addr(key);
+        let val: Option<Address> = env.storage().persistent().get(&dk);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        val
     }
 
     pub fn set_address(env: Env, caller: Address, key: BytesN<32>, value: Address) -> Address {
         caller.require_auth();
         require_controller(&env, &caller);
-        env.storage().persistent().set(&DataKey::Addr(key), &value);
+        let dk = DataKey::Addr(key);
+        env.storage().persistent().set(&dk, &value);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         value
     }
 
@@ -409,16 +434,22 @@ impl DataStore {
     // ── bool operations ───────────────────────────────────────────────────────
 
     pub fn get_bool(env: Env, key: BytesN<32>) -> bool {
+        let dk = DataKey::Bool(key);
+        let val: bool = env.storage().persistent().get(&dk).unwrap_or(false);
         env.storage()
             .persistent()
-            .get(&DataKey::Bool(key))
-            .unwrap_or(false)
+            .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        val
     }
 
     pub fn set_bool(env: Env, caller: Address, key: BytesN<32>, value: bool) -> bool {
         caller.require_auth();
         require_controller(&env, &caller);
-        env.storage().persistent().set(&DataKey::Bool(key), &value);
+        let dk = DataKey::Bool(key);
+        env.storage().persistent().set(&dk, &value);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         value
     }
 
@@ -431,10 +462,16 @@ impl DataStore {
     // ── BytesN<32> operations ─────────────────────────────────────────────────
 
     pub fn get_bytes32(env: Env, key: BytesN<32>) -> BytesN<32> {
+        let dk = DataKey::B32(key);
+        let val: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&dk)
+            .unwrap_or(BytesN::from_array(&env, &[0u8; 32]));
         env.storage()
             .persistent()
-            .get(&DataKey::B32(key))
-            .unwrap_or(BytesN::from_array(&env, &[0u8; 32]))
+            .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        val
     }
 
     pub fn set_bytes32(
@@ -445,7 +482,11 @@ impl DataStore {
     ) -> BytesN<32> {
         caller.require_auth();
         require_controller(&env, &caller);
-        env.storage().persistent().set(&DataKey::B32(key), &value);
+        let dk = DataKey::B32(key);
+        env.storage().persistent().set(&dk, &value);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         value
     }
 
