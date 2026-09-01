@@ -13,6 +13,7 @@ soroban-sdk = { workspace = true }
 gmx-keys = { path = "../../libs/keys" }
 gmx-types = { path = "../../libs/types" }
 gmx-market-utils = { path = "../../libs/market_utils" }
+gmx-math = { path = "../../libs/math" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
@@ -22,4 +23,3 @@ oracle            = { path = "../oracle", features = ["testutils"] }
 market-token      = { path = "../market_token" }
 deposit-handler   = { path = "../deposit_handler" }
 deposit-vault     = { path = "../deposit_vault" }
-gmx-math          = { path = "../../libs/math" }

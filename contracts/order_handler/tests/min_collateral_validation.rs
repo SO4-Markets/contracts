@@ -261,6 +261,7 @@ fn open_at_min_collateral_succeeds() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 
@@ -306,6 +307,7 @@ fn open_above_min_collateral_succeeds() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 
@@ -351,6 +353,7 @@ fn zero_min_collateral_factor_disables_enforcement() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 

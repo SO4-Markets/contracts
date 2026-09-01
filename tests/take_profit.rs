@@ -153,6 +153,7 @@ fn take_profit_not_triggered_above_trigger_price() {
         order_type: OrderType::LimitDecrease, // Take-profit for short
         is_long: false, // Short position
         expiry_ledger: None,
+        on_behalf_of: None,
     });
 
     // Step 3: Oracle submits price above trigger (1,850 USD)
@@ -209,6 +210,7 @@ fn take_profit_triggers_at_exact_trigger_price() {
         order_type: OrderType::LimitDecrease,
         is_long: false, // Short position
         expiry_ledger: None,
+        on_behalf_of: None,
     });
 
     // Oracle submits price at trigger (1,800 USD)
@@ -265,6 +267,7 @@ fn take_profit_triggers_below_trigger_price() {
         order_type: OrderType::LimitDecrease,
         is_long: false,
         expiry_ledger: None,
+        on_behalf_of: None,
     });
 
     // Oracle submits price below trigger (1,750 USD - even better)
@@ -321,6 +324,7 @@ fn take_profit_slippage_protection_rejects_worse_price() {
         order_type: OrderType::LimitDecrease,
         is_long: false,
         expiry_ledger: None,
+        on_behalf_of: None,
     });
 
     // Oracle submits price above acceptable (1,830 USD - worse than 1,820 for short)
@@ -377,6 +381,7 @@ fn take_profit_long_position_triggers_above_entry_price() {
         order_type: OrderType::LimitDecrease,
         is_long: true, // Long position
         expiry_ledger: None,
+        on_behalf_of: None,
     });
 
     // Oracle submits price below trigger (2,100 USD - not high enough yet)

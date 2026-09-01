@@ -8,7 +8,6 @@ use gmx_market_utils::{get_open_interest_for_side, get_pool_value};
 use gmx_types::{MarketProps, PriceProps};
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env};
 
-const BPS_DIVISOR: u128 = 10_000;
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -129,7 +128,7 @@ fn utilisation_bps(open_interest_usd: u128, pool_value_usd: u128) -> u32 {
         return u32::MAX;
     }
 
-    let bps = open_interest_usd.saturating_mul(BPS_DIVISOR) / pool_value_usd;
+    let bps = open_interest_usd.saturating_mul(gmx_math::BPS_DIVISOR) / pool_value_usd;
     bps.min(u32::MAX as u128) as u32
 }
 

@@ -397,7 +397,7 @@ mod tests {
     /// Configure market parameters: position fee factor, borrowing factor, etc.
     fn configure_market(w: &World, position_fee_bps: i128) {
         let ds_c = DsClient::new(&w.env, &w.ds);
-        let fee_factor = position_fee_bps * FLOAT_PRECISION / 10_000; // bps → FLOAT_PRECISION
+        let fee_factor = position_fee_bps * FLOAT_PRECISION / (gmx_math::BPS_DIVISOR as i128); // bps → FLOAT_PRECISION
 
         // Position fee factor (for positive impact)
         ds_c.set_u128(
@@ -416,7 +416,7 @@ mod tests {
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::borrowing_factor_key(&w.env, &w.market_tk, true),
-            &(FLOAT_PRECISION as u128 / 10_000),
+            &(FLOAT_PRECISION as u128 / gmx_math::BPS_DIVISOR as u128),
         );
         ds_c.set_u128(
             &w.admin,
@@ -612,7 +612,7 @@ mod tests {
         });
 
         // Expected position fee: size_delta * fee_factor / FLOAT_PRECISION / collateral_price * TOKEN_PRECISION
-        let fee_factor = 30 * fp / 10_000; // 30 bps
+        let fee_factor = 30 * fp / (gmx_math::BPS_DIVISOR as i128); // 30 bps
         let fee_usd = gmx_math::mul_div_wide(&w.env, size_delta, fee_factor, fp);
         let expected_fee_tokens =
             gmx_math::mul_div_wide(&w.env, fee_usd, TOKEN_PRECISION, index_price);
@@ -994,12 +994,12 @@ mod tests {
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::position_fee_factor_key(&w.env, &w.market_tk, true),
-            &(10 * fp as u128 / 10_000),
+            &(10 * fp as u128 / gmx_math::BPS_DIVISOR as u128),
         );
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::position_fee_factor_key(&w.env, &w.market_tk, false),
-            &(30 * fp as u128 / 10_000),
+            &(30 * fp as u128 / gmx_math::BPS_DIVISOR as u128),
         );
         ds_c.set_u128(
             &w.admin,

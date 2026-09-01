@@ -203,6 +203,7 @@ fn weighted_avg_entry_price_after_increase_from_profit() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     set_prices(&w, 2_000 * fp);
@@ -241,6 +242,7 @@ fn weighted_avg_entry_price_after_increase_from_profit() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     set_prices(&w, 2_200 * fp);
@@ -313,6 +315,7 @@ fn position_pnl_is_positive_after_price_increase() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     set_prices(&w, 2_000 * fp);
@@ -378,6 +381,7 @@ fn position_size_doubles_after_equal_notional_increase() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     set_prices(&w, 2_000 * fp);
@@ -405,6 +409,7 @@ fn position_size_doubles_after_equal_notional_increase() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     set_prices(&w, 2_200 * fp);

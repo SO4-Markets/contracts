@@ -85,6 +85,7 @@ impl MarketProps {
 ///   long_claim_fnd_per_size  = longTokenClaimableFundingAmountPerSize
 ///   short_claim_fnd_per_size = shortTokenClaimableFundingAmountPerSize
 #[contracttype]
+#[derive(Clone)]
 pub struct PositionProps {
     pub account: Address,
     pub market: Address,
@@ -184,6 +185,11 @@ pub struct CreateOrderParams {
     /// (with full refund) when the keeper calls `execute_order` after sequence `n`.
     /// `None` means the order never expires via this mechanism.
     pub expiry_ledger: Option<u64>,
+    /// Issue #385/#535: when a registered position manager calls on behalf of
+    /// an owner, the owner is named here explicitly. `Some(owner)` requires
+    /// `data_store::get_position_manager(owner, market) == Some(caller)`;
+    /// `None` means the caller is acting for themselves.
+    pub on_behalf_of: Option<Address>,
 }
 
 // ─── Deposits / Withdrawals ───────────────────────────────────────────────────

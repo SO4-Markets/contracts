@@ -146,6 +146,12 @@ pub enum Error {
     /// (issue #371) so callers can match this condition as a typed error
     /// instead of a generic execution failure.
     InvalidMarket = 28,
+    /// partial_liquidate_position referenced a position that is not currently
+    /// liquidatable (issue #533) — re-validated here, not just in the
+    /// liquidation_handler wrapper, so the real mutating entry point can't be
+    /// forced by a caller who bypasses liquidation_handler entirely (mirrors
+    /// AdlRequirementNotMet's rationale for execute_adl).
+    NotLiquidatable = 29,
 }
 
 
@@ -217,6 +223,20 @@ pub struct LiquidatePositionResult {
     pub pnl_usd: i128,
 }
 
+/// Result of `partial_liquidate_position` returned to `liquidation_handler`
+/// (issue #533). `liquidated_size_usd` / `remaining_size_usd` reflect the
+/// position's actual post-close state, computed from the same clamp
+/// `decrease_position` itself applies, rather than a value liquidation_handler
+/// derives independently and never confirms was actually applied.
+#[contracttype]
+pub struct PartialLiquidatePositionResult {
+    pub execution_price: i128,
+    pub keeper_execution_fee: i128,
+    pub pnl_usd: i128,
+    pub liquidated_size_usd: i128,
+    pub remaining_size_usd: i128,
+}
+
 // ─── Funding rate snapshot event (issue #286) ─────────────────────────────────
 //
 // Historical funding rates are not stored on-chain to avoid Soroban storage
@@ -270,7 +290,7 @@ trait IOracle {
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "OrderVaultClient")]
 trait IOrderVault {
-    fn record_transfer_in(env: Env, token: Address) -> i128;
+    fn record_transfer_in(env: Env, caller: Address, token: Address) -> i128;
     fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128);
 }
 
@@ -684,7 +704,8 @@ impl OrderHandler {
             );
 
             let collateral_delta_amount = if is_increase_or_swap {
-                let received = vault_client.record_transfer_in(&params.initial_collateral_token);
+                let received =
+                    vault_client.record_transfer_in(&handler, &params.initial_collateral_token);
                 if received <= 0 {
                     panic_with_error!(&env, Error::ZeroCollateral);
                 }
@@ -699,15 +720,19 @@ impl OrderHandler {
                 params.collateral_delta_amount
             };
 
-            // Issue #620: apply the same position-manager owner/receiver
-            // redirection create_order applies, so the two order-creation
-            // entrypoints agree on who owns an order created on someone else's
-            // behalf. (The lookup direction itself is reversed per #385/#535 —
-            // that is a separate, already-tracked defect; this mirrors
-            // create_order's current behavior as-is, not a fix for #385.)
+            // Issue #620/#385/#535: apply the same position-manager
+            // owner/receiver resolution create_order applies, so the two
+            // order-creation entrypoints agree on who owns an order created
+            // on someone else's behalf.
             let (actual_owner, actual_receiver) = if is_position_order {
-                match ds.get_position_manager(&caller, &params.market) {
-                    Some(owner) => (owner.clone(), owner),
+                match &params.on_behalf_of {
+                    Some(owner) => {
+                        if ds.get_position_manager(owner, &params.market) != Some(caller.clone())
+                        {
+                            panic_with_error!(&env, Error::UnauthorizedPositionManager);
+                        }
+                        (owner.clone(), owner.clone())
+                    }
                     None => (caller.clone(), params.receiver.clone()),
                 }
             } else {
@@ -870,31 +895,23 @@ impl OrderHandler {
             panic_with_error!(&env, Error::ZeroSizeDelta);
         }
 
-        // Position manager authorization:
-        // For position orders, verify caller is either the owner OR an authorized manager for this market.
-        // If caller is a manager, receiver must be the owner (cannot redirect funds).
-        //
-        // ISSUE #385: This logic is currently REVERSED and needs fixing.
-        // Current code incorrectly calls get_position_manager(&caller, market) which looks up
-        // "who is the manager FOR caller" — but we need to check "is caller a manager FOR the owner".
-        //
-        // REQUIRED FIX: Add on_behalf_of: Option<Address> field to CreateOrderParams.
-        // Then verify: if on_behalf_of is present, check get_position_manager(&on_behalf_of, market) == Some(caller).
-        // When absent, caller must be the owner.
-        //
-        // For now, this preserves existing behavior but the logic is inverted and needs the refactor above.
+        // Position manager authorization (issue #385/#535):
+        // For position orders, the caller either acts for themselves
+        // (params.on_behalf_of == None) or names the owner they're acting
+        // for; in the latter case the named owner must have registered the
+        // caller as their manager via get_position_manager(owner, market).
+        // A caller with their own registered manager is never redirected by
+        // that fact alone — only an explicit on_behalf_of triggers delegation.
         let (actual_owner, actual_receiver) = if is_position_order {
-            // TODO(#385): This logic is reversed. See comment above for required fix.
-            match ds.get_position_manager(&caller, &params.market) {
+            match &params.on_behalf_of {
                 Some(owner) => {
-                    // Caller is a manager; position owner is stored in data_store
-                    // Receiver must be the owner (cannot redirect)
-                    (owner.clone(), owner)
+                    if ds.get_position_manager(owner, &params.market) != Some(caller.clone()) {
+                        panic_with_error!(&env, Error::UnauthorizedPositionManager);
+                    }
+                    // Receiver must be the owner (cannot redirect funds).
+                    (owner.clone(), owner.clone())
                 }
-                None => {
-                    // Caller is not a manager; must be the owner
-                    (caller.clone(), params.receiver)
-                }
+                None => (caller.clone(), params.receiver),
             }
         } else {
             // For swap orders, no position manager check needed
@@ -905,7 +922,7 @@ impl OrderHandler {
         // Reverts with ZeroCollateral if caller skipped the SendTokens pre-step.
         let collateral_delta_amount = if is_increase_or_swap {
             let received = OrderVaultClient::new(&env, &order_vault)
-                .record_transfer_in(&params.initial_collateral_token);
+                .record_transfer_in(&handler, &params.initial_collateral_token);
             if received <= 0 {
                 panic_with_error!(&env, Error::ZeroCollateral);
             }
@@ -954,9 +971,6 @@ impl OrderHandler {
             MIN_BUMP_THRESHOLD,
             PERSISTENT_BUMP_TARGET,
         );
-        env.storage()
-            .persistent()
-            .set(&OrderStorageKey::Order(key.clone()), &order);
 
         ds.add_bytes32_to_set(&handler, &order_list_key(&env), &key);
         ds.add_bytes32_to_set(&handler, &account_order_list_key(&env, &actual_owner), &key);
@@ -1360,6 +1374,7 @@ impl OrderHandler {
                         current_time: env.ledger().timestamp(),
                         swap_path: order.swap_path.clone(),
                         oracle: &oracle,
+                        retain_collateral: false,
                     },
                 );
 
@@ -1645,9 +1660,6 @@ impl OrderHandler {
             MIN_BUMP_THRESHOLD,
             PERSISTENT_BUMP_TARGET,
         );
-        env.storage()
-            .persistent()
-            .set(&OrderStorageKey::Order(key.clone()), &order);
 
         // Clear frozen flag if set (order is being updated = re-enabled)
         env.storage()
@@ -1687,9 +1699,6 @@ impl OrderHandler {
             MIN_BUMP_THRESHOLD,
             PERSISTENT_BUMP_TARGET,
         );
-        env.storage()
-            .persistent()
-            .set(&OrderStorageKey::OrderFrozen(key.clone()), &true);
 
         // Issue #441: include the affected account and the freezing keeper.
         env.events()
@@ -1749,7 +1758,7 @@ impl OrderHandler {
         // Load position to get size
         use gmx_keys::position_key;
         let pk = position_key(&env, &account, &market, &collateral_token, is_long);
-        let position: PositionProps = env
+        let mut position: PositionProps = env
             .storage()
             .persistent()
             .get(&PositionStorageKey::Position(pk.clone()))
@@ -1805,6 +1814,18 @@ impl OrderHandler {
                     &collateral_token,
                     -fee_to_transfer,
                 );
+
+                // Reflect the fee already paid out of pool custody in the
+                // position's own stored collateral before decrease_position
+                // re-reads it fresh from storage — otherwise decrease_position
+                // computes the account's payout off the pre-fee collateral,
+                // double-paying this same fee out of the pool a second time.
+                let mut position_after_fee = position.clone();
+                position_after_fee.collateral_amount =
+                    position.collateral_amount.saturating_sub(fee_to_transfer);
+                env.storage()
+                    .persistent()
+                    .set(&PositionStorageKey::Position(pk.clone()), &position_after_fee);
             }
         }
 
@@ -1826,6 +1847,7 @@ impl OrderHandler {
                 current_time: env.ledger().timestamp(),
                 swap_path: soroban_sdk::Vec::new(&env),
                 oracle: &oracle,
+                retain_collateral: false,
             },
         );
 
@@ -1849,6 +1871,165 @@ impl OrderHandler {
             execution_price: result.execution_price,
             keeper_execution_fee: fee_to_transfer,
             pnl_usd: result.pnl_usd,
+        }
+    }
+
+    /// Partially close a liquidatable position (issue #533). Called by
+    /// liquidation_handler after role/health checks, mirroring `liquidate_position`
+    /// and `execute_adl`'s delegation pattern: positions live in order_handler
+    /// storage, so the actual size reduction — and the keeper execution fee, paid
+    /// the same way `liquidate_position` pays it — must happen here, not in the
+    /// wrapper. Unlike a full liquidation, the position is left open at its
+    /// reduced size rather than removed.
+    pub fn partial_liquidate_position(
+        env: Env,
+        keeper: Address, // must have LIQUIDATION_KEEPER role
+        account: Address,
+        market: Address,
+        collateral_token: Address,
+        is_long: bool,
+        liquidation_factor_bps: u128,
+    ) -> PartialLiquidatePositionResult {
+        keeper.require_auth();
+        require_liquidation_keeper(&env, &keeper);
+
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let oracle: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Oracle)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let handler = env.current_contract_address();
+
+        let market_props = load_market_props(&env, &data_store, &market);
+        let oracle_client = OracleClient::new(&env, &oracle);
+        let index_price = oracle_client.get_primary_price(&market_props.index_token);
+        let collateral_price = oracle_client
+            .get_primary_price(&collateral_token)
+            .mid_price();
+
+        let pk = position_key(&env, &account, &market, &collateral_token, is_long);
+        let position: PositionProps = env
+            .storage()
+            .persistent()
+            .get(&PositionStorageKey::Position(pk.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, Error::PositionNotFound));
+
+        // Re-validate liquidatability — a caller that bypasses liquidation_handler
+        // and calls this entry point directly must not be able to partially close
+        // a healthy position.
+        if !gmx_position_utils::is_liquidatable(
+            &env,
+            &data_store,
+            &position,
+            &market_props,
+            collateral_price,
+            &index_price,
+        ) {
+            panic_with_error!(&env, Error::NotLiquidatable);
+        }
+
+        let factor = (liquidation_factor_bps.min(10_000)) as i128;
+        // size_in_usd is FLOAT_PRECISION-scaled (10^30) — a naive `size * factor`
+        // overflows i128 well before the division by 10_000 brings it back down,
+        // so this must go through the same wide-multiply helper every other
+        // FLOAT_PRECISION-scaled computation in this codebase uses.
+        let liquidated_size_usd = mul_div_wide(&env, position.size_in_usd, factor, 10_000);
+        let remaining_size_usd = position.size_in_usd.saturating_sub(liquidated_size_usd);
+
+        // Handle keeper execution fee (mirrors liquidate_position's #208 handling):
+        // deduct from position collateral first, capped at what the position holds.
+        let ds = DataStoreClient::new(&env, &data_store);
+        let keeper_fee_key = liquidation_execution_fee_key(&env, &market);
+        let keeper_execution_fee = ds.get_u128(&keeper_fee_key);
+
+        let mut fee_to_transfer: i128 = 0;
+        if keeper_execution_fee > 0 {
+            let keeper_fee_i128 = keeper_execution_fee as i128;
+            fee_to_transfer = if keeper_fee_i128 <= position.collateral_amount {
+                keeper_fee_i128
+            } else {
+                position.collateral_amount
+            };
+
+            if fee_to_transfer > 0 {
+                MarketTokenClient::new(&env, &market_props.market_token).withdraw_from_pool(
+                    &handler,
+                    &collateral_token,
+                    &keeper,
+                    &fee_to_transfer,
+                );
+                gmx_market_utils::apply_delta_to_pool_amount(
+                    &env,
+                    &data_store,
+                    &handler,
+                    &market_props,
+                    &collateral_token,
+                    -fee_to_transfer,
+                );
+
+                // Reflect the fee already paid out of pool custody in the
+                // position's own stored collateral before decrease_position
+                // re-reads it fresh from storage. Without this, retain_collateral
+                // (below) would keep the *pre-fee* collateral figure with the
+                // position forever — silently overstating what actually backs
+                // it and letting the same fee be harvested again on a later
+                // partial liquidation of the same position — and a 100%-factor
+                // close would double-pay the fee out of the pool exactly as a
+                // full `liquidate_position` close would without this fix.
+                let mut position_after_fee = position.clone();
+                position_after_fee.collateral_amount =
+                    position.collateral_amount.saturating_sub(fee_to_transfer);
+                env.storage()
+                    .persistent()
+                    .set(&PositionStorageKey::Position(pk.clone()), &position_after_fee);
+            }
+        }
+
+        let result = decrease_position(
+            &env,
+            &DecreasePositionParams {
+                data_store: &data_store,
+                caller: &handler,
+                account: &account,
+                receiver: &account,
+                market: &market_props,
+                collateral_token: &collateral_token,
+                size_delta_usd: liquidated_size_usd,
+                acceptable_price: 0,
+                is_long,
+                index_token_price: &index_price,
+                collateral_price,
+                current_time: env.ledger().timestamp(),
+                swap_path: soroban_sdk::Vec::new(&env),
+                oracle: &oracle,
+                retain_collateral: true,
+            },
+        );
+
+        env.events().publish(
+            (symbol_short!("prt_liq"),),
+            (
+                pk,
+                account,
+                liquidated_size_usd,
+                remaining_size_usd,
+                result.execution_price,
+                fee_to_transfer,
+                result.pnl_usd,
+            ),
+        );
+
+        PartialLiquidatePositionResult {
+            execution_price: result.execution_price,
+            keeper_execution_fee: fee_to_transfer,
+            pnl_usd: result.pnl_usd,
+            liquidated_size_usd,
+            remaining_size_usd,
         }
     }
 
@@ -1937,6 +2118,7 @@ impl OrderHandler {
                 current_time: env.ledger().timestamp(),
                 swap_path: soroban_sdk::Vec::new(&env),
                 oracle: &oracle,
+                retain_collateral: false,
             },
         );
 
@@ -2311,6 +2493,7 @@ mod tests {
                 order_type,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         (hc, key)
@@ -2344,6 +2527,7 @@ mod tests {
                 order_type: OrderType::StopIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         )
     }
@@ -2453,6 +2637,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
     }
@@ -2515,6 +2700,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
     }
@@ -2634,6 +2820,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -2679,6 +2866,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -2738,6 +2926,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         assert!(hc.get_order(&key).is_some());
@@ -2789,6 +2978,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         assert!(hc.get_order(&key).is_some());
@@ -3031,6 +3221,7 @@ mod tests {
                 order_type: OrderType::LimitSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         )
     }
@@ -3257,6 +3448,7 @@ mod tests {
                 order_type: OrderType::MarketSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -3300,6 +3492,7 @@ mod tests {
                 order_type: OrderType::MarketSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -3460,6 +3653,7 @@ mod tests {
                 order_type: OrderType::MarketSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -3639,6 +3833,7 @@ mod tests {
                 order_type: OrderType::MarketSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -3779,6 +3974,70 @@ mod tests {
             pool_amount_with_fee,
             pool_amount_without_fee - keeper_fee as u128,
             "pool_amount must drop by exactly the keeper's liquidation_execution_fee"
+        );
+    }
+
+    /// A configured keeper execution fee must be deducted from what the account
+    /// receives, not paid out of the pool *in addition to* the position's full
+    /// collateral value. Before this fix, `liquidate_position` withdrew the
+    /// keeper's fee from the pool and then separately called `decrease_position`,
+    /// which re-read the position's *pre-fee* collateral from storage and paid
+    /// that full amount to the account — double-paying the fee out of the pool.
+    /// Forces liquidatability via a steep `min_collateral_factor` instead of a
+    /// price crash so realised PnL stays ~0, making the fee's effect on the
+    /// account's payout directly observable instead of masked by a clamp-to-zero
+    /// loss.
+    #[test]
+    fn liquidate_position_with_keeper_fee_does_not_double_pay_account() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+
+        let keeper_fee = 1_000_000i128; // 0.1 long_tk
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::liquidation_execution_fee_key(&w.env, &w.market_tk),
+            &(keeper_fee as u128),
+        );
+        // 150% of size required as collateral — the position (opened at 1x
+        // leverage) is now liquidatable purely by configuration, with the price
+        // unchanged since entry, so realised PnL on close is ~0.
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::min_collateral_factor_key(&w.env, &w.market_tk),
+            &((fp * 3 / 2) as u128),
+        );
+
+        let account_balance_before =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.user);
+
+        hc.liquidate_position(&w.keeper, &w.user, &w.market_tk, &w.long_tk, &true);
+
+        let account_balance_after =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.user);
+        let account_payout = account_balance_after - account_balance_before;
+
+        assert!(
+            account_payout <= COLLATERAL - keeper_fee,
+            "account payout ({account_payout}) must not exceed the position's collateral \
+             minus the keeper fee already paid out of the pool — got more than \
+             collateral - fee ({}), meaning the fee was paid twice",
+            COLLATERAL - keeper_fee
+        );
+        // With ~0 realised PnL and no other fees configured, the payout should
+        // land at (or just under, for any residual rounding/borrowing fee)
+        // exactly collateral - fee, not merely somewhere under it.
+        assert!(
+            account_payout >= COLLATERAL - keeper_fee - 10,
+            "account payout ({account_payout}) is unexpectedly far below collateral - fee \
+             ({}); expected ~= collateral - fee with ~0 realised PnL",
+            COLLATERAL - keeper_fee
         );
     }
 
@@ -3963,6 +4222,7 @@ mod tests {
                 order_type: OrderType::MarketDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             });
         }
         hc.create_orders(&w.user, &requests);
@@ -3999,6 +4259,7 @@ mod tests {
                     order_type: OrderType::MarketIncrease,
                     is_long: true,
                     expiry_ledger: None,
+                    on_behalf_of: None,
                 },
                 // Stop-loss: StopLossDecrease
                 CreateOrderParams {
@@ -4015,6 +4276,7 @@ mod tests {
                     order_type: OrderType::StopLossDecrease,
                     is_long: true,
                     expiry_ledger: None,
+                    on_behalf_of: None,
                 },
                 // Take-profit: LimitDecrease
                 CreateOrderParams {
@@ -4031,6 +4293,7 @@ mod tests {
                     order_type: OrderType::LimitDecrease,
                     is_long: true,
                     expiry_ledger: None,
+                    on_behalf_of: None,
                 },
             ],
         );
@@ -4060,30 +4323,117 @@ mod tests {
         assert_eq!(tp.trigger_price, 2500 * fp);
     }
 
-    /// Issue #620: create_orders must apply the same position-manager
-    /// owner/receiver redirection create_order applies, so a position order
-    /// created through the batch entrypoint is attributed the same way as one
-    /// created through the singular entrypoint. (The redirection direction
-    /// itself is the separately-tracked #385/#535 bug — this only confirms
-    /// create_orders mirrors create_order's current behavior, not that the
-    /// lookup direction is correct.)
+    /// Issue #385/#535/#620: a trader who has registered a manager for
+    /// themselves (i.e. delegated to a bot) must still be able to create
+    /// orders for themselves directly — registering a manager must never
+    /// silently hijack the trader's own direct order-creation calls, in
+    /// either create_order or the create_orders batch entrypoint.
     #[test]
-    fn create_orders_applies_position_manager_redirection() {
+    fn trader_with_registered_manager_can_still_create_orders_for_self() {
         let w = setup();
         let fp = gmx_math::FLOAT_PRECISION;
         let ds_c = DsClient::new(&w.env, &w.ds);
 
-        let redirected_to = Address::generate(&w.env);
-        // Mirrors create_order's current (pre-#385-fix) lookup direction:
-        // ds.get_position_manager(&caller, &market).
-        ds_c.set_position_manager(&w.user, &w.market_tk, &redirected_to);
+        let bot = Address::generate(&w.env);
+        // w.user delegates to `bot` as their manager...
+        ds_c.set_position_manager(&w.user, &w.market_tk, &bot);
+
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &(COLLATERAL * 2));
+
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let base_params = CreateOrderParams {
+            receiver: w.user.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: Vec::new(&w.env),
+            size_delta_usd: 2000 * fp,
+            collateral_delta_amount: COLLATERAL,
+            trigger_price: 0,
+            acceptable_price: 0,
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketIncrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        };
+
+        // ...but calling create_order directly (no on_behalf_of) must still
+        // open the position for w.user themselves, not `bot`.
+        let key = hc.create_order(&w.user, &base_params);
+        let order = hc.get_order(&key).unwrap();
+        assert_eq!(order.account, w.user);
+        assert_eq!(order.receiver, w.user);
+
+        // Same for the batch entrypoint (fresh collateral: record_transfer_in
+        // already consumed the first mint's delta above).
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+        let keys = hc.create_orders(&w.user, &Vec::from_array(&w.env, [base_params]));
+        let batch_order = hc.get_order(&keys.get_unchecked(0)).unwrap();
+        assert_eq!(batch_order.account, w.user);
+        assert_eq!(batch_order.receiver, w.user);
+    }
+
+    /// Issue #385/#535/#620: a registered manager can create an order
+    /// on_behalf_of the owner who registered them — the order opens a
+    /// position for the owner (not the manager), and the manager must name
+    /// the correct owner to succeed.
+    #[test]
+    fn registered_manager_can_create_order_on_behalf_of_owner() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        let ds_c = DsClient::new(&w.env, &w.ds);
+
+        let bot = Address::generate(&w.env);
+        ds_c.set_position_manager(&w.user, &w.market_tk, &bot);
 
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
 
         let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
-        let requests = Vec::from_array(
-            &w.env,
-            [CreateOrderParams {
+        let key = hc.create_order(
+            &bot,
+            &CreateOrderParams {
+                receiver: bot.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                size_delta_usd: 2000 * fp,
+                collateral_delta_amount: COLLATERAL,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketIncrease,
+                is_long: true,
+                expiry_ledger: None,
+                on_behalf_of: Some(w.user.clone()),
+            },
+        );
+
+        let order = hc.get_order(&key).unwrap();
+        assert_eq!(
+            order.account, w.user,
+            "position must open for the owner, not the delegate manager"
+        );
+        assert_eq!(order.receiver, w.user, "receiver cannot be redirected to the manager");
+    }
+
+    /// Issue #385/#535: naming an owner in on_behalf_of who never registered
+    /// the caller as their manager must revert, not silently succeed or fall
+    /// back to treating the caller as the owner.
+    #[test]
+    #[should_panic]
+    fn create_order_on_behalf_of_unregistered_owner_panics() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+
+        let stranger = Address::generate(&w.env);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        hc.create_order(
+            &w.user,
+            &CreateOrderParams {
                 receiver: w.user.clone(),
                 market: w.market_tk.clone(),
                 initial_collateral_token: w.long_tk.clone(),
@@ -4097,17 +4447,9 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
-            }],
+                on_behalf_of: Some(stranger),
+            },
         );
-
-        let keys = hc.create_orders(&w.user, &requests);
-        let order = hc.get_order(&keys.get_unchecked(0)).unwrap();
-
-        assert_eq!(
-            order.account, redirected_to,
-            "create_orders must redirect account the same way create_order does"
-        );
-        assert_eq!(order.receiver, redirected_to);
     }
 
     /// Issue #454: two MarketIncrease legs sharing the same collateral token in one
@@ -4137,6 +4479,7 @@ mod tests {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         };
         let requests = Vec::from_array(&w.env, [leg.clone(), leg]);
         hc.create_orders(&w.user, &requests);
@@ -4166,6 +4509,7 @@ mod tests {
                 order_type: OrderType::MarketDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
     }
@@ -4206,6 +4550,7 @@ mod tests {
                 order_type: OrderType::MarketDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
     }
@@ -4254,6 +4599,7 @@ mod tests {
                 order_type: OrderType::MarketSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         assert!(
@@ -4295,6 +4641,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         set_prices(&w, 2000 * gmx_math::FLOAT_PRECISION);
@@ -4344,6 +4691,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
     }
@@ -4373,6 +4721,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         assert!(
@@ -4410,6 +4759,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         set_prices(&w, 2000 * fp);
@@ -4450,6 +4800,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         let before = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.user);
@@ -4518,6 +4869,7 @@ mod tests {
                 order_type: OrderType::MarketDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -4558,6 +4910,7 @@ mod tests {
                 order_type: OrderType::LimitDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         set_prices(&w, trigger); // price == trigger → must execute
@@ -4596,6 +4949,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &inc_key);
@@ -4618,6 +4972,7 @@ mod tests {
                 order_type: OrderType::LimitDecrease,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         set_prices(&w, trigger); // price == trigger → must execute
@@ -4657,6 +5012,7 @@ mod tests {
                 order_type: OrderType::StopLossDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         set_prices(&w, trigger); // price == trigger → must execute

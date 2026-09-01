@@ -998,6 +998,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -1168,6 +1169,7 @@ mod tests {
                 order_type: OrderType::MarketDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         OHClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &close_key);
@@ -1554,6 +1556,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             }),
         ];
 

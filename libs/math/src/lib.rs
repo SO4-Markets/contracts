@@ -8,8 +8,16 @@ pub const FLOAT_PRECISION: i128 = 1_000_000_000_000_000_000_000_000_000_000; // 
 /// sqrt(FLOAT_PRECISION) = 10^15 — used in sqrt_fp.
 const SQRT_FLOAT_PRECISION: i128 = 1_000_000_000_000_000; // 10^15
 
+/// Upper bound on `pow_factor`'s integer-power loop count (issue #538).
+/// GMX-style exponent factors are conventionally in the 1.0-3.0 range; 10 is
+/// a generous ceiling that still caps worst-case CPU cost per call.
+const MAX_POW_FACTOR_WHOLE_EXPONENT: i128 = 10;
+
 /// Stellar standard token precision: 1 token = 10^7 stroops.
 pub const TOKEN_PRECISION: i128 = 10_000_000; // 10^7
+
+/// 100% in basis points (10,000)
+pub const BPS_DIVISOR: u128 = 10_000;
 
 // ─── Core arithmetic ─────────────────────────────────────────────────────────
 
@@ -146,6 +154,14 @@ pub fn pow_factor(env: &Env, value: i128, exponent: i128) -> i128 {
     let whole = exponent / FLOAT_PRECISION;
     let decimal = exponent % FLOAT_PRECISION;
 
+    // Issue #538: `whole` drives an O(whole) loop below. GMX-style exponent
+    // factors (funding/borrowing/price-impact) are always small (typically
+    // 1.0-3.0); a misconfigured value orders of magnitude larger would
+    // otherwise exhaust the CPU budget on every call that reaches this path.
+    if whole > MAX_POW_FACTOR_WHOLE_EXPONENT {
+        soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(1u32));
+    }
+
     // Integer power: value^whole (using wide arithmetic to prevent overflow)
     let mut result = FLOAT_PRECISION; // 1.0
     for _ in 0..whole {
@@ -275,6 +291,25 @@ mod tests {
         let two = 2 * fp;
         let four = 4 * fp;
         assert_eq!(pow_factor(&env, two, 2 * fp), four);
+    }
+
+    /// Issue #538: an exponent whose whole part exceeds the documented
+    /// ceiling must revert rather than drive a proportionally-sized loop.
+    #[test]
+    #[should_panic]
+    fn test_pow_factor_rejects_oversized_exponent() {
+        let env = Env::default();
+        let fp = FLOAT_PRECISION;
+        pow_factor(&env, 2 * fp, (MAX_POW_FACTOR_WHOLE_EXPONENT + 1) * fp);
+    }
+
+    /// The bound itself is inclusive: exactly the max exponent is still allowed.
+    #[test]
+    fn test_pow_factor_allows_max_exponent() {
+        let env = Env::default();
+        let fp = FLOAT_PRECISION;
+        // Should not panic.
+        pow_factor(&env, 2 * fp, MAX_POW_FACTOR_WHOLE_EXPONENT * fp);
     }
 
     // ── Issue #156/#127: rounding direction ──────────────────────────────────

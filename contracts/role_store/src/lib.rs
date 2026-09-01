@@ -48,6 +48,7 @@ pub struct RoleStoreInitialized {
 #[contractevent(topics = ["grant"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoleGranted {
+    pub caller: Address,
     pub account: Address,
     pub role: BytesN<32>,
 }
@@ -55,6 +56,7 @@ pub struct RoleGranted {
 #[contractevent(topics = ["revoke"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoleRevoked {
+    pub caller: Address,
     pub account: Address,
     pub role: BytesN<32>,
 }
@@ -89,7 +91,7 @@ impl RoleStore {
         require_init(&env);
         require_admin(&env, &caller);
         internal_grant_role(&env, &account, &role);
-        env.events().publish_event(&RoleGranted { account, role });
+        env.events().publish_event(&RoleGranted { caller, account, role });
     }
 
     /// Revoke `role` from `account`. Caller must hold ROLE_ADMIN.
@@ -112,7 +114,7 @@ impl RoleStore {
         }
 
         internal_revoke_role(&env, &account, &role);
-        env.events().publish_event(&RoleRevoked { account, role });
+        env.events().publish_event(&RoleRevoked { caller, account, role });
     }
 
     // ── Public reads ─────────────────────────────────────────────────────────
@@ -531,5 +533,46 @@ mod tests {
         client.grant_role(&admin, &controller_addr, &ctrl);
         // CONTROLLER tries to grant ROLE_ADMIN to victim — must panic Unauthorized
         client.grant_role(&controller_addr, &victim, &admin_role);
+    }
+
+    #[test]
+    fn test_events_include_caller() {
+        use soroban_sdk::testutils::Events;
+        use soroban_sdk::{symbol_short, IntoVal};
+        
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let keeper = Address::generate(&env);
+
+        client.grant_role(&admin, &keeper, &ctrl);
+        
+        let events = env.events().all();
+        assert!(
+            events.contains((
+                contract_id.clone(),
+                (symbol_short!("grant"),).into_val(&env),
+                RoleGranted {
+                    caller: admin.clone(),
+                    account: keeper.clone(),
+                    role: ctrl.clone(),
+                }.into_val(&env)
+            ))
+        );
+
+        client.revoke_role(&admin, &keeper, &ctrl);
+        
+        let events = env.events().all();
+        assert!(
+            events.contains((
+                contract_id.clone(),
+                (symbol_short!("revoke"),).into_val(&env),
+                RoleRevoked {
+                    caller: admin.clone(),
+                    account: keeper.clone(),
+                    role: ctrl.clone(),
+                }.into_val(&env)
+            ))
+        );
     }
 }
