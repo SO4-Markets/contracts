@@ -160,6 +160,9 @@ trait IFeeHandler {
     fn set_ui_fee_factor(env: Env, ui_receiver: Address, factor: u128);
 }
 
+/// Maximum number of actions allowed in a single `multicall` batch.
+const MAX_MULTICALL_BATCH_SIZE: u32 = 20;
+
 // ─── Contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -408,6 +411,11 @@ impl ExchangeRouter {
     /// double require_auth() within the same invocation frame, which Soroban rejects.
     pub fn multicall(env: Env, caller: Address, actions: Vec<RouterAction>) -> Vec<BytesN<32>> {
         caller.require_auth();
+
+        if actions.len() > MAX_MULTICALL_BATCH_SIZE {
+            panic_with_error!(&env, Error::BatchSizeLimitExceeded);
+        }
+
         // Issue #453: cancellations must always be available while paused, matching
         // the standalone cancel_* wrappers' tested behavior. The pause check is
         // applied per-action inside the dispatch loop below instead of as one
