@@ -7,15 +7,8 @@
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, panic_with_error,
-    symbol_short, Address, BytesN, Env, Vec,
+    symbol_short, Address, Env, Vec,
 };
-
-/// `network_id` (SHA-256 of the network passphrase) for the Stellar public
-/// network. Test faucets must never be initialized here (issue #400).
-const MAINNET_NETWORK_ID: [u8; 32] = [
-    0x7a, 0xc3, 0x39, 0x97, 0x54, 0x4e, 0x31, 0x75, 0xd2, 0x66, 0xbd, 0x02, 0x24, 0x39, 0xb2, 0x2c,
-    0xdb, 0x16, 0x50, 0x8c, 0x01, 0x16, 0x3f, 0x26, 0xe5, 0xcb, 0x2a, 0x3e, 0x10, 0x45, 0xa9, 0x79,
-];
 
 #[allow(dead_code)]
 #[contractclient(name = "TestTokenClient")]
@@ -60,7 +53,7 @@ pub struct TestFaucet;
 #[contractimpl]
 impl TestFaucet {
     pub fn initialize(env: Env, admin: Address, cooldown_ledgers: u32) {
-        require_not_mainnet(&env);
+        gmx_keys::require_not_mainnet(&env, Error::MainnetNotAllowed as u32);
         // Issue #612: require the admin's own auth so a front-runner who
         // observes the deploy transaction (or predicts the deterministic
         // contract address) can't call initialize first with themselves as
@@ -177,12 +170,6 @@ fn do_claim(env: &Env, account: &Address, token: Address) -> i128 {
     env.events()
         .publish((symbol_short!("claim"),), (account.clone(), token, amount));
     amount
-}
-
-fn require_not_mainnet(env: &Env) {
-    if env.ledger().network_id() == BytesN::from_array(env, &MAINNET_NETWORK_ID) {
-        panic_with_error!(env, Error::MainnetNotAllowed);
-    }
 }
 
 fn get_admin(env: &Env) -> Address {
@@ -355,7 +342,7 @@ mod tests {
     fn initialize_rejects_mainnet_network_id() {
         let env = Env::default();
         env.mock_all_auths();
-        env.ledger().set_network_id(MAINNET_NETWORK_ID);
+        env.ledger().set_network_id(gmx_keys::MAINNET_NETWORK_ID);
         let admin = Address::generate(&env);
         let faucet_id = env.register(TestFaucet, ());
         TestFaucetClient::new(&env, &faucet_id).initialize(&admin, &10);
