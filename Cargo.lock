@@ -2458,6 +2458,7 @@ dependencies = [
 name = "test-faucet"
 version = "0.1.0"
 dependencies = [
+ "gmx-keys",
  "soroban-sdk",
  "test-token",
 ]
@@ -2466,6 +2467,7 @@ dependencies = [
 name = "test-token"
 version = "0.1.0"
 dependencies = [
+ "gmx-keys",
  "soroban-sdk",
 ]
 
