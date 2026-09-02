@@ -44,7 +44,6 @@ pub enum Error {
     InvalidPrice = 4, // min > max or zero
     StalePrice = 5,   // timestamp too old
     PriceNotFound = 6,
-    InvalidSignature = 7,
     /// clear_prices called with more than MAX_CLEAR_PRICES_BATCH_SIZE tokens (issue #619).
     BatchSizeLimitExceeded = 9,
 }
@@ -273,6 +272,10 @@ impl Oracle {
             );
             let pubkey = get_keeper_pubkey(&env, &data_store, sp.keeper_index);
             // ed25519_verify takes (&BytesN<32> pubkey, &Bytes message, &BytesN<64> sig)
+            // and panics with a host-level crypto error on bad signature.
+            // There is no SDK try_ helper (soroban-sdk 25) to convert this into a
+            // contract Error::InvalidSignature, so the dead variant was removed
+            // (#576); callers see the host error instead of a typed contract error.
             env.crypto().ed25519_verify(&pubkey, &msg, &sp.signature);
 
             // Check circuit breaker before overwriting price

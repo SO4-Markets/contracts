@@ -48,9 +48,6 @@ pub enum Error {
     NotProfitable = 6,
     MarketPaused = 9,
     PositionNotFound = 7,
-    /// Max PnL factor for ADL is not configured (0) for the requested market/side.
-    /// Callers must set a non-zero value via DataStore before ADL can be evaluated.
-    MissingMaxPnlConfig = 8,
     /// Issue #643: update_oracle called with the current oracle address
     /// (no-op) or with this contract's own address / another of its stored
     /// instance addresses (order_handler, data_store, role_store, admin) —

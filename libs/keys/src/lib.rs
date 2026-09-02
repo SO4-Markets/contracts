@@ -13,6 +13,39 @@ pub const PERSISTENT_BUMP_TARGET: u32 = 518_400;
 /// Renew an entry's TTL once its remaining TTL drops below this threshold.
 pub const MIN_BUMP_THRESHOLD: u32 = 259_200;
 
+// ─── Testnet guard (#567) ────────────────────────────────────────────────────
+//
+// Single source of truth for the Stellar mainnet `network_id` (SHA-256 of the
+// network passphrase) and the "must not run on mainnet" check previously
+// duplicated byte-for-byte in `test_token` and `test_faucet`. Keeping exactly
+// one definition ensures a future passphrase change or typo fix cannot be
+// applied to one test-only contract while silently missing the other
+// (issue #400 / #567).
+
+/// `network_id` for the Stellar public network. Test-only contracts must
+/// refuse to initialize when `env.ledger().network_id()` equals this value.
+pub const MAINNET_NETWORK_ID: [u8; 32] = [
+    0x7a, 0xc3, 0x39, 0x97, 0x54, 0x4e, 0x31, 0x75, 0xd2, 0x66, 0xbd, 0x02, 0x24, 0x39, 0xb2, 0x2c,
+    0xdb, 0x16, 0x50, 0x8c, 0x01, 0x16, 0x3f, 0x26, 0xe5, 0xcb, 0x2a, 0x3e, 0x10, 0x45, 0xa9, 0x79,
+];
+
+/// Returns true if the current ledger's `network_id` is the Stellar mainnet.
+pub fn is_mainnet(env: &Env) -> bool {
+    env.ledger().network_id() == BytesN::from_array(env, &MAINNET_NETWORK_ID)
+}
+
+/// Panics with the given contract-error code if the current network is mainnet.
+///
+/// `error_code` should be the `u32` discriminant of the caller's
+/// `MainnetNotAllowed` variant (e.g. `Error::MainnetNotAllowed as u32`), so the
+/// shared guard can panic with the caller's own typed error while keeping the
+/// network-ID check in one place.
+pub fn require_not_mainnet(env: &Env, error_code: u32) {
+    if is_mainnet(env) {
+        env.panic_with_error(soroban_sdk::Error::from_contract_error(error_code));
+    }
+}
+
 // ─── Internal key builder ─────────────────────────────────────────────────────
 //
 // Each component is length-prefixed (2-byte BE length + bytes) so that
