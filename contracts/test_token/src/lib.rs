@@ -476,4 +476,233 @@ mod tests {
             &String::from_str(&env, "TWBTC"),
         );
     }
+
+    // ── Ported from market_token: allowance-expiration coverage (issue #362) ──
+
+    /// Once the ledger sequence passes an approval's expiration_ledger,
+    /// allowance() must report 0 even though the underlying temporary entry
+    /// (if not yet TTL-evicted) still holds the original amount.
+    #[test]
+    fn allowance_reads_zero_after_expiration_ledger_passes() {
+        let (env, owner, client) = setup();
+        let alice = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        client.mint(&owner, &alice, &1000_0000);
+        let expiration = env.ledger().sequence() + 100;
+        client.approve(&alice, &spender, &500_0000, &expiration);
+        assert_eq!(client.allowance(&alice, &spender), 500_0000);
+
+        env.ledger().set_sequence_number(expiration + 1);
+        assert_eq!(
+            client.allowance(&alice, &spender),
+            0,
+            "allowance() must return 0 once expiration_ledger has passed"
+        );
+    }
+
+    #[test]
+    fn test_approve_and_transfer_from() {
+        let (env, owner, client) = setup();
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        client.mint(&owner, &alice, &1000_0000);
+        client.approve(
+            &alice,
+            &spender,
+            &500_0000,
+            &(env.ledger().sequence() + 100),
+        );
+        assert_eq!(client.allowance(&alice, &spender), 500_0000);
+
+        client.transfer_from(&spender, &alice, &bob, &300_0000);
+        assert_eq!(client.balance(&alice), 700_0000);
+        assert_eq!(client.balance(&bob), 300_0000);
+        assert_eq!(client.allowance(&alice, &spender), 200_0000);
+    }
+
+    /// transfer_from on an expired allowance must revert with AllowanceExpired.
+    #[test]
+    fn transfer_from_after_expiration_reverts_with_allowance_expired() {
+        let (env, owner, client) = setup();
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        client.mint(&owner, &alice, &1000_0000);
+        let expiration = env.ledger().sequence() + 100;
+        client.approve(&alice, &spender, &500_0000, &expiration);
+
+        env.ledger().set_sequence_number(expiration + 1);
+
+        let result = client.try_transfer_from(&spender, &alice, &bob, &1_0000);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::AllowanceExpired as u32
+            )))
+        );
+    }
+
+    #[test]
+    fn test_approve_and_burn_from() {
+        let (env, owner, client) = setup();
+        let alice = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        client.mint(&owner, &alice, &1000_0000);
+        assert_eq!(client.total_supply(), 1000_0000);
+
+        client.approve(
+            &alice,
+            &spender,
+            &500_0000,
+            &(env.ledger().sequence() + 100),
+        );
+        assert_eq!(client.allowance(&alice, &spender), 500_0000);
+
+        client.burn_from(&spender, &alice, &300_0000);
+        assert_eq!(client.balance(&alice), 700_0000);
+        assert_eq!(client.allowance(&alice, &spender), 200_0000);
+        assert_eq!(client.total_supply(), 700_0000);
+    }
+
+    /// burn_from on an expired allowance must revert with AllowanceExpired.
+    #[test]
+    fn burn_from_after_expiration_reverts_with_allowance_expired() {
+        let (env, owner, client) = setup();
+        let alice = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        client.mint(&owner, &alice, &1000_0000);
+        let expiration = env.ledger().sequence() + 100;
+        client.approve(&alice, &spender, &500_0000, &expiration);
+
+        env.ledger().set_sequence_number(expiration + 1);
+
+        let result = client.try_burn_from(&spender, &alice, &1_0000);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::AllowanceExpired as u32
+            )))
+        );
+    }
+
+    // ── transfer_owner and pause/unpause owner gates ────────────────────────
+
+    #[test]
+    fn transfer_owner_moves_ownership() {
+        let (env, owner, client) = setup();
+        let new_owner = Address::generate(&env);
+        let alice = Address::generate(&env);
+
+        client.transfer_owner(&owner, &new_owner);
+        assert_eq!(client.owner(), new_owner);
+
+        // old owner can no longer mint
+        assert!(client.try_mint(&owner, &alice, &1).is_err());
+        // new owner can mint
+        client.mint(&new_owner, &alice, &1);
+        assert_eq!(client.balance(&alice), 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn non_owner_cannot_transfer_owner() {
+        let (env, _owner, client) = setup();
+        let attacker = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        client.transfer_owner(&attacker, &new_owner);
+    }
+
+    #[test]
+    #[should_panic]
+    fn non_owner_cannot_pause() {
+        let (env, _owner, client) = setup();
+        let attacker = Address::generate(&env);
+        client.pause(&attacker);
+    }
+
+    #[test]
+    #[should_panic]
+    fn non_owner_cannot_unpause() {
+        let (env, owner, client) = setup();
+        let attacker = Address::generate(&env);
+        client.pause(&owner);
+        client.unpause(&attacker);
+    }
+
+    // ── Negative-amount rejection (require_non_negative guard) ──────────────
+
+    #[test]
+    #[should_panic]
+    fn transfer_rejects_negative_amount() {
+        let (env, owner, client) = setup();
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        client.mint(&owner, &alice, &1000);
+        client.transfer(&alice, &bob, &-1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn approve_rejects_negative_amount() {
+        let (env, _, client) = setup();
+        let alice = Address::generate(&env);
+        let spender = Address::generate(&env);
+        client.approve(&alice, &spender, &-1, &(env.ledger().sequence() + 100));
+    }
+
+    #[test]
+    #[should_panic]
+    fn mint_rejects_negative_amount() {
+        let (env, owner, client) = setup();
+        let alice = Address::generate(&env);
+        client.mint(&owner, &alice, &-1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn burn_rejects_negative_amount() {
+        let (env, owner, client) = setup();
+        let alice = Address::generate(&env);
+        client.mint(&owner, &alice, &1000);
+        client.burn(&alice, &-1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn transfer_from_rejects_negative_amount() {
+        let (env, owner, client) = setup();
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        let spender = Address::generate(&env);
+        client.mint(&owner, &alice, &1000);
+        client.approve(
+            &alice,
+            &spender,
+            &1000,
+            &(env.ledger().sequence() + 100),
+        );
+        client.transfer_from(&spender, &alice, &bob, &-1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn burn_from_rejects_negative_amount() {
+        let (env, owner, client) = setup();
+        let alice = Address::generate(&env);
+        let spender = Address::generate(&env);
+        client.mint(&owner, &alice, &1000);
+        client.approve(
+            &alice,
+            &spender,
+            &1000,
+            &(env.ledger().sequence() + 100),
+        );
+        client.burn_from(&spender, &alice, &-1);
+    }
 }
