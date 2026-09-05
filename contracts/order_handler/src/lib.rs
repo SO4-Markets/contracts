@@ -92,6 +92,10 @@ pub enum Error {
     /// order_vault (via exchange_router SendTokens) before calling create_order.
     /// record_transfer_in returned zero, meaning no collateral arrived.
     ZeroCollateral = 10,
+    /// A position order named `on_behalf_of`, but that owner has not
+    /// registered the caller as their position manager for the market
+    /// (issue #385/#535). Raised by both `create_order` and `create_orders`.
+    UnauthorizedPositionManager = 11,
     /// `flag_stale_keeper` was called but the role's last activity is still
     /// within the configured heartbeat timeout (issue #249).
     KeeperNotStale = 12,
@@ -1758,7 +1762,7 @@ impl OrderHandler {
         // Load position to get size
         use gmx_keys::position_key;
         let pk = position_key(&env, &account, &market, &collateral_token, is_long);
-        let mut position: PositionProps = env
+        let position: PositionProps = env
             .storage()
             .persistent()
             .get(&PositionStorageKey::Position(pk.clone()))

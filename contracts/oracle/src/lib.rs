@@ -1195,7 +1195,7 @@ mod tests {
         
         // i128::MAX + 1 stored as u128
         let overflow_val: u128 = (i128::MAX as u128) + 1;
-        ds.set_u128(&admin, &keys::stable_price_key(&env, &token), &overflow_val);
+        ds.set_u128(&admin, &gmx_keys::stable_price_key(&env, &token), &overflow_val);
 
         assert_eq!(client.get_stable_price(&token), None);
     }
@@ -1211,7 +1211,7 @@ mod tests {
         let ds = DataStoreClient::new(&env, &ds_id);
         
         let overflow_val: u128 = (i128::MAX as u128) + 1;
-        ds.set_u128(&admin, &keys::stable_price_key(&env, &token), &overflow_val);
+        ds.set_u128(&admin, &gmx_keys::stable_price_key(&env, &token), &overflow_val);
 
         let mut prices = Vec::new(&env);
         prices.push_back(TokenPrice { token: token.clone(), min: 1234, max: 1234 });

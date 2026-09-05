@@ -1359,8 +1359,10 @@ impl Reader {
 
             let market_props = Self::get_market(env.clone(), data_store.clone(), market);
 
-            let index_price =
-                oracle_client.get_primary_price(&market_props.index_token).mid_price();
+            // NOTE: a swap never prices the index token — swap_utils fetches only
+            // the long/short prices (issue #298). Fetching it here would cost an
+            // extra oracle read per hop and would make the estimate revert on a
+            // stale index price where the real swap would succeed.
             let long_price =
                 oracle_client.get_primary_price(&market_props.long_token).mid_price();
             let short_price =

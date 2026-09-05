@@ -416,7 +416,7 @@ mod tests {
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::borrowing_factor_key(&w.env, &w.market_tk, true),
-            &(FLOAT_PRECISION as u128 / gmx_math::BPS_DIVISOR as u128),
+            &(FLOAT_PRECISION as u128 / gmx_math::BPS_DIVISOR),
         );
         ds_c.set_u128(
             &w.admin,
@@ -994,12 +994,12 @@ mod tests {
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::position_fee_factor_key(&w.env, &w.market_tk, true),
-            &(10 * fp as u128 / gmx_math::BPS_DIVISOR as u128),
+            &(10 * fp as u128 / gmx_math::BPS_DIVISOR),
         );
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::position_fee_factor_key(&w.env, &w.market_tk, false),
-            &(30 * fp as u128 / gmx_math::BPS_DIVISOR as u128),
+            &(30 * fp as u128 / gmx_math::BPS_DIVISOR),
         );
         ds_c.set_u128(
             &w.admin,
