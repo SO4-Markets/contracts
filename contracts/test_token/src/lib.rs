@@ -388,6 +388,14 @@ mod tests {
     }
 
     #[test]
+    fn test_metadata() {
+        let (env, _owner, client) = setup();
+        assert_eq!(client.decimals(), 7);
+        assert_eq!(client.name(), String::from_str(&env, "Test Wrapped Bitcoin"));
+        assert_eq!(client.symbol(), String::from_str(&env, "TWBTC"));
+    }
+
+    #[test]
     fn owner_can_mint_and_user_can_transfer() {
         let (env, owner, client) = setup();
         let alice = Address::generate(&env);
