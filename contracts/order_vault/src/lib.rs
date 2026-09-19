@@ -65,7 +65,10 @@ pub struct OrderVault;
 
 #[contractimpl]
 impl OrderVault {
-    /// One-time setup: store admin and role_store addresses.
+    /// One-time setup. Stores the role_store address and marks the contract
+    /// initialized. The admin parameter is authenticated but intentionally not
+    /// persisted; every mutating operation is gated through the RoleStore
+    /// controller instead.
     pub fn initialize(env: Env, admin: Address, role_store: Address) {
         admin.require_auth();
         if env.storage().instance().has(&InstanceKey::Initialized) {
