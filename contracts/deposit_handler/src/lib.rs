@@ -20,9 +20,9 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    account_deposit_list_key, deposit_key, deposit_list_key, is_market_paused_key,
-    market_index_token_key, market_long_token_key, market_short_token_key, min_deposit_usd_key,
-    roles,
+    account_deposit_list_key, deposit_key, deposit_list_key, global_pause_key,
+    is_market_paused_key, market_index_token_key, market_long_token_key, market_short_token_key,
+    min_deposit_usd_key, roles,
 };
 use gmx_market_utils::{
     apply_delta_to_pool_amount, get_market_token_price, validate_pool_amount,
@@ -255,6 +255,12 @@ impl DepositHandler {
         let handler = env.current_contract_address();
         let ds = DataStoreClient::new(&env, &data_store);
 
+        // Issue #461/#549: enforce the protocol-wide emergency pause here as
+        // well as in exchange_router, because handlers remain public entrypoints.
+        if ds.get_bool(&global_pause_key(&env)) {
+            panic_with_error!(&env, Error::MarketPaused);
+        }
+
         // Issue #37: Validate tokens match market configuration BEFORE any transfer
         let market = load_market_props(&env, &data_store, &params.market);
 
@@ -415,6 +421,9 @@ impl DepositHandler {
 
         // Issue #366: reject execution when the market is paused (oracle circuit breaker)
         let ds = DataStoreClient::new(&env, &data_store);
+        if ds.get_bool(&global_pause_key(&env)) {
+            panic_with_error!(&env, Error::MarketPaused);
+        }
         if ds.get_bool(&is_market_paused_key(&env, &deposit.market)) {
             panic_with_error!(&env, Error::MarketPaused);
         }
@@ -2404,6 +2413,70 @@ mod tests {
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
                 Error::InvalidMarket as u32
+            )))
+        );
+    }
+
+    // ── Issue #549: global emergency pause cannot be bypassed ───────────────
+
+    fn set_global_pause(w: &World, paused: bool) {
+        DsClient::new(&w.env, &w.ds).set_bool(
+            &w.handler,
+            &gmx_keys::global_pause_key(&w.env),
+            &paused,
+        );
+    }
+
+    fn long_deposit_params(w: &World, user: &Address) -> CreateDepositParams {
+        CreateDepositParams {
+            receiver: user.clone(),
+            market: w.market_tk.clone(),
+            initial_long_token: w.long_tk.clone(),
+            initial_short_token: w.short_tk.clone(),
+            long_token_amount: 10_000_000_i128,
+            short_token_amount: 0,
+            min_market_tokens: 1,
+            execution_fee: 0,
+        }
+    }
+
+    #[test]
+    fn create_deposit_reverts_when_global_pause_is_set_directly() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
+        set_global_pause(&w, true);
+
+        let result = DepositHandlerClient::new(env, &w.handler)
+            .try_create_deposit(&user, &long_deposit_params(&w, &user));
+
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::MarketPaused as u32
+            )))
+        );
+    }
+
+    #[test]
+    fn execute_deposit_reverts_when_global_pause_is_set_directly() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
+        set_prices(&w);
+
+        let handler = DepositHandlerClient::new(env, &w.handler);
+        let key = handler.create_deposit(&user, &long_deposit_params(&w, &user));
+        set_global_pause(&w, true);
+
+        let result = handler.try_execute_deposit(&w.keeper, &key);
+
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::MarketPaused as u32
             )))
         );
     }

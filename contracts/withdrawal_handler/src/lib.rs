@@ -21,7 +21,7 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    account_withdrawal_list_key, is_market_paused_key, market_index_token_key,
+    account_withdrawal_list_key, global_pause_key, is_market_paused_key, market_index_token_key,
     market_long_token_key, market_short_token_key, roles, withdrawal_key, withdrawal_list_key,
 };
 use gmx_market_utils::{apply_delta_to_pool_amount, get_pool_amount};
@@ -253,6 +253,12 @@ impl WithdrawalHandler {
         let handler = env.current_contract_address();
         let ds = DataStoreClient::new(&env, &data_store);
 
+        // Issue #461/#549: enforce the protocol-wide emergency pause here as
+        // well as in exchange_router, because handlers remain public entrypoints.
+        if ds.get_bool(&global_pause_key(&env)) {
+            panic_with_error!(&env, Error::MarketPaused);
+        }
+
         // Validate that the market token is a known market (index token must exist)
         if ds
             .get_address(&gmx_keys::market_index_token_key(&env, &params.market))
@@ -360,6 +366,9 @@ impl WithdrawalHandler {
 
         // Issue #366: reject execution when the market is paused (oracle circuit breaker)
         let ds = DataStoreClient::new(&env, &data_store);
+        if ds.get_bool(&global_pause_key(&env)) {
+            panic_with_error!(&env, Error::MarketPaused);
+        }
         if ds.get_bool(&is_market_paused_key(&env, &withdrawal.market)) {
             panic_with_error!(&env, Error::MarketPaused);
         }
@@ -786,6 +795,68 @@ mod tests {
         );
         DepositHandlerClient::new(&w.env, &w.dep_handler).execute_deposit(&w.keeper, &dep_key);
         MtClient::new(&w.env, &w.market_tk).balance(user)
+    }
+
+    fn set_global_pause(w: &World, paused: bool) {
+        DsClient::new(&w.env, &w.ds).set_bool(
+            &w.wth_handler,
+            &gmx_keys::global_pause_key(&w.env),
+            &paused,
+        );
+    }
+
+    fn withdrawal_params(
+        w: &World,
+        user: &Address,
+        market_token_amount: i128,
+    ) -> CreateWithdrawalParams {
+        CreateWithdrawalParams {
+            receiver: user.clone(),
+            market: w.market_tk.clone(),
+            market_token_amount,
+            min_long_token_amount: 0,
+            min_short_token_amount: 0,
+            execution_fee: 0,
+        }
+    }
+
+    #[test]
+    fn create_withdrawal_reverts_when_global_pause_is_set_directly() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &10_000_000_i128);
+        let lp = do_deposit(&w, &user, 10_000_000_i128, 0);
+        set_global_pause(&w, true);
+
+        let result = WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
+            .try_create_withdrawal(&user, &withdrawal_params(&w, &user, lp));
+
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::MarketPaused as u32
+            )))
+        );
+    }
+
+    #[test]
+    fn execute_withdrawal_reverts_when_global_pause_is_set_directly() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &10_000_000_i128);
+        let lp = do_deposit(&w, &user, 10_000_000_i128, 0);
+        let handler = WithdrawalHandlerClient::new(&w.env, &w.wth_handler);
+        let key = handler.create_withdrawal(&user, &withdrawal_params(&w, &user, lp));
+        set_global_pause(&w, true);
+
+        let result = handler.try_execute_withdrawal(&w.keeper, &key);
+
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::MarketPaused as u32
+            )))
+        );
     }
 
     // ── Issue #39: withdrawal input validation ────────────────────────────────
