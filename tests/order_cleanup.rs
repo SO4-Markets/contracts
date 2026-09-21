@@ -12,7 +12,7 @@
 use data_store::{DataStore, DataStoreClient as DsClient};
 use deposit_handler::{CreateDepositParams, DepositHandler, DepositHandlerClient as DHClient};
 use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
-use gmx_keys::{market_index_token_key, market_long_token_key, market_short_token_key, roles};
+use gmx_keys::{is_market_paused_key, market_index_token_key, market_long_token_key, market_short_token_key, roles};
 use gmx_math::FLOAT_PRECISION;
 use gmx_types::{CreateOrderParams, OrderType, TokenPrice};
 use market_token::{MarketToken, MarketTokenClient as MtClient};
@@ -121,6 +121,7 @@ fn setup() -> World {
     ds_c.set_address(&admin, &market_index_token_key(&env, &market_tk), &index_tk);
     ds_c.set_address(&admin, &market_long_token_key(&env, &market_tk), &long_tk);
     ds_c.set_address(&admin, &market_short_token_key(&env, &market_tk), &short_tk);
+    ds_c.set_bool(&admin, &is_market_paused_key(&env, &market_tk), &false);
 
     World {
         env,
@@ -306,6 +307,7 @@ fn cancel_expired_order_reverts_if_not_yet_expired() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: Some(999_999_999), // far future
+            on_behalf_of: None,
         },
     );
 
@@ -530,3 +532,37 @@ fn record_manual_refund_rejects_caller_without_controller_role() {
     let cc = OrderCleanupClient::new(env, &w.cleanup);
     cc.record_manual_refund(&intruder, &w.short_tk, &receiver, &amount, &reason);
 }
+
+/// initialize must revert with AlreadyInitialized if called a second time (closes #817).
+#[test]
+#[should_panic]
+fn initialize_reverts_if_already_initialized() {
+    let w = setup();
+    let env = &w.env;
+
+    let cc = OrderCleanupClient::new(env, &w.cleanup);
+    cc.initialize(&w.admin, &w.rs);
+}
+
+/// Calling an operational method on an uninitialized OrderCleanup contract
+/// must revert with NotInitialized (closes #817).
+#[test]
+#[should_panic]
+fn uninitialized_contract_reverts_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Register a fresh OrderCleanup contract without calling initialize()
+    let uninit_contract_id = env.register(OrderCleanup, ());
+    let cc = OrderCleanupClient::new(&env, &uninit_contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let receiver = Address::generate(&env);
+    let amount: i128 = 1_000_000;
+    let reason = soroban_sdk::BytesN::<32>::from_array(&env, &[7u8; 32]);
+
+    cc.record_manual_refund(&admin, &token, &receiver, &amount, &reason);
+}
+
+
