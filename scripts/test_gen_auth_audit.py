@@ -68,7 +68,7 @@ class GenAuthAuditTests(unittest.TestCase):
 
         crate_dir = root / "contracts" / "fake_contract" / "src"
         crate_dir.mkdir(parents=True)
-        (crate_dir / "lib.rs").write_text(FAKE_SOURCE)
+        (crate_dir / "lib.rs").write_text(FAKE_SOURCE, encoding="utf-8")
 
         self.output_path = root / "docs" / "auth-audit.md"
         self.output_path.parent.mkdir(parents=True)
@@ -89,7 +89,7 @@ class GenAuthAuditTests(unittest.TestCase):
     def test_freshly_generated_doc_has_no_discrepancies(self):
         """A doc generated straight from source must validate clean (the
         property --check relies on to gate CI)."""
-        self.output_path.write_text(gen_auth_audit.generate_markdown())
+        self.output_path.write_text(gen_auth_audit.generate_markdown(), encoding="utf-8")
         self.assertEqual(gen_auth_audit.validate_against_source(), [])
 
     def test_phantom_documented_function_is_detected(self):
@@ -101,7 +101,7 @@ class GenAuthAuditTests(unittest.TestCase):
             "| `set_u128` |",
             "| `set_account_principal_delta` |\n| `set_u128` |",
         )
-        self.output_path.write_text(doc)
+        self.output_path.write_text(doc, encoding="utf-8")
 
         discrepancies = gen_auth_audit.validate_against_source()
         self.assertTrue(
@@ -116,7 +116,7 @@ class GenAuthAuditTests(unittest.TestCase):
         doc = "\n".join(
             line for line in doc.splitlines() if "get_position_manager" not in line
         )
-        self.output_path.write_text(doc)
+        self.output_path.write_text(doc, encoding="utf-8")
 
         discrepancies = gen_auth_audit.validate_against_source()
         self.assertTrue(
@@ -132,6 +132,26 @@ class GenAuthAuditTests(unittest.TestCase):
         by_name = {fn.name: fn for fn in fns}
         status, _expected = gen_auth_audit.classify_fn(by_name["get_position_manager"])
         self.assertEqual(status, "➖ N/A")
+
+
+    def test_auth_status_regression_on_unchanged_function_is_detected(self):
+        """Issue #814: When an auth check is quietly removed from a function
+        (function name and signature unchanged in source), validate_against_source()
+        must report a status mismatch discrepancy, catching the regression."""
+        self.output_path.write_text(gen_auth_audit.generate_markdown(), encoding="utf-8")
+        self.assertEqual(gen_auth_audit.validate_against_source(), [])
+
+        # Simulate silent auth regression in source (remove caller.require_auth and require_controller)
+        regressed_source = FAKE_SOURCE.replace("caller.require_auth();", "").replace("require_controller(&env, &caller);", "")
+        root = Path(self.tmpdir.name)
+        lib_rs = root / "contracts" / "fake_contract" / "src" / "lib.rs"
+        lib_rs.write_text(regressed_source, encoding="utf-8")
+
+        discrepancies = gen_auth_audit.validate_against_source()
+        self.assertTrue(
+            any("set_u128" in d and "status mismatch" in d for d in discrepancies),
+            f"expected a status mismatch discrepancy for set_u128, got: {discrepancies}",
+        )
 
 
 if __name__ == "__main__":
