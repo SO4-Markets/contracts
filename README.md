@@ -1293,8 +1293,14 @@ changing impact factors.
 
 SO4.market is being built in the open. All nine implementation phases are complete — the full protocol logic is live in Rust/Soroban. See the issue tracker for integration tests, optimisation tasks, and frontend work.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for deployment, upgrade workflow rules, and the PR checklist.
+See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for deployment, upgrade workflow rules, and the PR checklist.
 For the post-issue-campaign cleanup map, see [docs/PROJECT_CLEANUP.md](docs/PROJECT_CLEANUP.md).
+
+---
+
+## Security
+
+For vulnerability disclosure instructions, in-scope protocol components, response SLAs, safe harbor terms, and bug bounty details, see [SECURITY.md](SECURITY.md).
 
 ---
 
