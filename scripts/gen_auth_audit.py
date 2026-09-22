@@ -128,8 +128,7 @@ def extract_pub_fns(source: str) -> list[FnInfo]:
             else:
                 # Find the end of this function (next pub fn or end of impl block)
                 next_fn = impl_body.find("pub fn ", fn_open_brace + 1)
-                next_pub = impl_body.find("pub ", fn_open_brace + 1)
-                end = next_pub if next_pub != -1 else len(impl_body)
+                end = next_fn if next_fn != -1 else len(impl_body)
                 fn_body = impl_body[fn_open_brace:end]
 
             # Classify auth
@@ -298,7 +297,7 @@ def validate_against_source() -> list[str]:
     description of a mismatch.
     """
     discrepancies: list[str] = []
-    current_doc = OUTPUT_PATH.read_text() if OUTPUT_PATH.exists() else ""
+    current_doc = OUTPUT_PATH.read_text(encoding="utf-8") if OUTPUT_PATH.exists() else ""
 
     for display_name, crate_dir in CONTRACTS:
         source = read_source(crate_dir)
@@ -330,10 +329,14 @@ def validate_against_source() -> list[str]:
         )
         table_text = current_doc[table_start:table_end]
 
-        documented_names = {
-            m.group(1)
-            for m in re.finditer(r"\| `(\w+)` \|", table_text)
-        }
+        # Parse documented rows: | `name` | expected | status | notes |
+        documented_entries: dict[str, str] = {}
+        for m in re.finditer(r"\|\s*`(\w+)`\s*\|\s*[^|]+\|\s*([^|]+)\|", table_text):
+            fn_name = m.group(1)
+            doc_status = m.group(2).strip()
+            documented_entries[fn_name] = doc_status
+
+        documented_names = set(documented_entries.keys())
         actual_names = {fn.name for fn in fns}
 
         missing_in_doc = actual_names - documented_names
@@ -349,6 +352,17 @@ def validate_against_source() -> list[str]:
             discrepancies.append(
                 f"{display_name}: `{name}` is documented but does NOT exist in source"
             )
+
+        # Issue #814: check for status drift on functions present in both doc and source
+        for fn in fns:
+            if fn.name in documented_entries:
+                actual_status, _ = classify_fn(fn)
+                doc_status = documented_entries[fn.name]
+                if actual_status != doc_status:
+                    discrepancies.append(
+                        f"{display_name}: `{fn.name}` (line {fn.line_number}) status mismatch — "
+                        f"doc records '{doc_status}', but current source classifies as '{actual_status}'"
+                    )
 
     return discrepancies
 
@@ -381,7 +395,7 @@ def main():
 
     md = generate_markdown()
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(md)
+    OUTPUT_PATH.write_text(md, encoding="utf-8")
     print(f"Wrote {OUTPUT_PATH}")
 
 
