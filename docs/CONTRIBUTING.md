@@ -65,6 +65,7 @@ Before opening a review request, confirm every item below. Reviewers will use th
 - [ ] The PR addresses **one logical change** — a single issue, bug fix, or tightly related set of concerns.
 - [ ] No unrelated refactors, formatting fixes, or drive-by cleanups are included. Open a separate PR for those.
 - [ ] Public function signatures and storage key names are backward-compatible unless an explicit migration path is documented and tested.
+- [ ] Vulnerabilities and fund-safety bugs are **never** opened as public PRs or issues — report them privately per [SECURITY.md](../SECURITY.md).
 
 ### Tests
 
