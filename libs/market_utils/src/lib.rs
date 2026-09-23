@@ -365,17 +365,20 @@ pub fn update_funding_state(
         }
     };
 
-    // Update cumulative funding-amount-per-size in data_store
+    // Update cumulative funding-amount-per-size in data_store.
+    // Write both canonical and off-canonical token combinations so positions
+    // collateralized in the "wrong" token still accrue funding (#449).
     for is_long in [true, false] {
-        let collateral_token = if is_long {
-            &market.long_token
-        } else {
-            &market.short_token
-        };
         let delta = if is_long { long_delta } else { short_delta };
-        let fnd_key =
-            funding_amount_per_size_key(env, &market.market_token, collateral_token, is_long);
-        ds_client.apply_delta_to_i128(caller, &fnd_key, &delta);
+        for collateral_token in [&market.long_token, &market.short_token] {
+            let fnd_key = funding_amount_per_size_key(
+                env,
+                &market.market_token,
+                collateral_token,
+                is_long,
+            );
+            ds_client.apply_delta_to_i128(caller, &fnd_key, &delta);
+        }
     }
 
     // Emit sign-flip event when the paying side changes (positive = longs pay, negative = shorts pay).

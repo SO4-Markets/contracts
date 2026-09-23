@@ -603,6 +603,22 @@ impl DepositHandler {
 
         let vault_client = DepositVaultClient::new(&env, &deposit_vault);
 
+        // Verify the vault can cover this refund. This mirrors the guard in
+        // execute_deposit (#463) — without it, a cancellation could silently
+        // draw on other users' funds sitting in the pooled vault.
+        if deposit.long_token_amount > 0 {
+            let recorded = vault_client.get_recorded_balance(&deposit.initial_long_token);
+            if recorded < deposit.long_token_amount {
+                panic_with_error!(&env, Error::InsufficientVaultBalance);
+            }
+        }
+        if deposit.short_token_amount > 0 {
+            let recorded = vault_client.get_recorded_balance(&deposit.initial_short_token);
+            if recorded < deposit.short_token_amount {
+                panic_with_error!(&env, Error::InsufficientVaultBalance);
+            }
+        }
+
         // Refund tokens
         if deposit.long_token_amount > 0 {
             vault_client.transfer_out(
