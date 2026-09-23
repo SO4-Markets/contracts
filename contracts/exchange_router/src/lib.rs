@@ -260,6 +260,110 @@ impl ExchangeRouter {
         );
     }
 
+    /// Update the deposit_handler address. Only the stored admin may call this.
+    /// Rejects the router's own address and its other registered handler addresses
+    /// as a basic sanity check against copy-paste misconfiguration.
+    pub fn update_deposit_handler(env: Env, caller: Address, new_handler: Address) {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if caller != admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        if new_handler == env.current_contract_address() {
+            panic_with_error!(&env, Error::InvalidWithdrawalHandler);
+        }
+        for key in [
+            InstanceKey::WithdrawalHandler,
+            InstanceKey::OrderHandler,
+            InstanceKey::FeeHandler,
+        ] {
+            if let Some(other) = env.storage().instance().get::<_, Address>(&key) {
+                if other == new_handler {
+                    panic_with_error!(&env, Error::InvalidWithdrawalHandler);
+                }
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&InstanceKey::DepositHandler, &new_handler);
+        env.events().publish(
+            (soroban_sdk::symbol_short!("dep_hdlr"),),
+            new_handler,
+        );
+    }
+
+    /// Update the order_handler address. Only the stored admin may call this.
+    pub fn update_order_handler(env: Env, caller: Address, new_handler: Address) {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if caller != admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        if new_handler == env.current_contract_address() {
+            panic_with_error!(&env, Error::InvalidWithdrawalHandler);
+        }
+        for key in [
+            InstanceKey::DepositHandler,
+            InstanceKey::WithdrawalHandler,
+            InstanceKey::FeeHandler,
+        ] {
+            if let Some(other) = env.storage().instance().get::<_, Address>(&key) {
+                if other == new_handler {
+                    panic_with_error!(&env, Error::InvalidWithdrawalHandler);
+                }
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&InstanceKey::OrderHandler, &new_handler);
+        env.events().publish(
+            (soroban_sdk::symbol_short!("ord_hdlr"),),
+            new_handler,
+        );
+    }
+
+    /// Update the fee_handler address. Only the stored admin may call this.
+    pub fn update_fee_handler(env: Env, caller: Address, new_handler: Address) {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if caller != admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        if new_handler == env.current_contract_address() {
+            panic_with_error!(&env, Error::InvalidWithdrawalHandler);
+        }
+        for key in [
+            InstanceKey::DepositHandler,
+            InstanceKey::WithdrawalHandler,
+            InstanceKey::OrderHandler,
+        ] {
+            if let Some(other) = env.storage().instance().get::<_, Address>(&key) {
+                if other == new_handler {
+                    panic_with_error!(&env, Error::InvalidWithdrawalHandler);
+                }
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&InstanceKey::FeeHandler, &new_handler);
+        env.events().publish(
+            (soroban_sdk::symbol_short!("fee_hdlr"),),
+            new_handler,
+        );
+    }
+
     /// Default timelock for unpausing: ~4 hours at 5 s/ledger (issue #282).
     const UNPAUSE_TIMELOCK_LEDGERS: u32 = 2880;
 

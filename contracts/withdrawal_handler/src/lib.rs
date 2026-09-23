@@ -57,6 +57,8 @@ pub enum Error {
     /// instance addresses (withdrawal_vault, data_store, role_store, admin) —
     /// almost certainly a copy-paste mistake, not an intentional rotation.
     InvalidOracle = 12,
+    /// Issue #463: cancel_withdrawal refund exceeds vault's recorded balance.
+    InsufficientVaultBalance = 13,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -524,6 +526,17 @@ impl WithdrawalHandler {
             RoleStoreClient::new(&env, &role_store).has_role(&caller, &roles::order_keeper(&env));
         if caller != withdrawal.account && !is_keeper {
             panic_with_error!(&env, Error::Unauthorized);
+        }
+
+        // Verify the vault can cover this refund. This mirrors the guard in
+        // execute_deposit (#463) — without it, a cancellation could silently
+        // draw on other users' funds sitting in the pooled vault.
+        {
+            let vault_client = WithdrawalVaultClient::new(&env, &withdrawal_vault);
+            let recorded = vault_client.get_recorded_balance(&withdrawal.market);
+            if recorded < withdrawal.market_token_amount {
+                panic_with_error!(&env, Error::InsufficientVaultBalance);
+            }
         }
 
         // Refund LP tokens
