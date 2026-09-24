@@ -16,7 +16,18 @@ use gmx_keys::{
 use gmx_market_utils::apply_delta_to_pool_amount;
 use gmx_pricing_utils::{apply_swap_impact_value, get_swap_output_amount, get_swap_price_impact};
 use gmx_types::{MarketProps, PriceProps};
-use soroban_sdk::{Address, BytesN, Env, Map, Vec};
+use soroban_sdk::{contracterror, panic_with_error, Address, BytesN, Env, Map, Vec};
+
+// ─── Errors ───────────────────────────────────────────────────────────────────
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum Error {
+    /// The supplied market address in the swap path is not registered in data_store,
+    /// or does not route the incoming token (issue #780).
+    InvalidMarket = 1,
+}
 
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
@@ -241,13 +252,13 @@ pub fn swap_with_path(
         let market_token_addr = path.get(i).unwrap();
         let index_token = ds
             .get_address(&market_index_token_key(env, &market_token_addr))
-            .expect("market index token not found");
+            .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket));
         let long_token = ds
             .get_address(&market_long_token_key(env, &market_token_addr))
-            .expect("market long token not found");
+            .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket));
         let short_token = ds
             .get_address(&market_short_token_key(env, &market_token_addr))
-            .expect("market short token not found");
+            .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket));
 
         // Pre-fetch long_token price if not already cached.
         if price_cache.get(long_token.clone()).is_none() {
@@ -288,7 +299,7 @@ pub fn swap_with_path(
         } else if current_token == market_props.short_token {
             market_props.long_token.clone()
         } else {
-            soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(1u32));
+            panic_with_error!(env, Error::InvalidMarket);
         };
 
         // Look up pre-fetched prices (guaranteed present from first pass above).
