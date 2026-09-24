@@ -678,4 +678,62 @@ mod tests {
         assert_eq!(user_roles.get_unchecked(0), order_keeper);
         assert!(!vec_contains_b32(&user_roles, &ctrl));
     }
+
+    // ── Issue #800: persistent TTL renewal ────────────────────────────────────
+
+    fn ttl_of(env: &Env, contract_id: &Address, key: &RoleKey) -> u32 {
+        use soroban_sdk::testutils::storage::Persistent as _;
+        env.as_contract(contract_id, || env.storage().persistent().get_ttl(key))
+    }
+
+    /// Granting a role must leave every entry it writes at the bump target.
+    #[test]
+    fn test_grant_extends_persistent_ttl() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let keeper = Address::generate(&env);
+        client.grant_role(&admin, &keeper, &ctrl);
+
+        for key in [
+            RoleKey::HasRole(keeper.clone(), ctrl.clone()),
+            RoleKey::RoleMemberCount(ctrl.clone()),
+            RoleKey::RoleMembers(ctrl.clone()),
+            RoleKey::AccountRoles(keeper.clone()),
+            RoleKey::AllRoles,
+        ] {
+            assert!(ttl_of(&env, &contract_id, &key) >= PERSISTENT_BUMP_TARGET);
+        }
+    }
+
+    /// A read-only has_role call on an ageing ROLE_ADMIN entry must renew it,
+    /// so a role that is checked but never rewritten is not archived.
+    #[test]
+    fn test_has_role_read_renews_admin_ttl() {
+        use soroban_sdk::testutils::Ledger as _;
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let admin_role = roles::role_admin(&env);
+        let key = RoleKey::HasRole(admin.clone(), admin_role.clone());
+
+        // Age the entry until its remaining TTL is below the bump threshold.
+        let start = env.ledger().sequence();
+        env.ledger()
+            .set_sequence_number(start + PERSISTENT_BUMP_TARGET - MIN_BUMP_THRESHOLD + 1);
+        assert!(ttl_of(&env, &contract_id, &key) < MIN_BUMP_THRESHOLD);
+
+        assert!(client.has_role(&admin, &admin_role));
+        assert!(ttl_of(&env, &contract_id, &key) >= PERSISTENT_BUMP_TARGET);
+    }
+
+    /// Reading a role that was never granted must return false, not trap on
+    /// extend_ttl of a missing entry.
+    #[test]
+    fn test_has_role_unset_key_returns_false() {
+        let (env, _admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let stranger = Address::generate(&env);
+        assert!(!client.has_role(&stranger, &roles::controller(&env)));
+        assert_eq!(client.get_roles(&stranger).len(), 0);
+    }
 }
