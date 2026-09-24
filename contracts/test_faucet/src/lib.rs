@@ -5,11 +5,11 @@
 #![no_std]
 #![allow(deprecated)]
 
+use gmx_keys::{MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET};
 use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, panic_with_error,
     symbol_short, Address, Env, Vec,
 };
-use gmx_keys::{MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET};
 
 #[allow(dead_code)]
 #[contractclient(name = "TestTokenClient")]
@@ -121,9 +121,11 @@ impl TestFaucet {
             Some(amount) => {
                 // Issue #806: renew on every hot read so an actively-claimed
                 // token's config never lapses into archival.
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+                env.storage().persistent().extend_ttl(
+                    &key,
+                    MIN_BUMP_THRESHOLD,
+                    PERSISTENT_BUMP_TARGET,
+                );
                 amount
             }
             None => 0,
@@ -176,10 +178,13 @@ fn do_claim(env: &Env, account: &Address, token: Address) -> i128 {
     let faucet = env.current_contract_address();
     TestTokenClient::new(env, &token).mint(&faucet, account, &amount);
 
-    env.storage().persistent().set(
-        &DataKey::LastClaim(account.clone(), token.clone()),
-        &env.ledger().sequence(),
-    );
+    let last_key = DataKey::LastClaim(account.clone(), token.clone());
+    env.storage()
+        .persistent()
+        .set(&last_key, &env.ledger().sequence());
+    env.storage()
+        .persistent()
+        .extend_ttl(&last_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
     env.events()
         .publish((symbol_short!("claim"),), (account.clone(), token, amount));
     amount
@@ -224,7 +229,7 @@ fn enforce_cooldown(env: &Env, account: &Address, token: &Address) {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Ledger},
+        testutils::{storage::Persistent as _, Address as _, Ledger},
         String,
     };
     use test_token::{TestToken, TestTokenClient as TokenClient};
@@ -297,7 +302,10 @@ mod tests {
         );
 
         assert_eq!(amounts, Vec::from_array(&env, [100_0000000, 50_0000000]));
-        assert_eq!(TokenClient::new(&env, &token_a_id).balance(&user), 100_0000000);
+        assert_eq!(
+            TokenClient::new(&env, &token_a_id).balance(&user),
+            100_0000000
+        );
         assert_eq!(token_b.balance(&user), 50_0000000);
     }
 
@@ -346,6 +354,67 @@ mod tests {
         faucet.initialize(&admin, &0);
 
         faucet.claim(&user, &Address::generate(&env));
+    }
+
+    fn claim_amount_ttl(env: &Env, faucet: &TestFaucetClient, token: &Address) -> u32 {
+        env.as_contract(&faucet.address, || {
+            env.storage()
+                .persistent()
+                .get_ttl(&DataKey::ClaimAmount(token.clone()))
+        })
+    }
+
+    /// Issue #806: set_token must give ClaimAmount a full TTL.
+    #[test]
+    fn set_token_extends_claim_amount_ttl() {
+        let (env, _admin, token_id, faucet) = setup();
+        assert_eq!(
+            claim_amount_ttl(&env, &faucet, &token_id),
+            PERSISTENT_BUMP_TARGET
+        );
+    }
+
+    /// Issue #806: an idle token config must be renewed by claims so it never
+    /// archives while the faucet is in use — and claims keep working after
+    /// ledgers well past the original TTL.
+    #[test]
+    fn claim_renews_claim_amount_ttl() {
+        let (env, _admin, token_id, faucet) = setup();
+        let user = Address::generate(&env);
+
+        // Advance until the remaining TTL is below the bump threshold.
+        let start = env.ledger().sequence();
+        env.ledger()
+            .set_sequence_number(start + PERSISTENT_BUMP_TARGET - MIN_BUMP_THRESHOLD + 1);
+        assert!(claim_amount_ttl(&env, &faucet, &token_id) < MIN_BUMP_THRESHOLD);
+
+        faucet.claim(&user, &token_id);
+        assert_eq!(
+            claim_amount_ttl(&env, &faucet, &token_id),
+            PERSISTENT_BUMP_TARGET
+        );
+
+        // Past the original expiry: still claimable thanks to the renewal.
+        env.ledger()
+            .set_sequence_number(start + PERSISTENT_BUMP_TARGET + 100);
+        let other = Address::generate(&env);
+        assert_eq!(faucet.claim(&other, &token_id), 100_0000000);
+    }
+
+    /// Issue #806: LastClaim is written with a TTL too, so the cooldown record
+    /// doesn't archive and trap the next claim.
+    #[test]
+    fn claim_extends_last_claim_ttl() {
+        let (env, _admin, token_id, faucet) = setup();
+        let user = Address::generate(&env);
+        faucet.claim(&user, &token_id);
+
+        let ttl = env.as_contract(&faucet.address, || {
+            env.storage()
+                .persistent()
+                .get_ttl(&DataKey::LastClaim(user.clone(), token_id.clone()))
+        });
+        assert_eq!(ttl, PERSISTENT_BUMP_TARGET);
     }
 
     /// Issue #400: initializing against the mainnet `network_id` must panic —
