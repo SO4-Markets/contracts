@@ -1,10 +1,19 @@
 #![no_std]
 
-use gmx_keys::roles;
+use gmx_keys::{roles, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
     BytesN, Env, Vec,
 };
+
+fn bump_persistent<K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
+    if env.storage().persistent().has(key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+    }
+}
+
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -103,10 +112,12 @@ impl RoleStore {
 
         let admin_role = roles::role_admin(&env);
         if role == admin_role {
+            let key = RoleKey::RoleMembers(admin_role.clone());
+            bump_persistent(&env, &key);
             let members: Vec<Address> = env
                 .storage()
                 .persistent()
-                .get(&RoleKey::RoleMembers(admin_role.clone()))
+                .get(&key)
                 .unwrap_or(Vec::new(&env));
             if members.len() <= 1 {
                 panic_with_error!(&env, Error::LastAdmin);
@@ -121,56 +132,69 @@ impl RoleStore {
 
     /// Returns true if `account` currently holds `role`.
     pub fn has_role(env: Env, account: Address, role: BytesN<32>) -> bool {
+        let key = RoleKey::HasRole(account, role);
+        bump_persistent(&env, &key);
         env.storage()
             .persistent()
-            .get(&RoleKey::HasRole(account, role))
+            .get(&key)
             .unwrap_or(false)
     }
 
     /// All roles currently held by `account`.
     pub fn get_roles(env: Env, account: Address) -> Vec<BytesN<32>> {
+        let key = RoleKey::AccountRoles(account);
+        bump_persistent(&env, &key);
         env.storage()
             .persistent()
-            .get(&RoleKey::AccountRoles(account))
+            .get(&key)
             .unwrap_or(Vec::new(&env))
     }
 
     /// Paginated list of all accounts that hold `role`.
     pub fn get_role_members(env: Env, role: BytesN<32>, start: u32, end: u32) -> Vec<Address> {
+        let key = RoleKey::RoleMembers(role);
+        bump_persistent(&env, &key);
         let members: Vec<Address> = env
             .storage()
             .persistent()
-            .get(&RoleKey::RoleMembers(role))
+            .get(&key)
             .unwrap_or(Vec::new(&env));
         paginate_addr(&env, &members, start, end)
     }
 
     /// Count of accounts holding `role`.
     pub fn get_role_member_count(env: Env, role: BytesN<32>) -> u32 {
+        let key = RoleKey::RoleMemberCount(role);
+        bump_persistent(&env, &key);
         env.storage()
             .persistent()
-            .get(&RoleKey::RoleMemberCount(role))
+            .get(&key)
             .unwrap_or(0)
     }
 
     /// All role IDs that have ever been granted.
     pub fn get_all_roles(env: Env) -> Vec<BytesN<32>> {
+        let key = RoleKey::AllRoles;
+        bump_persistent(&env, &key);
         env.storage()
             .persistent()
-            .get(&RoleKey::AllRoles)
+            .get(&key)
             .unwrap_or(Vec::new(&env))
     }
 
     /// Count of distinct roles.
     pub fn get_role_count(env: Env) -> u32 {
+        let key = RoleKey::AllRoles;
+        bump_persistent(&env, &key);
         let all: Vec<BytesN<32>> = env
             .storage()
             .persistent()
-            .get(&RoleKey::AllRoles)
+            .get(&key)
             .unwrap_or(Vec::new(&env));
         all.len()
     }
 }
+
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -182,10 +206,12 @@ fn require_init(env: &Env) {
 
 fn require_admin(env: &Env, caller: &Address) {
     let admin_role = roles::role_admin(env);
+    let key = RoleKey::HasRole(caller.clone(), admin_role);
+    bump_persistent(env, &key);
     let has: bool = env
         .storage()
         .persistent()
-        .get(&RoleKey::HasRole(caller.clone(), admin_role))
+        .get(&key)
         .unwrap_or(false);
     if !has {
         panic_with_error!(env, Error::Unauthorized);
@@ -200,9 +226,11 @@ fn internal_grant_role(env: &Env, account: &Address, role: &BytesN<32>) {
         .get::<_, bool>(&has_key)
         .unwrap_or(false)
     {
+        bump_persistent(env, &has_key);
         return; // idempotent
     }
     env.storage().persistent().set(&has_key, &true);
+    env.storage().persistent().extend_ttl(&has_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
 
     // Increment member count
     let count_key = RoleKey::RoleMemberCount(role.clone());
@@ -214,38 +242,47 @@ fn internal_grant_role(env: &Env, account: &Address, role: &BytesN<32>) {
     env.storage()
         .persistent()
         .set(&count_key, &(count + 1));
+    env.storage().persistent().extend_ttl(&count_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
 
     // Add to role's member list
+    let members_key = RoleKey::RoleMembers(role.clone());
     let mut members: Vec<Address> = env
         .storage()
         .persistent()
-        .get(&RoleKey::RoleMembers(role.clone()))
+        .get(&members_key)
         .unwrap_or(Vec::new(env));
     members.push_back(account.clone());
     env.storage()
         .persistent()
-        .set(&RoleKey::RoleMembers(role.clone()), &members);
+        .set(&members_key, &members);
+    env.storage().persistent().extend_ttl(&members_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
 
     // Add to account's role list
+    let acct_key = RoleKey::AccountRoles(account.clone());
     let mut acct_roles: Vec<BytesN<32>> = env
         .storage()
         .persistent()
-        .get(&RoleKey::AccountRoles(account.clone()))
+        .get(&acct_key)
         .unwrap_or(Vec::new(env));
     acct_roles.push_back(role.clone());
     env.storage()
         .persistent()
-        .set(&RoleKey::AccountRoles(account.clone()), &acct_roles);
+        .set(&acct_key, &acct_roles);
+    env.storage().persistent().extend_ttl(&acct_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
 
     // Track in all-roles list (deduplicated)
+    let all_key = RoleKey::AllRoles;
     let mut all: Vec<BytesN<32>> = env
         .storage()
         .persistent()
-        .get(&RoleKey::AllRoles)
+        .get(&all_key)
         .unwrap_or(Vec::new(env));
     if !vec_contains_b32(&all, role) {
         all.push_back(role.clone());
-        env.storage().persistent().set(&RoleKey::AllRoles, &all);
+        env.storage().persistent().set(&all_key, &all);
+        env.storage().persistent().extend_ttl(&all_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+    } else {
+        bump_persistent(env, &all_key);
     }
 }
 
@@ -272,30 +309,36 @@ fn internal_revoke_role(env: &Env, account: &Address, role: &BytesN<32>) {
         env.storage()
             .persistent()
             .set(&count_key, &(count - 1));
+        env.storage().persistent().extend_ttl(&count_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
     }
 
     // Remove from role's member list
+    let members_key = RoleKey::RoleMembers(role.clone());
     let mut members: Vec<Address> = env
         .storage()
         .persistent()
-        .get(&RoleKey::RoleMembers(role.clone()))
+        .get(&members_key)
         .unwrap_or(Vec::new(env));
     vec_remove_addr(&mut members, account);
     env.storage()
         .persistent()
-        .set(&RoleKey::RoleMembers(role.clone()), &members);
+        .set(&members_key, &members);
+    env.storage().persistent().extend_ttl(&members_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
 
     // Remove from account's role list
+    let acct_key = RoleKey::AccountRoles(account.clone());
     let mut acct_roles: Vec<BytesN<32>> = env
         .storage()
         .persistent()
-        .get(&RoleKey::AccountRoles(account.clone()))
+        .get(&acct_key)
         .unwrap_or(Vec::new(env));
     vec_remove_b32(&mut acct_roles, role);
     env.storage()
         .persistent()
-        .set(&RoleKey::AccountRoles(account.clone()), &acct_roles);
+        .set(&acct_key, &acct_roles);
+    env.storage().persistent().extend_ttl(&acct_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
 }
+
 
 // ─── Vec utilities (no_std) ───────────────────────────────────────────────────
 
@@ -714,4 +757,24 @@ mod tests {
         assert_eq!(user_roles.get_unchecked(0), order_keeper);
         assert!(!vec_contains_b32(&user_roles, &ctrl));
     }
+
+    /// Issue #800: grant and read operations must renew persistent entry TTLs
+    /// without panicking on unset or non-existent keys.
+    #[test]
+    fn test_role_store_extends_ttl_on_grant_and_read() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let user = Address::generate(&env);
+
+        client.grant_role(&admin, &user, &ctrl);
+        assert!(client.has_role(&user, &ctrl));
+        assert_eq!(client.get_role_member_count(&ctrl), 1);
+        let roles = client.get_roles(&user);
+        assert_eq!(roles.len(), 1);
+        let all = client.get_all_roles();
+        assert!(!all.is_empty());
+        assert_eq!(client.get_role_count(), all.len());
+    }
 }
+
