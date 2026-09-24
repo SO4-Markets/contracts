@@ -5099,4 +5099,44 @@ mod tests {
             "both deltas must be applied; second write must see state from first"
         );
     }
+
+    // ── Issue #780: swap_with_path rejects unregistered market with typed error ──
+
+    /// Executing a swap order with an unregistered market in swap_path must revert
+    /// with InvalidMarket (not generic panic).
+    #[test]
+    #[should_panic]
+    fn execute_swap_unregistered_market_in_path_reverts_with_invalid_market() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        seed_pool(&w);
+
+        let user = Address::generate(&w.env);
+        let unregistered_market = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &10_000_000_i128);
+
+        soroban_sdk::token::Client::new(&w.env, &w.short_tk).transfer(&user, &w.ord_vault, &10_000_000);
+        let key = OrderHandlerClient::new(&w.env, &w.ord_handler).create_order(
+            &user,
+            &CreateOrderParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.short_tk.clone(),
+                swap_path: Vec::from_array(&w.env, [unregistered_market]),
+                size_delta_usd: 0,
+                collateral_delta_amount: 10_000_000,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketSwap,
+                is_long: false,
+                expiry_ledger: None,
+                on_behalf_of: None,
+            },
+        );
+
+        set_prices(&w, 2000 * fp);
+        OrderHandlerClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
+    }
 }
