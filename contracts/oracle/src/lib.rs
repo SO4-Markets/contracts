@@ -938,6 +938,90 @@ mod tests {
         assert!(client.try_get_price(&token).is_none());
     }
 
+    /// Issue #805: a price stored fewer than MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR
+    /// ledgers ago must not be clearable — this is the griefing window a
+    /// compromised ORDER_KEEPER could otherwise exploit to DoS the protocol.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn clear_price_rejects_price_stored_too_recently() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        let prices = Vec::from_array(&env, [TokenPrice { token: token.clone(), min: 100, max: 100 }]);
+        client.set_prices_simple(&admin, &prices);
+
+        // No ledger advancement: the price is 0 ledgers old, well under the
+        // MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR = 5 minimum.
+        client.clear_price(&admin, &token);
+    }
+
+    /// The boundary itself: exactly MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR ledgers
+    /// after submission, clearing must succeed (age >= threshold is allowed).
+    #[test]
+    fn clear_price_succeeds_exactly_at_min_age_boundary() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        let prices = Vec::from_array(&env, [TokenPrice { token: token.clone(), min: 100, max: 100 }]);
+        client.set_prices_simple(&admin, &prices);
+
+        env.ledger()
+            .with_mut(|li| li.sequence_number += MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR);
+
+        client.clear_price(&admin, &token);
+        assert!(client.try_get_price(&token).is_none());
+    }
+
+    /// Clearing a token with no stored price at all must remain a no-op
+    /// (preserves the previous idempotent-remove behavior).
+    #[test]
+    fn clear_price_on_nonexistent_price_is_a_no_op() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        client.clear_price(&admin, &token);
+        assert!(client.try_get_price(&token).is_none());
+    }
+
+    /// Issue #805: clear_prices must reject the whole batch if any one of the
+    /// tokens in it has a price that's too fresh to clear.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn clear_prices_rejects_batch_containing_a_too_fresh_price() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let t1 = Address::generate(&env);
+        let t2 = Address::generate(&env);
+        let mut prices = Vec::new(&env);
+        prices.push_back(TokenPrice { token: t1.clone(), min: 100, max: 100 });
+        client.set_prices_simple(&admin, &prices);
+
+        // Advance past the minimum age for t1, then submit t2 fresh — a
+        // batch clear covering both must still reject on t2's freshness.
+        env.ledger()
+            .with_mut(|li| li.sequence_number += MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR);
+        let mut t2_prices = Vec::new(&env);
+        t2_prices.push_back(TokenPrice { token: t2.clone(), min: 200, max: 200 });
+        client.set_prices_simple(&admin, &t2_prices);
+
+        let mut tokens_to_clear = Vec::new(&env);
+        tokens_to_clear.push_back(t1);
+        tokens_to_clear.push_back(t2);
+        client.clear_prices(&admin, &tokens_to_clear);
+    }
+
     /// Issue #619: clear_prices must reject a batch larger than
     /// MAX_CLEAR_PRICES_BATCH_SIZE, matching the cap pattern already applied
     /// to every other batch entrypoint in the workspace.
