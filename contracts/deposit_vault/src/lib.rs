@@ -8,10 +8,19 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
+use gmx_keys::{MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, BytesN,
     Env,
 };
+
+fn bump_persistent<K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
+    if env.storage().persistent().has(key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+    }
+}
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -76,15 +85,20 @@ impl DepositVault {
         require_controller(&env, &caller);
 
         let current = token::Client::new(&env, &token).balance(&env.current_contract_address());
+        let storage_key = DataKey::TokenBalance(token.clone());
+        bump_persistent(&env, &storage_key);
         let recorded: i128 = env
             .storage()
             .persistent()
-            .get(&DataKey::TokenBalance(token.clone()))
+            .get(&storage_key)
             .unwrap_or(0);
         let delta = current - recorded;
         env.storage()
             .persistent()
-            .set(&DataKey::TokenBalance(token), &current);
+            .set(&storage_key, &current);
+        env.storage()
+            .persistent()
+            .extend_ttl(&storage_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         delta
     }
 
@@ -111,16 +125,22 @@ impl DepositVault {
         );
         // Sync recorded balance
         let new_bal = token::Client::new(&env, &token).balance(&env.current_contract_address());
+        let storage_key = DataKey::TokenBalance(token);
         env.storage()
             .persistent()
-            .set(&DataKey::TokenBalance(token), &new_bal);
+            .set(&storage_key, &new_bal);
+        env.storage()
+            .persistent()
+            .extend_ttl(&storage_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
     }
 
     /// Read the last recorded balance for a token (for diagnostics).
     pub fn get_recorded_balance(env: Env, token: Address) -> i128 {
+        let storage_key = DataKey::TokenBalance(token);
+        bump_persistent(&env, &storage_key);
         env.storage()
             .persistent()
-            .get(&DataKey::TokenBalance(token))
+            .get(&storage_key)
             .unwrap_or(0)
     }
 }
@@ -291,5 +311,33 @@ mod tests {
 
         let recorded = vault_client.get_recorded_balance(&token);
         assert_eq!(recorded, 600_0000);
+    }
+
+    // ── Issue #722: TokenBalance TTL renewal ──────────────────────────────────
+
+    /// Issue #722: TokenBalance snapshot must safely renew persistent TTL
+    /// on record_transfer_in, transfer_out, and get_recorded_balance without panicking
+    /// when the token has not been recorded yet.
+    #[test]
+    fn test_deposit_vault_extends_ttl_on_token_balance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, vault) = setup(&env);
+        let (token, token_owner) = register_token(&env);
+        let receiver = Address::generate(&env);
+
+        let vault_client = DepositVaultClient::new(&env, &vault);
+        let token_client = TestTokenClient::new(&env, &token);
+
+        // Reading recorded balance of unrecorded token returns 0 without panic
+        assert_eq!(vault_client.get_recorded_balance(&token), 0);
+
+        token_client.mint(&token_owner, &vault, &5_000_000_i128);
+        let delta = vault_client.record_transfer_in(&token);
+        assert_eq!(delta, 5_000_000_i128);
+        assert_eq!(vault_client.get_recorded_balance(&token), 5_000_000_i128);
+
+        vault_client.transfer_out(&admin, &token, &receiver, &2_000_000_i128);
+        assert_eq!(vault_client.get_recorded_balance(&token), 3_000_000_i128);
     }
 }
