@@ -24,7 +24,7 @@ use gmx_keys::{
     account_withdrawal_list_key, is_market_paused_key, market_index_token_key,
     market_long_token_key, market_short_token_key, roles, withdrawal_key, withdrawal_list_key,
 };
-use gmx_market_utils::{apply_delta_to_pool_amount, get_pool_amount};
+use gmx_market_utils::{apply_delta_to_pool_amount, get_market_token_price, get_pool_amount};
 use gmx_math::{mul_div_wide, TOKEN_PRECISION};
 pub use gmx_types::CreateWithdrawalParams;
 use gmx_types::{MarketProps, WithdrawalProps};
@@ -119,6 +119,7 @@ trait IOracle {
 #[soroban_sdk::contractclient(name = "WithdrawalVaultClient")]
 trait IWithdrawalVault {
     fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128);
+    fn get_recorded_balance(env: Env, token: Address) -> i128;
 }
 
 #[allow(dead_code)]
@@ -367,7 +368,6 @@ impl WithdrawalHandler {
         }
 
         let mt_client = MarketTokenClient::new(&env, &market.market_token);
-        let total_supply = mt_client.total_supply();
         let lp_amount = withdrawal.market_token_amount;
 
         // Issue #255: split the withdrawal by the pool's CURRENT USD-value weight
@@ -376,12 +376,11 @@ impl WithdrawalHandler {
         // weight reflects the keeper's just-submitted price.
         let oracle_client = OracleClient::new(&env, &oracle);
         let current_seq = env.ledger().sequence();
-        let long_price = oracle_client
-            .require_price_fresh(&market.long_token, &current_seq)
-            .mid_price();
-        let short_price = oracle_client
-            .require_price_fresh(&market.short_token, &current_seq)
-            .mid_price();
+        let long_price_props = oracle_client.require_price_fresh(&market.long_token, &current_seq);
+        let short_price_props = oracle_client.require_price_fresh(&market.short_token, &current_seq);
+        let index_price_props = oracle_client.require_price_fresh(&market.index_token, &current_seq);
+        let long_price = long_price_props.mid_price();
+        let short_price = short_price_props.mid_price();
 
         let long_pool = get_pool_amount(&env, &data_store, &market, &market.long_token) as i128;
         let short_pool = get_pool_amount(&env, &data_store, &market, &market.short_token) as i128;
@@ -392,8 +391,25 @@ impl WithdrawalHandler {
         let (long_out, short_out) = if total_pool_usd == 0 {
             (0, 0)
         } else {
-            // USD value of the LP tokens being burned, at the pool's current total value.
-            let withdrawal_value_usd = mul_div_wide(&env, total_pool_usd, lp_amount, total_supply);
+            // #786: price the LP tokens being burned from PnL-adjusted NAV
+            // (get_market_token_price / get_pool_value), matching
+            // execute_deposit's minting formula, instead of gross pool USD
+            // ÷ supply — the old formula ignored outstanding trader PnL and
+            // the impact pool entirely, letting withdrawing LPs be over- or
+            // under-paid relative to fair value depending on the sign of
+            // aggregate trader PnL. maximize=true is the conservative-for-
+            // the-pool direction (mirrors deposit's deliberate minimize
+            // direction, maximize=false, for minting).
+            let mt_price = get_market_token_price(
+                &env,
+                &data_store,
+                &market,
+                &long_price_props,
+                &short_price_props,
+                &index_price_props,
+                true,
+            );
+            let withdrawal_value_usd = mul_div_wide(&env, lp_amount, mt_price, TOKEN_PRECISION);
 
             // Split by each side's USD weight (long_pool_usd / total_pool_usd), as a
             // single fused division rather than normalizing the weight to a separate
