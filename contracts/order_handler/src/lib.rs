@@ -156,6 +156,10 @@ pub enum Error {
     /// forced by a caller who bypasses liquidation_handler entirely (mirrors
     /// AdlRequirementNotMet's rationale for execute_adl).
     NotLiquidatable = 29,
+    /// flag_stale_keeper's keeper parameter does not actually hold role
+    /// (issue #794) — without this check, the emitted KeeperHeartbeatMissed
+    /// audit-trail event could name an arbitrary or unrelated address.
+    KeeperDoesNotHoldRole = 30,
 }
 
 
@@ -529,6 +533,17 @@ impl OrderHandler {
             .instance()
             .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let role_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::RoleStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+
+        // #794: keeper must actually hold role, so the emitted audit-trail
+        // event can only ever name a real, current holder of the stale role.
+        if !RoleStoreClient::new(&env, &role_store).has_role(&keeper, &role) {
+            panic_with_error!(&env, Error::KeeperDoesNotHoldRole);
+        }
 
         let status = Self::check_keeper_heartbeat(env.clone(), data_store.clone(), role.clone());
         if !status.is_stale {
