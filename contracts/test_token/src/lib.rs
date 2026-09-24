@@ -6,10 +6,19 @@
 #![no_std]
 #![allow(deprecated)]
 
+use gmx_keys::{MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     Env, String,
 };
+
+fn bump_persistent<K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
+    if env.storage().persistent().has(key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+    }
+}
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -78,6 +87,9 @@ impl TestToken {
         env.storage()
             .persistent()
             .set(&DataKey::TotalSupply, &0i128);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::TotalSupply, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
     }
 
     pub fn owner(env: Env) -> Address {
@@ -134,16 +146,20 @@ impl TestToken {
     }
 
     pub fn total_supply(env: Env) -> i128 {
+        let key = DataKey::TotalSupply;
+        bump_persistent(&env, &key);
         env.storage()
             .persistent()
-            .get(&DataKey::TotalSupply)
+            .get(&key)
             .unwrap_or(0)
     }
 
     pub fn balance(env: Env, id: Address) -> i128 {
+        let key = DataKey::Balance(id);
+        bump_persistent(&env, &key);
         env.storage()
             .persistent()
-            .get(&DataKey::Balance(id))
+            .get(&key)
             .unwrap_or(0)
     }
 
@@ -291,39 +307,54 @@ fn require_non_negative(env: &Env, amount: i128) {
 }
 
 fn spend_balance(env: &Env, from: &Address, amount: i128) {
+    let key = DataKey::Balance(from.clone());
+    bump_persistent(env, &key);
     let balance: i128 = env
         .storage()
         .persistent()
-        .get(&DataKey::Balance(from.clone()))
+        .get(&key)
         .unwrap_or(0);
     if balance < amount {
         panic_with_error!(env, Error::InsufficientBalance);
     }
     env.storage()
         .persistent()
-        .set(&DataKey::Balance(from.clone()), &(balance - amount));
+        .set(&key, &(balance - amount));
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
 }
 
 fn receive_balance(env: &Env, to: &Address, amount: i128) {
+    let key = DataKey::Balance(to.clone());
+    bump_persistent(env, &key);
     let balance: i128 = env
         .storage()
         .persistent()
-        .get(&DataKey::Balance(to.clone()))
+        .get(&key)
         .unwrap_or(0);
     env.storage()
         .persistent()
-        .set(&DataKey::Balance(to.clone()), &(balance + amount));
+        .set(&key, &(balance + amount));
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
 }
 
 fn change_total_supply(env: &Env, delta: i128) {
+    let key = DataKey::TotalSupply;
+    bump_persistent(env, &key);
     let supply: i128 = env
         .storage()
         .persistent()
-        .get(&DataKey::TotalSupply)
+        .get(&key)
         .unwrap_or(0);
     env.storage()
         .persistent()
-        .set(&DataKey::TotalSupply, &(supply + delta));
+        .set(&key, &(supply + delta));
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
 }
 
 fn spend_allowance(env: &Env, from: &Address, spender: &Address, amount: i128) {
@@ -704,5 +735,30 @@ mod tests {
             &(env.ledger().sequence() + 100),
         );
         client.burn_from(&spender, &alice, &-1);
+    }
+
+    // ── Issue #803: Balance and TotalSupply TTL renewal ───────────────────────
+
+    /// Issue #803: balance and total_supply reads and writes must renew
+    /// persistent TTL without panicking on absent accounts.
+    #[test]
+    fn test_test_token_extends_ttl_on_balance_and_supply() {
+        let (env, owner, client) = setup();
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+
+        // Reading balance of uninitialized account returns 0 and does not panic
+        assert_eq!(client.balance(&alice), 0);
+        assert_eq!(client.total_supply(), 0);
+
+        // Mint extends TotalSupply and Balance TTL
+        client.mint(&owner, &alice, &500_0000i128);
+        assert_eq!(client.balance(&alice), 500_0000);
+        assert_eq!(client.total_supply(), 500_0000);
+
+        // Transfer extends Balance TTL for both sender and receiver
+        client.transfer(&alice, &bob, &200_0000i128);
+        assert_eq!(client.balance(&alice), 300_0000);
+        assert_eq!(client.balance(&bob), 200_0000);
     }
 }
