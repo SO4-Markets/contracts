@@ -25,6 +25,7 @@ pub enum Error {
 enum InstanceKey {
     Initialized,
     RoleStore,
+    Admin,
 }
 
 #[contracttype]
@@ -43,6 +44,8 @@ pub struct WithdrawalVault;
 
 #[contractimpl]
 impl WithdrawalVault {
+    /// One-time setup: store admin and role_store addresses (issue #781 —
+    /// admin was previously authenticated but never persisted).
     pub fn initialize(env: Env, admin: Address, role_store: Address) {
         admin.require_auth();
         if env.storage().instance().has(&InstanceKey::Initialized) {
@@ -54,6 +57,7 @@ impl WithdrawalVault {
         env.storage()
             .instance()
             .set(&InstanceKey::RoleStore, &role_store);
+        env.storage().instance().set(&InstanceKey::Admin, &admin);
     }
 
     pub fn record_transfer_in(env: Env, caller: Address, token: Address) -> i128 {

@@ -31,6 +31,7 @@ pub enum Error {
 enum InstanceKey {
     Initialized,
     RoleStore,
+    Admin,
 }
 
 #[contracttype]
@@ -54,6 +55,8 @@ pub struct DepositVault;
 
 #[contractimpl]
 impl DepositVault {
+    /// One-time setup: store admin and role_store addresses (issue #781 —
+    /// admin was previously authenticated but never persisted).
     pub fn initialize(env: Env, admin: Address, role_store: Address) {
         admin.require_auth();
         if env.storage().instance().has(&InstanceKey::Initialized) {
@@ -65,6 +68,7 @@ impl DepositVault {
         env.storage()
             .instance()
             .set(&InstanceKey::RoleStore, &role_store);
+        env.storage().instance().set(&InstanceKey::Admin, &admin);
     }
 
     /// Snapshot the balance of `token` in this vault.
