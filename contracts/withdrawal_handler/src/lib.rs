@@ -24,7 +24,7 @@ use gmx_keys::{
     account_withdrawal_list_key, is_market_paused_key, market_index_token_key,
     market_long_token_key, market_short_token_key, roles, withdrawal_key, withdrawal_list_key,
 };
-use gmx_market_utils::{apply_delta_to_pool_amount, get_pool_amount};
+use gmx_market_utils::{apply_delta_to_pool_amount, get_market_token_price, get_pool_amount};
 use gmx_math::{mul_div_wide, TOKEN_PRECISION};
 pub use gmx_types::CreateWithdrawalParams;
 use gmx_types::{MarketProps, WithdrawalProps};
@@ -119,6 +119,7 @@ trait IOracle {
 #[soroban_sdk::contractclient(name = "WithdrawalVaultClient")]
 trait IWithdrawalVault {
     fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128);
+    fn get_recorded_balance(env: Env, token: Address) -> i128;
 }
 
 #[allow(dead_code)]
@@ -367,7 +368,6 @@ impl WithdrawalHandler {
         }
 
         let mt_client = MarketTokenClient::new(&env, &market.market_token);
-        let total_supply = mt_client.total_supply();
         let lp_amount = withdrawal.market_token_amount;
 
         // Issue #255: split the withdrawal by the pool's CURRENT USD-value weight
@@ -376,12 +376,11 @@ impl WithdrawalHandler {
         // weight reflects the keeper's just-submitted price.
         let oracle_client = OracleClient::new(&env, &oracle);
         let current_seq = env.ledger().sequence();
-        let long_price = oracle_client
-            .require_price_fresh(&market.long_token, &current_seq)
-            .mid_price();
-        let short_price = oracle_client
-            .require_price_fresh(&market.short_token, &current_seq)
-            .mid_price();
+        let long_price_props = oracle_client.require_price_fresh(&market.long_token, &current_seq);
+        let short_price_props = oracle_client.require_price_fresh(&market.short_token, &current_seq);
+        let index_price_props = oracle_client.require_price_fresh(&market.index_token, &current_seq);
+        let long_price = long_price_props.mid_price();
+        let short_price = short_price_props.mid_price();
 
         let long_pool = get_pool_amount(&env, &data_store, &market, &market.long_token) as i128;
         let short_pool = get_pool_amount(&env, &data_store, &market, &market.short_token) as i128;
@@ -392,8 +391,25 @@ impl WithdrawalHandler {
         let (long_out, short_out) = if total_pool_usd == 0 {
             (0, 0)
         } else {
-            // USD value of the LP tokens being burned, at the pool's current total value.
-            let withdrawal_value_usd = mul_div_wide(&env, total_pool_usd, lp_amount, total_supply);
+            // #786: price the LP tokens being burned from PnL-adjusted NAV
+            // (get_market_token_price / get_pool_value), matching
+            // execute_deposit's minting formula, instead of gross pool USD
+            // ÷ supply — the old formula ignored outstanding trader PnL and
+            // the impact pool entirely, letting withdrawing LPs be over- or
+            // under-paid relative to fair value depending on the sign of
+            // aggregate trader PnL. maximize=true is the conservative-for-
+            // the-pool direction (mirrors deposit's deliberate minimize
+            // direction, maximize=false, for minting).
+            let mt_price = get_market_token_price(
+                &env,
+                &data_store,
+                &market,
+                &long_price_props,
+                &short_price_props,
+                &index_price_props,
+                true,
+            );
+            let withdrawal_value_usd = mul_div_wide(&env, lp_amount, mt_price, TOKEN_PRECISION);
 
             // Split by each side's USD weight (long_pool_usd / total_pool_usd), as a
             // single fused division rather than normalizing the weight to a separate
@@ -736,7 +752,6 @@ mod tests {
             &gmx_keys::market_short_token_key(&env, &market_tk),
             &short_tk,
         );
-
         World {
             env,
             admin,
@@ -1300,6 +1315,215 @@ mod tests {
         // impostor has no ORDER_KEEPER role — must panic with Unauthorized.
         WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
             .execute_withdrawal(&impostor, &wth_key);
+    }
+
+    // ── Issue #786: withdrawal must price from PnL-adjusted NAV, not gross pool USD ──
+    //
+    // These bypass create_deposit/create_withdrawal entirely and seed pool/LP/
+    // open-interest state directly, because both entrypoints currently panic
+    // on an unrelated, pre-existing gap in this fixture (is_market_paused_key
+    // and other config keys added by later issues were never given defaults
+    // in `setup()` — see this PR's description). execute_withdrawal itself is
+    // exercised exactly as the real entrypoint: a real WithdrawalProps record
+    // and a real LP-token transfer into withdrawal_vault.
+
+    /// Seeds a long-only pool directly in storage/real balances (no short
+    /// side), and mints `lp_supply` LP tokens to `user`.
+    fn fund_long_only_pool(w: &World, user: &Address, pool_amount: i128, lp_supply: i128) {
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_bool(&w.admin, &is_market_paused_key(&w.env, &w.market_tk), &false);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &pool_amount);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk),
+            &(pool_amount as u128),
+        );
+        // get_pool_amount (unlike get_pool_value's batched read) has no
+        // default — the short side must be explicitly zeroed even though
+        // this pool is long-only.
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.short_tk),
+            &0,
+        );
+        MtClient::new(&w.env, &w.market_tk).mint(&w.dep_handler, user, &lp_supply);
+    }
+
+    /// get_pool_value's batched read (get_u128_batch) calls extend_ttl
+    /// unconditionally after every key, which panics if that key was never
+    /// actually written (a separate pre-existing bug in data_store, outside
+    /// #786's scope) — so every key it reads must exist, even at 0, rather
+    /// than being left absent. Zeroes the impact pool and all 8 open-interest
+    /// combinations (both sides, both collateral tokens) up front.
+    fn zero_get_pool_value_defaults(w: &World) {
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::position_impact_pool_amount_key(&w.env, &w.market_tk),
+            &0,
+        );
+        for token in [&w.long_tk, &w.short_tk] {
+            for is_long in [true, false] {
+                ds_c.set_u128(&w.admin, &gmx_keys::open_interest_key(&w.env, &w.market_tk, token, is_long), &0);
+                ds_c.set_u128(
+                    &w.admin,
+                    &gmx_keys::open_interest_in_tokens_key(&w.env, &w.market_tk, token, is_long),
+                    &0,
+                );
+            }
+        }
+    }
+
+    /// Records a single position (collateralized in the long token) worth
+    /// `oi_usd` at entry, sized `oi_tokens` index-tokens. Call
+    /// zero_get_pool_value_defaults first.
+    fn set_open_interest(w: &World, is_long: bool, oi_usd: i128, oi_tokens: i128) {
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::open_interest_key(&w.env, &w.market_tk, &w.long_tk, is_long),
+            &(oi_usd as u128),
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::open_interest_in_tokens_key(&w.env, &w.market_tk, &w.long_tk, is_long),
+            &(oi_tokens as u128),
+        );
+    }
+
+    /// Writes a WithdrawalProps record directly (standing in for
+    /// create_withdrawal) and moves the LP tokens into withdrawal_vault, as
+    /// create_withdrawal itself would have done via a real transfer.
+    fn write_withdrawal_and_fund_vault(w: &World, user: &Address, key: &BytesN<32>, lp_amount: i128) {
+        w.env.as_contract(&w.wth_handler, || {
+            w.env.storage().persistent().set(
+                &LocalKey::Withdrawal(key.clone()),
+                &WithdrawalProps {
+                    account: user.clone(),
+                    receiver: user.clone(),
+                    market: w.market_tk.clone(),
+                    market_token_amount: lp_amount,
+                    min_long_token_amount: 0,
+                    min_short_token_amount: 0,
+                    execution_fee: 0,
+                    updated_at_time: w.env.ledger().timestamp(),
+                },
+            );
+        });
+        MtClient::new(&w.env, &w.market_tk).transfer(user, &w.wth_vault, &lp_amount);
+    }
+
+    /// Acceptance criterion (positive PnL): a $40M-profitable long position
+    /// must reduce NAV below gross pool assets, so a 1% LP redemption pays
+    /// out LESS than 1% of the gross pool — the old gross-USD formula would
+    /// have paid the full 1% (10,000 tokens), overpaying the withdrawing LP
+    /// at the expense of remaining LPs and the trader still owed that profit.
+    #[test]
+    fn execute_withdrawal_prices_below_gross_when_traders_net_profitable() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        // Note: kept deliberately small — FLOAT_PRECISION is 10^30, so a USD
+        // value needs to stay well under i128::MAX (~1.7 * 10^38) after being
+        // scaled by it; a naively "realistic" multi-billion-dollar pool here
+        // would silently overflow/saturate mul_div_wide's i128 result.
+        let pool_amount = 10_000 * TOKEN_PRECISION; // 10,000 long tokens ($20M pool)
+        let lp_supply = 10_000 * TOKEN_PRECISION; // 10,000 LP tokens
+        fund_long_only_pool(&w, &user, pool_amount, lp_supply);
+
+        // Long position: 1,000 index-tokens opened at $2000 (oi_usd = $2M).
+        let fp = gmx_math::FLOAT_PRECISION;
+        let position_tokens = 1_000 * TOKEN_PRECISION;
+        let entry_oi_usd = mul_div_wide(env, position_tokens, 2000 * fp, TOKEN_PRECISION);
+        zero_get_pool_value_defaults(&w);
+        set_open_interest(&w, true, entry_oi_usd, position_tokens);
+
+        // Long/short pool prices stay at $2000/$1; index price rises to $2400,
+        // so the long position is now $400K in profit ((2400-2000) * 1,000).
+        OClient::new(env, &w.oracle).set_prices_simple(
+            &w.keeper,
+            &Vec::from_array(
+                env,
+                [
+                    TokenPrice { token: w.long_tk.clone(), min: 2000 * fp, max: 2000 * fp },
+                    TokenPrice { token: w.short_tk.clone(), min: fp, max: fp },
+                    TokenPrice { token: w.index_tk.clone(), min: 2400 * fp, max: 2400 * fp },
+                ],
+            ),
+        );
+
+        let withdraw_amount = 100 * TOKEN_PRECISION; // 1% of supply
+        let key = BytesN::from_array(env, &[1u8; 32]);
+        write_withdrawal_and_fund_vault(&w, &user, &key, withdraw_amount);
+
+        WithdrawalHandlerClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &key);
+        let long_out = StellarAssetClient::new(env, &w.long_tk).balance(&user);
+
+        // Gross (buggy) formula would pay exactly 1% of the pool = 100.
+        // NAV formula: pool_value = $20M - $400K = $19.6M (98% of gross) →
+        // 1% of that, in tokens, is 98.
+        let gross_formula_payout = 100 * TOKEN_PRECISION;
+        let expected_nav_payout = 98 * TOKEN_PRECISION;
+        assert!(
+            long_out < gross_formula_payout,
+            "profitable traders must reduce payout below the gross-formula amount: got {long_out}, gross would be {gross_formula_payout}"
+        );
+        assert_eq!(long_out, expected_nav_payout, "payout must match PnL-adjusted NAV exactly");
+    }
+
+    /// Acceptance criterion (negative PnL): a $40M-unprofitable short position
+    /// must raise NAV above gross pool assets, so a 1% LP redemption pays out
+    /// MORE than 1% of the gross pool — the old gross-USD formula would have
+    /// underpaid the withdrawing LP relative to fair value.
+    #[test]
+    fn execute_withdrawal_prices_above_gross_when_traders_net_unprofitable() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        let pool_amount = 10_000 * TOKEN_PRECISION; // 10,000 long tokens ($20M pool)
+        let lp_supply = 10_000 * TOKEN_PRECISION;
+        fund_long_only_pool(&w, &user, pool_amount, lp_supply);
+
+        // Short position: 1,000 index-tokens opened at $2000 (oi_usd = $2M).
+        let fp = gmx_math::FLOAT_PRECISION;
+        let position_tokens = 1_000 * TOKEN_PRECISION;
+        let entry_oi_usd = mul_div_wide(env, position_tokens, 2000 * fp, TOKEN_PRECISION);
+        zero_get_pool_value_defaults(&w);
+        set_open_interest(&w, false, entry_oi_usd, position_tokens);
+
+        // Index price rises to $2400 — the short is now $400K underwater
+        // ((2400-2000) * 1,000), which traders still owe the pool.
+        OClient::new(env, &w.oracle).set_prices_simple(
+            &w.keeper,
+            &Vec::from_array(
+                env,
+                [
+                    TokenPrice { token: w.long_tk.clone(), min: 2000 * fp, max: 2000 * fp },
+                    TokenPrice { token: w.short_tk.clone(), min: fp, max: fp },
+                    TokenPrice { token: w.index_tk.clone(), min: 2400 * fp, max: 2400 * fp },
+                ],
+            ),
+        );
+
+        let withdraw_amount = 100 * TOKEN_PRECISION; // 1% of supply
+        let key = BytesN::from_array(env, &[2u8; 32]);
+        write_withdrawal_and_fund_vault(&w, &user, &key, withdraw_amount);
+
+        WithdrawalHandlerClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &key);
+        let long_out = StellarAssetClient::new(env, &w.long_tk).balance(&user);
+
+        // Gross (buggy) formula would pay exactly 1% of the pool = 100.
+        // NAV formula: pool_value = $20M + $400K = $20.4M (102% of gross) →
+        // 1% of that, in tokens, is 102.
+        let gross_formula_payout = 100 * TOKEN_PRECISION;
+        let expected_nav_payout = 102 * TOKEN_PRECISION;
+        assert!(
+            long_out > gross_formula_payout,
+            "unprofitable traders must raise payout above the gross-formula amount: got {long_out}, gross would be {gross_formula_payout}"
+        );
+        assert_eq!(long_out, expected_nav_payout, "payout must match PnL-adjusted NAV exactly");
     }
 
     // ── Issue #255: withdrawal output matches current pool weight ────────────
