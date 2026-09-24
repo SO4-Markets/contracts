@@ -156,6 +156,10 @@ pub enum Error {
     /// forced by a caller who bypasses liquidation_handler entirely (mirrors
     /// AdlRequirementNotMet's rationale for execute_adl).
     NotLiquidatable = 29,
+    /// flag_stale_keeper's keeper parameter does not actually hold role
+    /// (issue #794) — without this check, the emitted KeeperHeartbeatMissed
+    /// audit-trail event could name an arbitrary or unrelated address.
+    KeeperDoesNotHoldRole = 30,
 }
 
 
@@ -529,6 +533,17 @@ impl OrderHandler {
             .instance()
             .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let role_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::RoleStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+
+        // #794: keeper must actually hold role, so the emitted audit-trail
+        // event can only ever name a real, current holder of the stale role.
+        if !RoleStoreClient::new(&env, &role_store).has_role(&keeper, &role) {
+            panic_with_error!(&env, Error::KeeperDoesNotHoldRole);
+        }
 
         let status = Self::check_keeper_heartbeat(env.clone(), data_store.clone(), role.clone());
         if !status.is_stale {
@@ -4199,6 +4214,36 @@ mod tests {
         w.env.ledger().set_sequence_number(5000);
         let impostor = Address::generate(&w.env);
         hc.flag_stale_keeper(&impostor, &w.keeper, &order_keeper_role);
+    }
+
+    /// Issue #794: `keeper` must actually hold `role`, so the emitted
+    /// audit-trail event can never name an arbitrary or unrelated address —
+    /// even when the role as a whole has genuinely gone stale.
+    #[test]
+    #[should_panic]
+    fn flag_stale_keeper_rejects_keeper_that_never_held_role() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        let order_keeper_role = roles::order_keeper(&w.env);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+
+        // The role as a whole genuinely goes stale.
+        w.env.ledger().set_sequence_number(1000);
+        let (_, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+        w.env.ledger().set_sequence_number(1000 + 2880 + 1);
+        assert!(hc
+            .check_keeper_heartbeat(&w.ds, &order_keeper_role)
+            .is_stale);
+
+        // `bystander` never held order_keeper_role — flagging it must panic
+        // with KeeperDoesNotHoldRole rather than naming it in the event.
+        let bystander = Address::generate(&w.env);
+        hc.flag_stale_keeper(&w.admin, &bystander, &order_keeper_role);
     }
 
     // ── Issue #219: create_orders (batch) ────────────────────────────────────
