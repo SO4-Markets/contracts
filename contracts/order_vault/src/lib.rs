@@ -32,6 +32,7 @@ pub enum Error {
 enum InstanceKey {
     Initialized,
     RoleStore,
+    Admin,
 }
 
 #[contracttype]
@@ -65,7 +66,9 @@ pub struct OrderVault;
 
 #[contractimpl]
 impl OrderVault {
-    /// One-time setup: store admin and role_store addresses.
+    /// One-time setup: store admin and role_store addresses (issue #781 —
+    /// admin was previously authenticated but never persisted, despite this
+    /// doc comment already claiming otherwise).
     pub fn initialize(env: Env, admin: Address, role_store: Address) {
         admin.require_auth();
         if env.storage().instance().has(&InstanceKey::Initialized) {
@@ -77,6 +80,7 @@ impl OrderVault {
         env.storage()
             .instance()
             .set(&InstanceKey::RoleStore, &role_store);
+        env.storage().instance().set(&InstanceKey::Admin, &admin);
     }
 
     /// Snapshot the balance of `token` in this vault and return the received delta.
@@ -179,8 +183,13 @@ mod tests {
     fn initialize_works() {
         let env = Env::default();
         env.mock_all_auths();
-        let (_, _, vault) = setup(&env);
-        let _ = vault;
+        let (admin, _, vault) = setup(&env);
+
+        // Issue #781: admin was authenticated but never persisted.
+        let stored_admin: Address = env
+            .as_contract(&vault, || env.storage().instance().get(&InstanceKey::Admin))
+            .unwrap();
+        assert_eq!(stored_admin, admin);
     }
 
     #[test]
