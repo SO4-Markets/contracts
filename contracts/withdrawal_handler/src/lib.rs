@@ -23,7 +23,16 @@
 use gmx_keys::{
     account_withdrawal_list_key, is_market_paused_key, market_index_token_key,
     market_long_token_key, market_short_token_key, roles, withdrawal_key, withdrawal_list_key,
+    MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET,
 };
+
+fn bump_persistent<K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
+    if env.storage().persistent().has(key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+    }
+}
 use gmx_market_utils::{apply_delta_to_pool_amount, get_pool_amount};
 use gmx_math::{mul_div_wide, TOKEN_PRECISION};
 pub use gmx_types::CreateWithdrawalParams;
@@ -311,9 +320,15 @@ impl WithdrawalHandler {
             execution_fee: params.execution_fee,
             updated_at_time: env.ledger().timestamp(),
         };
+        let withdrawal_storage_key = LocalKey::Withdrawal(key.clone());
         env.storage()
             .persistent()
-            .set(&LocalKey::Withdrawal(key.clone()), &withdrawal);
+            .set(&withdrawal_storage_key, &withdrawal);
+        env.storage().persistent().extend_ttl(
+            &withdrawal_storage_key,
+            MIN_BUMP_THRESHOLD,
+            PERSISTENT_BUMP_TARGET,
+        );
 
         ds.add_bytes32_to_set(&handler, &withdrawal_list_key(&env), &key);
         ds.add_bytes32_to_set(&handler, &account_withdrawal_list_key(&env, &caller), &key);
@@ -352,10 +367,12 @@ impl WithdrawalHandler {
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
 
+        let withdrawal_storage_key = LocalKey::Withdrawal(key.clone());
+        bump_persistent(&env, &withdrawal_storage_key);
         let withdrawal: WithdrawalProps = env
             .storage()
             .persistent()
-            .get(&LocalKey::Withdrawal(key.clone()))
+            .get(&withdrawal_storage_key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::WithdrawalNotFound));
 
         let market = load_market_props(&env, &data_store, &withdrawal.market);
@@ -516,10 +533,12 @@ impl WithdrawalHandler {
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
 
+        let withdrawal_storage_key = LocalKey::Withdrawal(key.clone());
+        bump_persistent(&env, &withdrawal_storage_key);
         let withdrawal: WithdrawalProps = env
             .storage()
             .persistent()
-            .get(&LocalKey::Withdrawal(key.clone()))
+            .get(&withdrawal_storage_key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::WithdrawalNotFound));
 
         let is_keeper =
@@ -568,7 +587,9 @@ impl WithdrawalHandler {
     // ── Views ─────────────────────────────────────────────────────────────────
 
     pub fn get_withdrawal(env: Env, key: BytesN<32>) -> Option<WithdrawalProps> {
-        env.storage().persistent().get(&LocalKey::Withdrawal(key))
+        let storage_key = LocalKey::Withdrawal(key);
+        bump_persistent(&env, &storage_key);
+        env.storage().persistent().get(&storage_key)
     }
 }
 
@@ -1501,5 +1522,17 @@ mod tests {
         let new_oracle = Address::generate(&w.env);
         WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
             .update_oracle(&w.admin, &new_oracle);
+    }
+
+    // ── Issue #801: persistent Withdrawal entry TTL renewal ───────────────────
+
+    /// Issue #801: get_withdrawal must safely handle non-existent keys
+    /// without panicking on absent TTL extension, and return None.
+    #[test]
+    fn test_withdrawal_handler_extends_ttl_on_absent_and_existing() {
+        let w = setup();
+        let client = WithdrawalHandlerClient::new(&w.env, &w.wth_handler);
+        let absent_key = BytesN::from_array(&w.env, &[42u8; 32]);
+        assert_eq!(client.get_withdrawal(&absent_key), None);
     }
 }
