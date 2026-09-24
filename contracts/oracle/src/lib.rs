@@ -777,7 +777,7 @@ mod tests {
     use gmx_keys::roles;
     use role_store::{RoleStore, RoleStoreClient as RsClient};
     use soroban_sdk::{
-        testutils::{Address as _, Events as _},
+        testutils::{Address as _, Events as _, Ledger as _},
         Env, IntoVal, Val,
     };
 
@@ -1255,4 +1255,72 @@ mod tests {
         let token = Address::generate(&env);
         client.get_price_with_stable_fallback(&token);
     }
+
+    /// Issue #778: require_price_fresh succeeds when stored ledger sequence matches expected.
+    #[test]
+    fn require_price_fresh_succeeds_when_ledger_matches() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _rs, _ds, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        let prices = Vec::from_array(
+            &env,
+            [TokenPrice {
+                token: token.clone(),
+                min: 2_000,
+                max: 2_000,
+            }],
+        );
+
+        client.set_prices_simple(&admin, &prices);
+        let current_seq = env.ledger().sequence();
+        let price = client.require_price_fresh(&token, &current_seq);
+        assert_eq!(price.min, 2_000);
+        assert_eq!(price.max, 2_000);
+    }
+
+    /// Issue #778: require_price_fresh panics with StalePrice when stored ledger sequence
+    /// does not match expected_ledger_seq (e.g. after ledger advances).
+    #[test]
+    #[should_panic]
+    fn require_price_fresh_panics_when_stale() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _rs, _ds, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        let prices = Vec::from_array(
+            &env,
+            [TokenPrice {
+                token: token.clone(),
+                min: 2_000,
+                max: 2_000,
+            }],
+        );
+
+        client.set_prices_simple(&admin, &prices);
+        // Advance ledger sequence past submission
+        env.ledger().with_mut(|l| l.sequence += 1);
+        let current_seq = env.ledger().sequence();
+
+        // Stored sequence != current_seq -> panics with Error::StalePrice
+        client.require_price_fresh(&token, &current_seq);
+    }
+
+    /// Issue #778: require_price_fresh panics with PriceNotFound when no price was stored.
+    #[test]
+    #[should_panic]
+    fn require_price_fresh_panics_when_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, _rs, _ds, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        client.require_price_fresh(&token, &env.ledger().sequence());
+    }
 }
+
