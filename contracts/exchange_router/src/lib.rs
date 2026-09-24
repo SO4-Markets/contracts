@@ -489,7 +489,14 @@ impl ExchangeRouter {
             &is_market_paused_key(&env, &market),
             &false,
         );
+        // Issue #804: emit event for audit trail when market circuit breaker is reset,
+        // matching the pattern established for other admin actions in issue #606.
+        env.events().publish(
+            (soroban_sdk::symbol_short!("cb_reset"),),
+            (market, admin),
+        );
     }
+
 
     fn require_not_paused(env: &Env) {
         let data_store: Address = env
@@ -2030,5 +2037,9 @@ mod tests {
         let w = setup();
         let client = ExchangeRouterClient::new(&w.env, &w.router);
         client.reset_circuit_breaker(&w.market_tk);
+
+        let events = w.env.events().all();
+        assert!(!events.is_empty());
     }
+
 }
