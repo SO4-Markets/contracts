@@ -705,4 +705,41 @@ mod tests {
         );
         client.burn_from(&spender, &alice, &-1);
     }
+
+    /// Issue #799: decimals, name, and symbol return the values set at initialization.
+    #[test]
+    fn metadata_accessors_match_initialization() {
+        let (env, _owner, client) = setup();
+        assert_eq!(client.decimals(), 7);
+        assert_eq!(client.name(), String::from_str(&env, "Test Wrapped Bitcoin"));
+        assert_eq!(client.symbol(), String::from_str(&env, "TWBTC"));
+    }
+
+    /// Issue #799: decimals panics with NotInitialized when called before initialize.
+    #[test]
+    #[should_panic]
+    fn decimals_uninitialized_panics() {
+        let env = Env::default();
+        let id = env.register(TestToken, ());
+        TestTokenClient::new(&env, &id).decimals();
+    }
+
+    /// Issue #799: name panics with NotInitialized when called before initialize.
+    #[test]
+    #[should_panic]
+    fn name_uninitialized_panics() {
+        let env = Env::default();
+        let id = env.register(TestToken, ());
+        TestTokenClient::new(&env, &id).name();
+    }
+
+    /// Issue #799: symbol panics with NotInitialized when called before initialize.
+    #[test]
+    #[should_panic]
+    fn symbol_uninitialized_panics() {
+        let env = Env::default();
+        let id = env.register(TestToken, ());
+        TestTokenClient::new(&env, &id).symbol();
+    }
 }
+
