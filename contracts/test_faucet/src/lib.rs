@@ -9,6 +9,7 @@ use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, panic_with_error,
     symbol_short, Address, Env, Vec,
 };
+use gmx_keys::{MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET};
 
 #[allow(dead_code)]
 #[contractclient(name = "TestTokenClient")]
@@ -95,9 +96,13 @@ impl TestFaucet {
             panic_with_error!(&env, Error::InvalidAmount);
         }
 
+        let key = DataKey::ClaimAmount(token.clone());
+        env.storage().persistent().set(&key, &claim_amount);
+        // Issue #806: set_token may not be re-called for months while claims
+        // keep coming in — give the config a TTL so it doesn't archive.
         env.storage()
             .persistent()
-            .set(&DataKey::ClaimAmount(token.clone()), &claim_amount);
+            .extend_ttl(&key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         env.events()
             .publish((symbol_short!("token"),), (token, claim_amount));
     }
@@ -111,10 +116,18 @@ impl TestFaucet {
     }
 
     pub fn claim_amount(env: Env, token: Address) -> i128 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::ClaimAmount(token))
-            .unwrap_or(0)
+        let key = DataKey::ClaimAmount(token);
+        match env.storage().persistent().get::<_, i128>(&key) {
+            Some(amount) => {
+                // Issue #806: renew on every hot read so an actively-claimed
+                // token's config never lapses into archival.
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+                amount
+            }
+            None => 0,
+        }
     }
 
     pub fn last_claim_ledger(env: Env, account: Address, token: Address) -> u32 {
