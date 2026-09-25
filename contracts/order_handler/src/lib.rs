@@ -1325,7 +1325,7 @@ impl OrderHandler {
 
                 // Issue #205: emit position event
                 let avg_price = if updated.size_in_tokens > 0 {
-                    mul_div_wide(&env, updated.size_in_usd, 1, updated.size_in_tokens)
+                    mul_div_wide(&env, updated.size_in_usd, gmx_math::TOKEN_PRECISION, updated.size_in_tokens)
                 } else {
                     0
                 };
