@@ -1065,7 +1065,8 @@ impl Reader {
         let effective_leverage_x100 = if net_collateral_usd == 0 {
             u32::MAX
         } else {
-            mul_div_wide(&env, position.size_in_usd, 100, net_signed) as u32
+            u32::try_from(mul_div_wide(&env, position.size_in_usd, 100, net_signed))
+                .unwrap_or(u32::MAX)
         };
 
         let is_liq = is_liquidatable(
@@ -1152,10 +1153,10 @@ impl Reader {
                             } else {
                                 1
                             };
-                            let health_factor_bps = (collateral_usd
-                                .saturating_mul(10000)
-                                / size_usd)
-                                as u32;
+                            let health_factor_bps = u32::try_from(
+                                collateral_usd.saturating_mul(10000) / size_usd,
+                            )
+                            .unwrap_or(u32::MAX);
 
                             candidates.push_back(LiquidatablePosition {
                                 key: pk,
