@@ -19,3 +19,6 @@ push-github-issues.sh
 issue.md
 pr.md
 fix.md
+
+# Local build/test output artifacts
+*.log
