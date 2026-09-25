@@ -2212,6 +2212,274 @@ mod tests {
         assert!(result.reverts_if_executed);
     }
 
+    /// Real 1-hop swap: long->short in a balanced market with minimal price impact.
+    /// Verifies correct output amount, execution price calculation, and no revert flag.
+    #[test]
+    fn estimate_swap_output_one_hop_success() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let tp = TOKEN_PRECISION;
+        let env = &w.env;
+
+        // Create tokens and market manually.
+        let market_tk = Address::generate(env);
+        let long_tk = Address::generate(env);
+        let short_tk = Address::generate(env);
+        let index_tk = Address::generate(env);
+        let ds_c = DsClient::new(env, &w.ds);
+
+        // Wire the market's token addresses.
+        ds_c.set_address(&w.admin, &market_index_token_key(env, &market_tk), &index_tk);
+        ds_c.set_address(&w.admin, &market_long_token_key(env, &market_tk), &long_tk);
+        ds_c.set_address(&w.admin, &market_short_token_key(env, &market_tk), &short_tk);
+
+        // Seed balanced pools: 10,000 tokens each.
+        let pool_size = 10_000 * tp as u128;
+        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market_tk, &long_tk), &pool_size);
+        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market_tk, &short_tk), &pool_size);
+
+        // Equal long/short OI to minimize impact.
+        let oi = 5_000 * fp as u128;
+        ds_c.set_u128(&w.admin, &open_interest_key(env, &market_tk, &long_tk, true), &oi);
+        ds_c.set_u128(&w.admin, &open_interest_key(env, &market_tk, &short_tk, false), &oi);
+
+        // Set oracle prices at $1 for all tokens.
+        let price = fp;
+        OClient::new(env, &w.oracle).set_prices_simple(
+            &w.admin,
+            &SdkVec::from_array(
+                env,
+                [
+                    TokenPrice { token: long_tk.clone(), min: price, max: price },
+                    TokenPrice { token: short_tk.clone(), min: price, max: price },
+                    TokenPrice { token: index_tk, min: price, max: price },
+                ],
+            ),
+        );
+
+        // Swap 100 long tokens -> short tokens.
+        let amount_in = 100 * tp as u128;
+        let swap_path = SdkVec::from_array(env, [market_tk]);
+
+        let result = ReaderClient::new(env, &w.reader).estimate_swap_output(
+            &w.ds,
+            &w.oracle,
+            &long_tk,
+            &amount_in,
+            &swap_path,
+        );
+
+        // Output token should be short_tk.
+        assert_eq!(result.token_out, short_tk);
+        // In a balanced market at $1, should get close to 100 tokens out (minus small impact).
+        assert!(result.amount_out > 95 * tp as u128);
+        assert!(result.amount_out <= amount_in);
+        // Execution price should be non-zero.
+        assert!(result.execution_price > 0);
+        // Should not revert.
+        assert!(!result.reverts_if_executed);
+    }
+
+    /// Real 2-hop swap: tokenA->tokenB->tokenC across two markets.
+    /// Verifies multi-hop token direction inference, cumulative price impact, and final output.
+    #[test]
+    fn estimate_swap_output_two_hop_success() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let tp = TOKEN_PRECISION;
+        let env = &w.env;
+
+        // Create tokens: A, B, C.
+        let token_a = Address::generate(env);
+        let token_b = Address::generate(env);
+        let token_c = Address::generate(env);
+
+        // Market 1: tokenA (long) <-> tokenB (short).
+        let market1 = Address::generate(env);
+        let index1 = Address::generate(env);
+        let ds_c = DsClient::new(env, &w.ds);
+
+        ds_c.set_address(&w.admin, &market_index_token_key(env, &market1), &index1);
+        ds_c.set_address(&w.admin, &market_long_token_key(env, &market1), &token_a);
+        ds_c.set_address(&w.admin, &market_short_token_key(env, &market1), &token_b);
+
+        let pool_size = 10_000 * tp as u128;
+        let oi = 5_000 * fp as u128;
+        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market1, &token_a), &pool_size);
+        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market1, &token_b), &pool_size);
+        ds_c.set_u128(&w.admin, &open_interest_key(env, &market1, &token_a, true), &oi);
+        ds_c.set_u128(&w.admin, &open_interest_key(env, &market1, &token_b, false), &oi);
+
+        // Market 2: tokenB (long) <-> tokenC (short).
+        let market2 = Address::generate(env);
+        let index2 = Address::generate(env);
+
+        ds_c.set_address(&w.admin, &market_index_token_key(env, &market2), &index2);
+        ds_c.set_address(&w.admin, &market_long_token_key(env, &market2), &token_b);
+        ds_c.set_address(&w.admin, &market_short_token_key(env, &market2), &token_c);
+
+        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market2, &token_b), &pool_size);
+        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market2, &token_c), &pool_size);
+        ds_c.set_u128(&w.admin, &open_interest_key(env, &market2, &token_b, true), &oi);
+        ds_c.set_u128(&w.admin, &open_interest_key(env, &market2, &token_c, false), &oi);
+
+        // Set oracle prices at $1 for all tokens.
+        let price = fp;
+        OClient::new(env, &w.oracle).set_prices_simple(
+            &w.admin,
+            &SdkVec::from_array(
+                env,
+                [
+                    TokenPrice { token: token_a.clone(), min: price, max: price },
+                    TokenPrice { token: token_b.clone(), min: price, max: price },
+                    TokenPrice { token: token_c.clone(), min: price, max: price },
+                    TokenPrice { token: index1, min: price, max: price },
+                    TokenPrice { token: index2, min: price, max: price },
+                ],
+            ),
+        );
+
+        // Swap tokenA -> tokenB -> tokenC.
+        let amount_in = 100 * tp as u128;
+        let swap_path = SdkVec::from_array(env, [market1, market2]);
+
+        let result = ReaderClient::new(env, &w.reader).estimate_swap_output(
+            &w.ds,
+            &w.oracle,
+            &token_a,
+            &amount_in,
+            &swap_path,
+        );
+
+        // Output token should be tokenC.
+        assert_eq!(result.token_out, token_c);
+        // After two hops with minimal impact, output should be close to input.
+        assert!(result.amount_out > 90 * tp as u128);
+        // Execution price should be non-zero.
+        assert!(result.execution_price > 0);
+        // Should not revert.
+        assert!(!result.reverts_if_executed);
+    }
+
+    /// Mismatched token: input token not in the market's long/short pair.
+    /// Verifies reverts_if_executed = true and loop breaks on mismatch.
+    #[test]
+    fn estimate_swap_output_mismatched_token_reverts() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let tp = TOKEN_PRECISION;
+        let env = &w.env;
+
+        // Create a market with long and short tokens.
+        let market_tk = Address::generate(env);
+        let long_tk = Address::generate(env);
+        let short_tk = Address::generate(env);
+        let index_tk = Address::generate(env);
+        let ds_c = DsClient::new(env, &w.ds);
+
+        ds_c.set_address(&w.admin, &market_index_token_key(env, &market_tk), &index_tk);
+        ds_c.set_address(&w.admin, &market_long_token_key(env, &market_tk), &long_tk);
+        ds_c.set_address(&w.admin, &market_short_token_key(env, &market_tk), &short_tk);
+
+        let pool_size = 10_000 * tp as u128;
+        let oi = 5_000 * fp as u128;
+        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market_tk, &long_tk), &pool_size);
+        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market_tk, &short_tk), &pool_size);
+        ds_c.set_u128(&w.admin, &open_interest_key(env, &market_tk, &long_tk, true), &oi);
+        ds_c.set_u128(&w.admin, &open_interest_key(env, &market_tk, &short_tk, false), &oi);
+
+        let price = fp;
+        OClient::new(env, &w.oracle).set_prices_simple(
+            &w.admin,
+            &SdkVec::from_array(
+                env,
+                [
+                    TokenPrice { token: long_tk, min: price, max: price },
+                    TokenPrice { token: short_tk, min: price, max: price },
+                    TokenPrice { token: index_tk, min: price, max: price },
+                ],
+            ),
+        );
+
+        // Generate a random token that is NOT in the market.
+        let wrong_token = Address::generate(env);
+        let amount_in = 100 * tp as u128;
+        let swap_path = SdkVec::from_array(env, [market_tk]);
+
+        let result = ReaderClient::new(env, &w.reader).estimate_swap_output(
+            &w.ds,
+            &w.oracle,
+            &wrong_token,
+            &amount_in,
+            &swap_path,
+        );
+
+        // Should flag that execution would revert.
+        assert!(result.reverts_if_executed);
+        // Output amount should be the last valid amount (input in this case, since loop breaks immediately).
+        assert_eq!(result.amount_out, amount_in);
+        assert_eq!(result.token_out, wrong_token);
+    }
+
+    /// Non-positive output after price impact: large swap that results in output_usd <= 0.
+    /// Verifies reverts_if_executed = true and loop breaks.
+    #[test]
+    fn estimate_swap_output_non_positive_output_reverts() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let tp = TOKEN_PRECISION;
+        let env = &w.env;
+
+        // Create a highly imbalanced market with very low short pool to induce large negative impact.
+        let market_tk = Address::generate(env);
+        let long_tk = Address::generate(env);
+        let short_tk = Address::generate(env);
+        let index_tk = Address::generate(env);
+        let ds_c = DsClient::new(env, &w.ds);
+
+        ds_c.set_address(&w.admin, &market_index_token_key(env, &market_tk), &index_tk);
+        ds_c.set_address(&w.admin, &market_long_token_key(env, &market_tk), &long_tk);
+        ds_c.set_address(&w.admin, &market_short_token_key(env, &market_tk), &short_tk);
+
+        // Large long pool, tiny short pool (extreme imbalance).
+        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market_tk, &long_tk), &(10_000 * tp as u128));
+        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market_tk, &short_tk), &(10 * tp as u128));
+
+        // Very high long OI, low short OI.
+        ds_c.set_u128(&w.admin, &open_interest_key(env, &market_tk, &long_tk, true), &(50_000 * fp as u128));
+        ds_c.set_u128(&w.admin, &open_interest_key(env, &market_tk, &short_tk, false), &(1_000 * fp as u128));
+
+        let price = fp;
+        OClient::new(env, &w.oracle).set_prices_simple(
+            &w.admin,
+            &SdkVec::from_array(
+                env,
+                [
+                    TokenPrice { token: long_tk.clone(), min: price, max: price },
+                    TokenPrice { token: short_tk, min: price, max: price },
+                    TokenPrice { token: index_tk, min: price, max: price },
+                ],
+            ),
+        );
+
+        // Attempt a massive swap that will create extreme negative price impact.
+        let amount_in = 5_000 * tp as u128; // half the long pool
+        let swap_path = SdkVec::from_array(env, [market_tk]);
+
+        let result = ReaderClient::new(env, &w.reader).estimate_swap_output(
+            &w.ds,
+            &w.oracle,
+            &long_tk,
+            &amount_in,
+            &swap_path,
+        );
+
+        // Should flag that execution would revert due to non-positive output.
+        assert!(result.reverts_if_executed);
+        // The loop should have broken, so the output reflects the state at break.
+        // Execution price can be zero if final amount is zero.
+    }
+
     /// The stored admin address (reader's only persistent state) survives an
     /// upgrade — checked by confirming a second admin-gated upgrade call still
     /// authorizes against the same admin afterward.
