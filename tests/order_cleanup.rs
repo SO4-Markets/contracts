@@ -306,6 +306,7 @@ fn cancel_expired_order_reverts_if_not_yet_expired() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: Some(999_999_999), // far future
+            on_behalf_of: None,
         },
     );
 
