@@ -9,19 +9,25 @@
 # make upgrade will print "skipped (immutable)" for each of these.
 IMMUTABLE_CONTRACTS := market_token
 
-UPGRADE_CONTRACTS ?= \
+# Contracts that currently expose no `upgrade` entrypoint (#751). Attempting an
+# upgrade would upload a WASM and then fail at the final invoke, so they are
+# skipped up front instead. Whether data_store / role_store should gain an
+# upgrade mechanism is a separate design decision.
+NON_UPGRADEABLE_CONTRACTS := \
 	role_store \
 	data_store \
+	deposit_vault \
+	withdrawal_vault \
+	order_vault \
+	adl_handler
+
+UPGRADE_CONTRACTS ?= \
 	oracle \
 	market_factory \
-	deposit_vault \
 	deposit_handler \
-	withdrawal_vault \
 	withdrawal_handler \
-	order_vault \
 	order_handler \
 	liquidation_handler \
-	adl_handler \
 	fee_handler \
 	referral_storage \
 	reader \
@@ -48,6 +54,11 @@ upgrade-contract: preflight build
 			printf 'skipped (immutable)  %s\n' "$(CONTRACT)"; exit 0; \
 		fi; \
 	done
+	@for nu in $(NON_UPGRADEABLE_CONTRACTS); do \
+		if [ "$$nu" = "$(CONTRACT)" ]; then \
+			printf 'refused (no upgrade() entrypoint)  %s\n' "$(CONTRACT)"; exit 1; \
+		fi; \
+	done
 	@test -f "$(DEPLOY_ENV)" || { printf 'Missing %s. Run make deploy-all first or pass CONTRACT_ID=...\n' "$(DEPLOY_ENV)"; exit 1; }
 	source "$(DEPLOY_ENV)"
 	contract_key="$$(printf '%s' "$(CONTRACT)" | tr '[:lower:]-' '[:upper:]_')"
@@ -71,6 +82,9 @@ upgrade-all: preflight build
 	@test -f "$(DEPLOY_ENV)" || { printf 'Missing %s. Run deploy-all first.\n' "$(DEPLOY_ENV)"; exit 1; }
 	@if [ "$(DRY_RUN)" = "1" ]; then printf 'DRY RUN — no transactions will be submitted\n'; fi
 	source "$(DEPLOY_ENV)"
+	for nu in $(NON_UPGRADEABLE_CONTRACTS); do \
+		printf 'skipped (no upgrade())  %s\n' "$$nu"; \
+	done
 	for contract in $(UPGRADE_CONTRACTS) $(IMMUTABLE_CONTRACTS); do \
 		is_immutable=0; \
 		for imm in $(IMMUTABLE_CONTRACTS); do [ "$$imm" = "$$contract" ] && is_immutable=1; done; \
