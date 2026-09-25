@@ -13,10 +13,6 @@ pub struct PriceProps {
 }
 
 impl PriceProps {
-    pub fn is_empty(&self) -> bool {
-        self.min == 0 || self.max == 0
-    }
-
     pub fn mid_price(&self) -> i128 {
         (self.max + self.min) / 2
     }
