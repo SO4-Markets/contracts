@@ -78,6 +78,16 @@ pub struct ReferrerTierUpgraded {
     pub cumulative_volume: u128,
 }
 
+#[contractevent(topics = ["ref_tier"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReferrerTierSet {
+    pub referrer: Address,
+    pub old_tier: u32,
+    pub new_tier: u32,
+    pub admin: Address,
+}
+
+
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
 #[contracterror]
@@ -228,9 +238,21 @@ impl ReferralStorage {
         if tier > 2 {
             panic_with_error!(&env, Error::InvalidTier);
         }
-        let tier_key = ReferralKey::ReferrerTier(referrer);
+        let tier_key = ReferralKey::ReferrerTier(referrer.clone());
+        let old_tier: u32 = env
+            .storage()
+            .persistent()
+            .get(&tier_key)
+            .unwrap_or(0u32);
         env.storage().persistent().set(&tier_key, &tier);
         env.storage().persistent().extend_ttl(&tier_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+
+        env.events().publish_event(&ReferrerTierSet {
+            referrer,
+            old_tier,
+            new_tier: tier,
+            admin,
+        });
     }
 
     /// Configure the rebate/discount parameters for a tier (admin only).
@@ -547,6 +569,23 @@ mod tests {
         for t in 0u32..=2 {
             client(&w).set_referrer_tier(&w.admin, &referrer, &t);
         }
+    }
+
+    /// Issue #770: set_referrer_tier emits ReferrerTierSet event with old and new tier.
+    #[test]
+    fn set_referrer_tier_emits_event() {
+        let w = setup();
+        let referrer = Address::generate(&w.env);
+
+        client(&w).set_referrer_tier(&w.admin, &referrer, &1u32);
+        assert_eq!(client(&w).get_referrer_tier(&referrer), 1);
+
+        // Manual downgrade or upgrade emits event
+        client(&w).set_referrer_tier(&w.admin, &referrer, &2u32);
+        assert_eq!(client(&w).get_referrer_tier(&referrer), 2);
+
+        client(&w).set_referrer_tier(&w.admin, &referrer, &0u32);
+        assert_eq!(client(&w).get_referrer_tier(&referrer), 0);
     }
 
     /// Tier 3 is out-of-range and must revert with InvalidTier.
