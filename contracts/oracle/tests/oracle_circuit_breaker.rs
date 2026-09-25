@@ -294,3 +294,27 @@ fn set_circuit_breaker_factor_rejects_non_admin() {
     let impostor = Address::generate(&w.env);
     OClient::new(&w.env, &w.oracle).set_circuit_breaker_factor(&impostor, &w.market, &1500u128);
 }
+
+/// set_circuit_breaker_factor must accept the documented maximum (issue #760).
+#[test]
+fn set_circuit_breaker_factor_accepts_max() {
+    let w = setup();
+    OClient::new(&w.env, &w.oracle).set_circuit_breaker_factor(
+        &w.admin,
+        &w.market,
+        &oracle::MAX_CIRCUIT_BREAKER_FACTOR_BPS,
+    );
+}
+
+/// set_circuit_breaker_factor must reject a factor above the cap, since an
+/// arbitrarily large threshold silently disables the breaker (issue #760).
+#[test]
+#[should_panic(expected = "Error(Contract, #11)")]
+fn set_circuit_breaker_factor_rejects_above_max() {
+    let w = setup();
+    OClient::new(&w.env, &w.oracle).set_circuit_breaker_factor(
+        &w.admin,
+        &w.market,
+        &(oracle::MAX_CIRCUIT_BREAKER_FACTOR_BPS + 1),
+    );
+}

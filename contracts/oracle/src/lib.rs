@@ -49,6 +49,10 @@ pub enum Error {
     /// clear_price/clear_prices called on a price stored less than
     /// MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR ledgers ago (issue #805).
     PriceTooFreshToClear = 10,
+    /// set_circuit_breaker_factor called with a factor above
+    /// MAX_CIRCUIT_BREAKER_FACTOR_BPS (issue #760) — an unbounded threshold
+    /// silently disables the price circuit breaker for the market.
+    CircuitBreakerFactorTooHigh = 11,
 }
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
@@ -93,6 +97,14 @@ const MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR: u32 = 5;
 /// write, so this stays at the same conservative size as
 /// MAX_CLEAR_PRICES_BATCH_SIZE rather than a larger number.
 const MAX_PRICE_BATCH_SIZE: u32 = 20;
+
+/// Upper bound on the per-market circuit-breaker deviation threshold, in
+/// basis points (issue #760): 5_000 bps = a 50% single-update price move.
+/// Anything larger is effectively "never trips" for a real price feed, so a
+/// fat-fingered (or maliciously set) value can't silently disable the
+/// breaker. Mirrors the cap `data_store::set_liquidation_execution_fee`
+/// enforces for the analogous fee parameter (issue #633).
+pub const MAX_CIRCUIT_BREAKER_FACTOR_BPS: u128 = 5_000;
 
 // ─── Signed price submitted by keeper ────────────────────────────────────────
 
@@ -538,6 +550,9 @@ impl Oracle {
     pub fn set_circuit_breaker_factor(env: Env, caller: Address, market: Address, factor_bps: u128) {
         caller.require_auth();
         require_admin(&env, &caller);
+        if factor_bps > MAX_CIRCUIT_BREAKER_FACTOR_BPS {
+            panic_with_error!(&env, Error::CircuitBreakerFactorTooHigh);
+        }
         let data_store: Address = env
             .storage()
             .instance()
