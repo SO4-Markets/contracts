@@ -105,6 +105,10 @@ pub enum Error {
     /// otherwise panic with a raw Option::unwrap() on None rather than a
     /// typed error.
     MismatchedBatchLength = 9,
+    /// multicall's SendTokens action was given `amount <= 0` (issue #731) —
+    /// rejected up front with a typed error instead of surfacing whatever the
+    /// token contract does with a zero or negative transfer.
+    InvalidAmount = 10,
 }
 
 // ─── External handler clients ─────────────────────────────────────────────────
@@ -556,6 +560,9 @@ impl ExchangeRouter {
             match action {
                 RouterAction::SendTokens(p) => {
                     Self::require_not_paused(&env);
+                    if p.amount <= 0 {
+                        panic_with_error!(&env, Error::InvalidAmount);
+                    }
                     token::Client::new(&env, &p.token).transfer(&caller, &p.receiver, &p.amount);
                     results.push_back(zero_key.clone());
                 }
