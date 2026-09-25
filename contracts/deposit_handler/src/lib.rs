@@ -22,7 +22,7 @@
 use gmx_keys::{
     account_deposit_list_key, deposit_key, deposit_list_key, is_market_paused_key,
     market_index_token_key, market_long_token_key, market_short_token_key, min_deposit_usd_key,
-    roles,
+    roles, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET,
 };
 use gmx_market_utils::{
     apply_delta_to_pool_amount, get_market_token_price, validate_pool_amount,
@@ -358,6 +358,13 @@ impl DepositHandler {
         env.storage()
             .persistent()
             .set(&LocalKey::Deposit(key.clone()), &deposit);
+        // #721 — pending deposits previously had no TTL bump at all, so an
+        // unexecuted deposit could be archived, stranding the depositor's funds.
+        env.storage().persistent().extend_ttl(
+            &LocalKey::Deposit(key.clone()),
+            MIN_BUMP_THRESHOLD,
+            PERSISTENT_BUMP_TARGET,
+        );
 
         // Index in data_store
         ds.add_bytes32_to_set(&handler, &deposit_list_key(&env), &key);
