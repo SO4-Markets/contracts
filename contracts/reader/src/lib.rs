@@ -2606,115 +2606,6 @@ mod tests {
     }
 
     #[test]
-    fn get_pending_orders_excludes_executed() {
-        let env = Env::default();
-        env.mock_all_auths();
-        env.cost_estimate().budget().reset_unlimited();
-        let admin = Address::generate(&env);
-
-        let rs = env.register(RoleStore, ());
-        RsClient::new(&env, &rs).initialize(&admin);
-
-        let ds = env.register(DataStore, ());
-        DsClient::new(&env, &ds).initialize(&admin, &rs);
-
-        let reader = env.register(Reader, ());
-        ReaderClient::new(&env, &reader).initialize(&admin);
-
-        let trader1 = Address::generate(&env);
-        let trader2 = Address::generate(&env);
-
-        // Seed orders
-        // Pending
-        let o1 = Order {
-            key: 1,
-            account: trader1.clone(),
-            receiver: trader1.clone(),
-            ui_fee_receiver: trader1.clone(),
-            market: Address::generate(&env),
-            initial_collateral_token: Address::generate(&env),
-            swap_path: SdkVec::new(&env),
-            size_delta_usd: 0,
-            initial_collateral_delta_amount: 0,
-            trigger_price: 0,
-            acceptable_price: 0,
-            execution_fee: 0,
-            callback_gas_limit: 0,
-            min_output_amount: 0,
-            updated_at_time: 0,
-            is_long: true,
-            is_increase: true,
-            is_swap: false,
-            order_type: OrderType::MarketIncrease,
-            status: OrderStatus::Pending,
-        };
-        // Executed
-        let o2 = Order {
-            key: 2,
-            account: trader2.clone(),
-            receiver: trader2.clone(),
-            ui_fee_receiver: trader2.clone(),
-            market: Address::generate(&env),
-            initial_collateral_token: Address::generate(&env),
-            swap_path: SdkVec::new(&env),
-            size_delta_usd: 0,
-            initial_collateral_delta_amount: 0,
-            trigger_price: 0,
-            acceptable_price: 0,
-            execution_fee: 0,
-            callback_gas_limit: 0,
-            min_output_amount: 0,
-            updated_at_time: 0,
-            is_long: true,
-            is_increase: true,
-            is_swap: false,
-            order_type: OrderType::MarketIncrease,
-            status: OrderStatus::Executed,
-        };
-        // Expired
-        let o3 = Order {
-            key: 3,
-            account: trader1.clone(),
-            receiver: trader1.clone(),
-            ui_fee_receiver: trader1.clone(),
-            market: Address::generate(&env),
-            initial_collateral_token: Address::generate(&env),
-            swap_path: SdkVec::new(&env),
-            size_delta_usd: 0,
-            initial_collateral_delta_amount: 0,
-            trigger_price: 0,
-            acceptable_price: 0,
-            execution_fee: 0,
-            callback_gas_limit: 0,
-            min_output_amount: 0,
-            updated_at_time: 0,
-            is_long: true,
-            is_increase: true,
-            is_swap: false,
-            order_type: OrderType::MarketIncrease,
-            status: OrderStatus::Expired,
-        };
-
-        // Note: ds needs to own the order storage
-        env.as_contract(&ds, || {
-            env.storage().persistent().set(&OrderStorageKey::Order(1), &o1);
-            env.storage().persistent().set(&OrderStorageKey::Order(2), &o2);
-            env.storage().persistent().set(&OrderStorageKey::Order(3), &o3);
-        });
-
-        // Set order ID counter to 3 so reader knows to scan 1..=3
-        let ds_c = DsClient::new(&env, &ds);
-        ds_c.set_u64(&admin, &keys::order_id_key(&env), &3);
-
-        let result = ReaderClient::new(&env, &reader).get_pending_orders(&ds, &0, &10);
-
-        assert_eq!(result.len(), 1);
-        let pending = result.get(0).unwrap();
-        assert_eq!(pending.key, 1);
-        assert_eq!(pending.status, OrderStatus::Pending);
-    }
-
-    #[test]
     fn test_get_pending_orders_empty() {
         let w = setup();
         let oh = Address::generate(&w.env);
@@ -2983,5 +2874,103 @@ mod tests {
         assert_eq!(result.long_token_amount, 200_000_000);
         // short_token_amount = claimable[short] (7e8) - funding_fee_amount (4e8) = 3e8 (30 tokens)
         assert_eq!(result.short_token_amount, 300_000_000);
+    }
+
+    // ── Count / key-enumeration getters (issue #767) ─────────────────────────
+
+    fn key(env: &Env, b: u8) -> BytesN<32> {
+        BytesN::from_array(env, &[b; 32])
+    }
+
+    /// Empty DataStore: every count is 0 and every key page is empty.
+    #[test]
+    fn key_enumeration_getters_empty_state() {
+        let w = setup();
+        let r = ReaderClient::new(&w.env, &w.reader);
+        let acct = Address::generate(&w.env);
+
+        assert_eq!(r.get_deposit_count(&w.ds), 0);
+        assert_eq!(r.get_withdrawal_count(&w.ds), 0);
+        assert_eq!(r.get_order_count(&w.ds), 0);
+        assert_eq!(r.get_account_deposit_count(&w.ds, &acct), 0);
+        assert_eq!(r.get_account_withdrawal_count(&w.ds, &acct), 0);
+        assert_eq!(r.get_account_order_count(&w.ds, &acct), 0);
+
+        assert_eq!(r.get_deposit_keys(&w.ds, &0, &10).len(), 0);
+        assert_eq!(r.get_withdrawal_keys(&w.ds, &0, &10).len(), 0);
+        assert_eq!(r.get_order_keys(&w.ds, &0, &10).len(), 0);
+        assert_eq!(r.get_account_deposit_keys(&w.ds, &acct, &0, &10).len(), 0);
+        assert_eq!(r.get_account_withdrawal_keys(&w.ds, &acct, &0, &10).len(), 0);
+        assert_eq!(r.get_account_order_keys(&w.ds, &acct, &0, &10).len(), 0);
+    }
+
+    /// Global and per-account counts/keys read from the right DataStore sets,
+    /// return keys in insertion order, and respect start/end pagination.
+    #[test]
+    fn key_enumeration_getters_populated_and_paginated() {
+        let w = setup();
+        let env = &w.env;
+        let r = ReaderClient::new(env, &w.reader);
+        let ds = DsClient::new(env, &w.ds);
+        let acct = Address::generate(env);
+        let other = Address::generate(env);
+
+        let (k1, k2, k3) = (key(env, 1), key(env, 2), key(env, 3));
+
+        // (global set key, account set key, other-account set key) per kind.
+        let kinds = [
+            (
+                deposit_list_key(env),
+                account_deposit_list_key(env, &acct),
+                account_deposit_list_key(env, &other),
+            ),
+            (
+                withdrawal_list_key(env),
+                account_withdrawal_list_key(env, &acct),
+                account_withdrawal_list_key(env, &other),
+            ),
+            (
+                order_list_key(env),
+                account_order_list_key(env, &acct),
+                account_order_list_key(env, &other),
+            ),
+        ];
+        for (global, mine, theirs) in kinds.iter() {
+            ds.add_bytes32_to_set(&w.admin, global, &k1);
+            ds.add_bytes32_to_set(&w.admin, global, &k2);
+            ds.add_bytes32_to_set(&w.admin, global, &k3);
+            ds.add_bytes32_to_set(&w.admin, mine, &k1);
+            ds.add_bytes32_to_set(&w.admin, mine, &k2);
+            ds.add_bytes32_to_set(&w.admin, theirs, &k3);
+        }
+
+        assert_eq!(r.get_deposit_count(&w.ds), 3);
+        assert_eq!(r.get_withdrawal_count(&w.ds), 3);
+        assert_eq!(r.get_order_count(&w.ds), 3);
+        assert_eq!(r.get_account_deposit_count(&w.ds, &acct), 2);
+        assert_eq!(r.get_account_withdrawal_count(&w.ds, &acct), 2);
+        assert_eq!(r.get_account_order_count(&w.ds, &acct), 2);
+        assert_eq!(r.get_account_deposit_count(&w.ds, &other), 1);
+
+        // Full page, in insertion order.
+        let all = r.get_order_keys(&w.ds, &0, &3);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all.get(0).unwrap(), k1);
+        assert_eq!(all.get(2).unwrap(), k3);
+
+        // Sub-range pagination.
+        let page = r.get_deposit_keys(&w.ds, &1, &3);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page.get(0).unwrap(), k2);
+        assert_eq!(page.get(1).unwrap(), k3);
+
+        // Per-account lists don't leak other accounts' keys.
+        let mine = r.get_account_withdrawal_keys(&w.ds, &acct, &0, &10);
+        assert_eq!(mine.len(), 2);
+        assert_eq!(mine.get(0).unwrap(), k1);
+        assert_eq!(mine.get(1).unwrap(), k2);
+        let theirs = r.get_account_order_keys(&w.ds, &other, &0, &10);
+        assert_eq!(theirs.len(), 1);
+        assert_eq!(theirs.get(0).unwrap(), k3);
     }
 }

@@ -609,9 +609,13 @@ impl DataStore {
             .persistent()
             .get(&data_key)
             .unwrap_or(Vec::new(&env));
-        env.storage()
-            .persistent()
-            .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        // extend_ttl on an absent key traps (MissingValue), so only bump sets
+        // that actually exist — an empty/never-written set must read as empty.
+        if env.storage().persistent().has(&data_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        }
         set.len()
     }
 
@@ -627,9 +631,11 @@ impl DataStore {
             .persistent()
             .get(&data_key)
             .unwrap_or(Vec::new(&env));
-        env.storage()
-            .persistent()
-            .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        if env.storage().persistent().has(&data_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        }
         paginate_b32(&env, &set, start, end)
     }
 
