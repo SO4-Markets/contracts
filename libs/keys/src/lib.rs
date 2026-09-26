@@ -819,6 +819,14 @@ pub fn keeper_slash_amount_key(env: &Env, keeper: &Address) -> BytesN<32> {
     sha256(env, &b)
 }
 
+/// Global slash-penalty threshold (u128) at or above which a keeper is
+/// suspended from executing. 0 (unset) disables suspension (issue #587).
+pub fn keeper_slash_threshold_key(env: &Env) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "KEEPER_SLASH_THRESHOLD");
+    sha256(env, &b)
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 
