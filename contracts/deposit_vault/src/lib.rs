@@ -4,7 +4,24 @@
 //!   - User transfers tokens here before creating a deposit.
 //!   - `record_transfer_in` snapshots the balance delta (received amount).
 //!   - `transfer_out` sends tokens onward (to pool) during execution or refunds on cancel.
-//!   - All mutating ops require CONTROLLER role (held by deposit_handler).
+//!   - All mutating ops require the role_store CONTROLLER role.
+//!
+//! ## Issue #718 — CONTROLLER blast radius
+//!
+//! `require_controller` checks only that the caller holds `CONTROLLER` on the
+//! shared `role_store`; it does **not** check that the caller is
+//! `deposit_handler`. `deposit_handler` is the only contract that calls this
+//! vault in the normal deposit flow, but it is **not** the only CONTROLLER
+//! holder. `scripts/deploy.sh` (step 8) grants CONTROLLER to the admin,
+//! `market_factory`, `deposit_handler`, `withdrawal_handler`, `order_handler`,
+//! `liquidation_handler`, `adl_handler`, `fee_handler`, `exchange_router`
+//! and `oracle` — **any** of which can call `transfer_out` /
+//! `record_transfer_in` and move tokens held here.
+//!
+//! A bug or compromise in any CONTROLLER holder is therefore a direct risk to
+//! funds sitting in this vault. Treat every CONTROLLER holder as fully
+//! privileged over the vault's balances (same trust model as `data_store`,
+//! see issue #357 and `docs/roles.md`).
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
@@ -74,7 +91,8 @@ impl DepositVault {
     /// Snapshot the balance of `token` in this vault.
     /// Returns the amount received since the last snapshot (delta).
     /// Called by deposit_handler right after the user's transfer lands.
-    /// Only callable by a CONTROLLER (deposit_handler).
+    /// Callable by **any** CONTROLLER holder, not just deposit_handler
+    /// (see module docs, issue #718).
     pub fn record_transfer_in(env: Env, caller: Address, token: Address) -> i128 {
         caller.require_auth();
         require_controller(&env, &caller);
@@ -93,7 +111,8 @@ impl DepositVault {
     }
 
     /// Transfer `amount` of `token` from this vault to `receiver`.
-    /// Only callable by a CONTROLLER (deposit_handler).
+    /// Callable by **any** CONTROLLER holder, not just deposit_handler —
+    /// every holder can move vault funds (see module docs, issue #718).
     pub fn transfer_out(
         env: Env,
         caller: Address,
