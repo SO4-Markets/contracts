@@ -479,6 +479,57 @@ mod tests {
         );
     }
 
+    /// Issue #531: advance the market's fee accumulators so snapshot tests can
+    /// actually fail (with both left at 0 the assertions passed vacuously).
+    fn seed_accumulators(w: &World, cum_borrow: u128, funding_per_size: i128) {
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::cumulative_borrowing_factor_key(&w.env, &w.market_tk, true),
+            &cum_borrow,
+        );
+        ds_c.set_i128(
+            &w.admin,
+            &gmx_keys::funding_amount_per_size_key(&w.env, &w.market_tk, &w.long_tk, true),
+            &funding_per_size,
+        );
+    }
+
+    /// Long increase on `w.long_tk` collateral at a flat `index_price`.
+    fn increase(w: &World, size_delta: i128, collateral: i128, index_price: i128) -> PositionProps {
+        let market = gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
+        let index_price_props = gmx_types::PriceProps { min: index_price, max: index_price };
+        w.env.as_contract(&w.admin, || {
+            increase_position(
+                &w.env,
+                &IncreasePositionParams {
+                    data_store: &w.ds,
+                    caller: &w.admin,
+                    account: &w.user,
+                    receiver: &w.user,
+                    market: &market,
+                    collateral_token: &w.long_tk,
+                    size_delta_usd: size_delta,
+                    collateral_amount: collateral,
+                    acceptable_price: 0,
+                    is_long: true,
+                    index_token_price: &index_price_props,
+                    collateral_price: index_price,
+                    current_time: 1_000,
+                    for_positive_impact: true,
+                },
+            )
+        })
+    }
+
+    fn pool_and_claimable(w: &World) -> (i128, i128) {
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        (
+            ds_c.get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk)) as i128,
+            ds_c.get_u128(&gmx_keys::claimable_fee_amount_key(&w.env, &w.market_tk, &w.long_tk)) as i128,
+        )
+    }
+
     // ── Issue #62: fee storage keys update correctly on increase ─────────────
 
     /// After a position increase, the position's borrowing_factor snapshot must
@@ -502,6 +553,10 @@ mod tests {
             min: index_price,
             max: index_price,
         };
+
+        // Issue #531: non-zero accumulator, otherwise both sides of the
+        // assertion are 0 and the test passes even without the snapshot sync.
+        seed_accumulators(&w, (FLOAT_PRECISION / 1_000) as u128, 0);
 
         let collateral = ONE_TOKEN * 10; // 10 tokens
         let size_delta = 1_000 * fp; // $1000 position
@@ -531,6 +586,7 @@ mod tests {
         // Borrowing factor snapshot must match current cumulative value
         let cum_borrow_key = gmx_keys::cumulative_borrowing_factor_key(&w.env, &w.market_tk, true);
         let cum_factor = DsClient::new(&w.env, &w.ds).get_u128(&cum_borrow_key) as i128;
+        assert!(cum_factor > 0, "fixture must seed a non-zero cumulative factor");
         assert_eq!(
             position.borrowing_factor, cum_factor,
             "position borrowing_factor snapshot must equal current cumulative factor"
@@ -558,6 +614,9 @@ mod tests {
             max: index_price,
         };
 
+        // Issue #531: non-zero funding-per-size so the assertion can fail.
+        seed_accumulators(&w, 0, FLOAT_PRECISION / 10_000);
+
         let position = w.env.as_contract(&w.admin, || {
             increase_position(
                 &w.env,
@@ -583,6 +642,7 @@ mod tests {
         // Funding snapshot must match current funding-per-size
         let fnd_key = gmx_keys::funding_amount_per_size_key(&w.env, &w.market_tk, &w.long_tk, true);
         let current_fnd = DsClient::new(&w.env, &w.ds).get_i128(&fnd_key);
+        assert!(current_fnd > 0, "fixture must seed non-zero funding-per-size");
         assert_eq!(
             position.funding_fee_amount_per_size, current_fnd,
             "position funding snapshot must equal current funding-per-size"
@@ -1156,5 +1216,109 @@ mod tests {
             taker_pos.collateral_amount,
             "equal fee rates must produce equal net collateral for maker and taker"
         );
+    }
+
+    // ── Issue #531: increase_position fee-accounting regressions ─────────────
+
+    /// Defect A: a second increase with unchanged accumulators must charge no
+    /// borrowing/funding fee — the first increase already snapshotted them.
+    /// Before the fix the snapshots stayed at 0 and the whole accrued interval
+    /// was charged again.
+    #[test]
+    fn issue_531_second_increase_does_not_recharge_borrowing() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let price = 2_000 * fp;
+        configure_market(&w, 0); // no position fee: any fee seen is borrowing/funding
+        set_prices(&w, price);
+        seed_accumulators(&w, (fp / 100) as u128, 0); // 1% cumulative borrow factor
+
+        increase(&w, 1_000 * fp, ONE_TOKEN * 10, price);
+        let (_, claimable_before) = pool_and_claimable(&w);
+
+        let position = increase(&w, 1_000 * fp, ONE_TOKEN * 10, price);
+        let (_, claimable_after) = pool_and_claimable(&w);
+
+        assert_eq!(
+            claimable_after - claimable_before,
+            0,
+            "no borrowing fee may be re-charged for an interval already snapshotted"
+        );
+        assert_eq!(position.collateral_amount, ONE_TOKEN * 20, "collateral must not be eaten by a phantom fee");
+    }
+
+    /// Defect A (funding side): once the position has snapshotted the funding
+    /// accumulator, a further increase with no accumulator movement must not
+    /// deduct funding again.
+    #[test]
+    fn issue_531_second_increase_does_not_recharge_funding() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let price = 2_000 * fp;
+        configure_market(&w, 0);
+        set_prices(&w, price);
+        seed_accumulators(&w, 0, fp / 10_000);
+
+        increase(&w, 1_000 * fp, ONE_TOKEN * 10, price);
+        let position = increase(&w, 1_000 * fp, ONE_TOKEN * 10, price);
+
+        assert_eq!(position.collateral_amount, ONE_TOKEN * 20, "funding must be charged at most once per interval");
+    }
+
+    /// Defect B: fees larger than the collateral available must revert rather
+    /// than crediting pool_amount/claimable with tokens that were never received.
+    #[test]
+    #[should_panic]
+    fn issue_531_fees_exceeding_collateral_revert() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let price = 2_000 * fp;
+        configure_market(&w, 30); // 0.3% of $2000 ≈ 0.003 tokens
+        set_prices(&w, price);
+
+        increase(&w, 2_000 * fp, 1, price); // 1 stroop of collateral
+    }
+
+    /// Defect B: fees for a size-only increase are taken from the position's
+    /// existing collateral, and the pool grows by exactly what was collected.
+    #[test]
+    fn issue_531_size_only_increase_pays_fee_from_existing_collateral() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let price = 2_000 * fp;
+        configure_market(&w, 30);
+        set_prices(&w, price);
+
+        let opened = increase(&w, 1_000 * fp, ONE_TOKEN * 10, price);
+        let (pool_before, claimable_before) = pool_and_claimable(&w);
+        let position = increase(&w, 1_000 * fp, 0, price);
+        let (pool_after, claimable_after) = pool_and_claimable(&w);
+
+        let fee = opened.collateral_amount - position.collateral_amount;
+        assert!(fee > 0, "the position fee must be collected from existing collateral");
+        assert_eq!(pool_after - pool_before, fee, "pool grows by exactly the collected fee");
+        assert_eq!(claimable_after - claimable_before, fee);
+    }
+
+    /// Defect C: funding is charged to the trader's collateral but must never
+    /// be booked into pool_amount / claimable_fee_amount (#412).
+    #[test]
+    fn issue_531_funding_fee_not_booked_to_pool() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let price = 2_000 * fp;
+        configure_market(&w, 0);
+        set_prices(&w, price);
+
+        increase(&w, 1_000 * fp, ONE_TOKEN * 10, price); // snapshot funding = 0
+        seed_accumulators(&w, 0, fp / 1_000); // funding accrues afterwards
+
+        let (pool_before, claimable_before) = pool_and_claimable(&w);
+        let position = increase(&w, 1_000 * fp, ONE_TOKEN * 10, price);
+        let (pool_after, claimable_after) = pool_and_claimable(&w);
+
+        assert!(position.collateral_amount < ONE_TOKEN * 20, "funding must still be charged to the trader");
+        assert_eq!(pool_after, pool_before, "funding must not be booked into pool_amount");
+        assert_eq!(claimable_after, claimable_before, "funding must not be booked into claimable_fee_amount");
     }
 }
