@@ -2038,4 +2038,71 @@ mod tests {
         let client = ExchangeRouterClient::new(&w.env, &w.router);
         client.reset_circuit_breaker(&w.market_tk);
     }
+
+    // ── Issue #774: update_withdrawal_handler test coverage ──────────────────
+
+    #[test]
+    fn test_update_withdrawal_handler_success() {
+        let w = setup();
+        let client = ExchangeRouterClient::new(&w.env, &w.router);
+        let new_wth_handler = Address::generate(&w.env);
+
+        client.update_withdrawal_handler(&w.admin, &new_wth_handler);
+
+        let stored: Option<Address> = w.env.as_contract(&w.router, || {
+            w.env.storage().instance().get(&InstanceKey::WithdrawalHandler)
+        });
+        assert_eq!(stored, Some(new_wth_handler));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_update_withdrawal_handler_rejects_non_admin() {
+        let w = setup();
+        let client = ExchangeRouterClient::new(&w.env, &w.router);
+        let non_admin = Address::generate(&w.env);
+        let new_wth_handler = Address::generate(&w.env);
+
+        client.update_withdrawal_handler(&non_admin, &new_wth_handler);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_update_withdrawal_handler_rejects_router_self_address() {
+        let w = setup();
+        let client = ExchangeRouterClient::new(&w.env, &w.router);
+
+        client.update_withdrawal_handler(&w.admin, &w.router);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_update_withdrawal_handler_rejects_deposit_handler() {
+        let w = setup();
+        let client = ExchangeRouterClient::new(&w.env, &w.router);
+
+        client.update_withdrawal_handler(&w.admin, &w.dep_handler);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_update_withdrawal_handler_rejects_order_handler() {
+        let w = setup();
+        let client = ExchangeRouterClient::new(&w.env, &w.router);
+
+        client.update_withdrawal_handler(&w.admin, &w.ord_handler);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_update_withdrawal_handler_rejects_fee_handler() {
+        let w = setup();
+        let client = ExchangeRouterClient::new(&w.env, &w.router);
+        let fee_handler: Address = w.env.as_contract(&w.router, || {
+            w.env.storage().instance().get(&InstanceKey::FeeHandler).unwrap()
+        });
+
+        client.update_withdrawal_handler(&w.admin, &fee_handler);
+    }
 }
+
