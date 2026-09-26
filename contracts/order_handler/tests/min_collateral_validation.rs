@@ -164,8 +164,8 @@ fn seed_pool(w: &World) {
     );
     // Sync the vault's recorded balance after create_deposit has transferred the tokens
     let dv = DVClient::new(&w.env, &w.dep_vault);
-    dv.record_transfer_in(&w.long_tk);
-    dv.record_transfer_in(&w.short_tk);
+    dv.record_transfer_in(&w.dep_handler, &w.long_tk);
+    dv.record_transfer_in(&w.dep_handler, &w.short_tk);
     DepositHandlerClient::new(&w.env, &w.dep_handler).execute_deposit(&w.keeper, &k);
 }
 
