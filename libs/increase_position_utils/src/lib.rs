@@ -17,7 +17,7 @@
 #![allow(deprecated)]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use gmx_keys::{account_position_list_key, collateral_sum_key, max_position_size_usd_key, pool_amount_key, claimable_fee_amount_key, position_key, position_list_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET};
+use gmx_keys::{account_position_list_key, collateral_sum_key, cumulative_borrowing_factor_key, funding_amount_per_size_key, max_position_size_usd_key, pool_amount_key, claimable_fee_amount_key, position_key, position_list_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET};
 use gmx_market_utils::{
     apply_delta_to_open_interest, apply_delta_to_open_interest_in_tokens,
 };
@@ -149,30 +149,58 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
         p.size_delta_usd,
         p.for_positive_impact,
     );
+    // Issue #531 — fee accounting invariants (mirrors decrease_position_utils):
+    //   * `pool_amount` / `claimable_fee_amount` receive only LP fees
+    //     (borrowing + position). Funding is peer-to-peer (#412): it is still
+    //     charged to the trader's collateral but never booked to the pool.
+    //   * Fees are paid first from the collateral supplied with this increase,
+    //     then from the position's existing collateral. If the combined
+    //     collateral can't cover them with something left over, revert
+    //     (contract error 4) rather than crediting fees that were never
+    //     received or opening a zero-collateral position.
     let fee_tokens = fees.total_cost_amount;
-    let net_collateral = if p.collateral_amount > fee_tokens {
-        p.collateral_amount - fee_tokens
-    } else {
-        0
-    };
-    if fee_tokens > 0 {
+    let lp_fee_amount = fees.borrowing_fee_amount + fees.position_fee_amount;
+    let available_collateral = position.collateral_amount + p.collateral_amount;
+    if fee_tokens > 0 && fee_tokens >= available_collateral {
+        soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(4u32));
+    }
+    if lp_fee_amount > 0 {
         let pool_key = pool_amount_key(env, &p.market.market_token, p.collateral_token);
-        ds.apply_delta_to_u128(p.caller, &pool_key, &fee_tokens);
+        ds.apply_delta_to_u128(p.caller, &pool_key, &lp_fee_amount);
         // Track claimable fees for claim_fees entrypoint
         ds.apply_delta_to_u128(
             p.caller,
             &claimable_fee_amount_key(env, &p.market.market_token, p.collateral_token),
-            &(fee_tokens as i128),
+            &lp_fee_amount,
         );
     }
-    position.collateral_amount += net_collateral;
+    // Net change to the position's collateral: supplied collateral minus all
+    // fees (negative when fees are taken from existing collateral).
+    let collateral_delta = p.collateral_amount - fee_tokens;
+    position.collateral_amount += collateral_delta;
 
-    // Credit collateral_sum so decrease_position_utils (which debits it on close)
-    // never underflows a bucket that increase_position never funded.
-    if net_collateral > 0 {
+    // Keep collateral_sum in step with the position's collateral so
+    // decrease_position_utils (which debits it on close) never underflows.
+    if collateral_delta != 0 {
         let col_sum_key = collateral_sum_key(env, &p.market.market_token, p.collateral_token, p.is_long);
-        ds.apply_delta_to_u128(p.caller, &col_sum_key, &net_collateral);
+        ds.apply_delta_to_u128(p.caller, &col_sum_key, &collateral_delta);
     }
+
+    // Issue #531: sync fee snapshots so the interval just charged is not
+    // charged again on the next increase/decrease (mirrors
+    // decrease_position_utils). get_position_fees already read these entries,
+    // so this adds no new ledger-entry reads.
+    position.borrowing_factor = ds.get_u128(&cumulative_borrowing_factor_key(
+        env,
+        &p.market.market_token,
+        p.is_long,
+    )) as i128;
+    position.funding_fee_amount_per_size = ds.get_i128(&funding_amount_per_size_key(
+        env,
+        &p.market.market_token,
+        p.collateral_token,
+        p.is_long,
+    ));
 
     // Update position size
     position.size_in_usd += p.size_delta_usd;
