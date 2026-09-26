@@ -248,6 +248,24 @@ mod tests {
     }
 
     #[test]
+    fn record_transfer_in_by_non_controller_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, _, vault) = setup(&env);
+        let (token, token_owner) = register_token(&env);
+
+        let vault_client = DepositVaultClient::new(&env, &vault);
+        TestTokenClient::new(&env, &token).mint(&token_owner, &vault, &10_000_000_i128);
+
+        // CONTROLLER gating (#542): a random address must not be able to
+        // snapshot the vault balance and steal the pending delta.
+        let non_controller = Address::generate(&env);
+        let result = vault_client.try_record_transfer_in(&non_controller, &token);
+        assert!(result.is_err());
+        assert_eq!(vault_client.get_recorded_balance(&token), 0);
+    }
+
+    #[test]
     fn transfer_out_by_non_controller_panics() {
         let env = Env::default();
         env.mock_all_auths();
