@@ -221,7 +221,7 @@ mod tests {
     fn record_transfer_in_tracks_balance_delta() {
         let env = Env::default();
         env.mock_all_auths();
-        let (_, _, vault) = setup(&env);
+        let (admin, _, vault) = setup(&env);
         let (token, token_owner) = register_token(&env);
 
         let vault_client = DepositVaultClient::new(&env, &vault);
@@ -231,7 +231,7 @@ mod tests {
         token_client.mint(&token_owner, &vault, &10_000_000_i128);
 
         // record_transfer_in should return the delta (1_000_0000)
-        let delta = vault_client.record_transfer_in(&token);
+        let delta = vault_client.record_transfer_in(&admin, &token);
         assert_eq!(delta, 10_000_000);
 
         // get_recorded_balance should now reflect the actual balance
@@ -240,7 +240,7 @@ mod tests {
 
         // Second transfer: delta should be only the new amount
         token_client.mint(&token_owner, &vault, &500_0000i128);
-        let delta2 = vault_client.record_transfer_in(&token);
+        let delta2 = vault_client.record_transfer_in(&admin, &token);
         assert_eq!(delta2, 500_0000);
 
         let recorded2 = vault_client.get_recorded_balance(&token);
@@ -251,14 +251,14 @@ mod tests {
     fn transfer_out_by_non_controller_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let (_, _, vault) = setup(&env);
+        let (admin, _, vault) = setup(&env);
         let (token, token_owner) = register_token(&env);
         let receiver = Address::generate(&env);
 
         let vault_client = DepositVaultClient::new(&env, &vault);
         let token_client = TestTokenClient::new(&env, &token);
         token_client.mint(&token_owner, &vault, &10_000_000_i128);
-        vault_client.record_transfer_in(&token);
+        vault_client.record_transfer_in(&admin, &token);
 
         let non_controller = Address::generate(&env);
         let result = vault_client.try_transfer_out(&non_controller, &token, &receiver, &10_000_000);
@@ -276,7 +276,7 @@ mod tests {
         let vault_client = DepositVaultClient::new(&env, &vault);
         let token_client = TestTokenClient::new(&env, &token);
         token_client.mint(&token_owner, &vault, &10_000_000_i128);
-        vault_client.record_transfer_in(&token);
+        vault_client.record_transfer_in(&admin, &token);
 
         let result = vault_client.try_transfer_out(&admin, &token, &receiver, &0);
         assert!(result.is_err());
@@ -293,7 +293,7 @@ mod tests {
         let vault_client = DepositVaultClient::new(&env, &vault);
         let token_client = TestTokenClient::new(&env, &token);
         token_client.mint(&token_owner, &vault, &10_000_000_i128);
-        vault_client.record_transfer_in(&token);
+        vault_client.record_transfer_in(&admin, &token);
 
         let result = vault_client.try_transfer_out(&admin, &token, &receiver, &(-1i128));
         assert!(result.is_err());
@@ -310,7 +310,7 @@ mod tests {
         let vault_client = DepositVaultClient::new(&env, &vault);
         let token_client = TestTokenClient::new(&env, &token);
         token_client.mint(&token_owner, &vault, &10_000_000_i128);
-        vault_client.record_transfer_in(&token);
+        vault_client.record_transfer_in(&admin, &token);
 
         vault_client.transfer_out(&admin, &token, &receiver, &400_0000);
 
