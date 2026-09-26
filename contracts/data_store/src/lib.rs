@@ -726,6 +726,19 @@ impl DataStore {
         (count, total_var, slash)
     }
 
+    /// True when `keeper`'s accumulated slash penalty has reached the global
+    /// `keeper_slash_threshold_key` (issue #587). Handlers call this before
+    /// letting a keeper execute, which is what gives slashing a real
+    /// consequence. A threshold of 0 (the default) disables suspension.
+    pub fn is_keeper_suspended(env: Env, keeper: Address) -> bool {
+        let threshold = Self::get_u128(env.clone(), gmx_keys::keeper_slash_threshold_key(&env));
+        if threshold == 0 {
+            return false;
+        }
+        let slash = Self::get_u128(env.clone(), gmx_keys::keeper_slash_amount_key(&env, &keeper));
+        slash >= threshold
+    }
+
     // ── Position Manager (delegated position control for copy-trading) ────────
 
     /// Get the authorized position manager for a given owner and market.
@@ -1608,5 +1621,63 @@ mod tests {
         let client = DataStoreClient::new(&env, &ds_id);
         let impostor = Address::generate(&env);
         client.set_min_execution_fee(&impostor, &1000u128);
+    }
+
+    // ── Keeper reputation & slashing (issues #514, #587) ─────────────────────
+
+    #[test]
+    fn test_record_keeper_execution_within_tolerance_does_not_slash() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let keeper = Address::generate(&env);
+
+        // 1% variance: recorded, not slashed.
+        client.record_keeper_execution(&admin, &keeper, &1010u128, &1000u128);
+        assert_eq!(client.get_keeper_stats(&keeper), (1, 100, 0));
+    }
+
+    #[test]
+    fn test_record_keeper_execution_over_5pct_slashes() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let keeper = Address::generate(&env);
+
+        // 10% variance: slashed by the flat 100 penalty.
+        client.record_keeper_execution(&admin, &keeper, &900u128, &1000u128);
+        assert_eq!(client.get_keeper_stats(&keeper), (1, 1000, 100));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_record_keeper_execution_requires_controller() {
+        let (env, _, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let keeper = Address::generate(&env);
+        client.record_keeper_execution(&impostor, &keeper, &900u128, &1000u128);
+    }
+
+    #[test]
+    fn test_is_keeper_suspended_respects_threshold() {
+        let (env, admin, _, ds_id) = setup();
+        let client = DataStoreClient::new(&env, &ds_id);
+        let keeper = Address::generate(&env);
+
+        // Two bad executions -> slash of 200.
+        client.record_keeper_execution(&admin, &keeper, &900u128, &1000u128);
+        client.record_keeper_execution(&admin, &keeper, &900u128, &1000u128);
+
+        // Threshold unset (0): suspension disabled.
+        assert!(!client.is_keeper_suspended(&keeper));
+
+        let threshold_key = gmx_keys::keeper_slash_threshold_key(&env);
+        client.set_u128(&admin, &threshold_key, &300u128);
+        assert!(!client.is_keeper_suspended(&keeper));
+
+        client.set_u128(&admin, &threshold_key, &200u128);
+        assert!(client.is_keeper_suspended(&keeper));
+
+        // A clean keeper is never suspended.
+        assert!(!client.is_keeper_suspended(&Address::generate(&env)));
     }
 }

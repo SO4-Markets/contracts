@@ -160,6 +160,9 @@ pub enum Error {
     /// (issue #794) — without this check, the emitted KeeperHeartbeatMissed
     /// audit-trail event could name an arbitrary or unrelated address.
     KeeperDoesNotHoldRole = 30,
+    /// The executing keeper's accumulated slash penalty has reached the
+    /// configured keeper_slash_threshold (issue #587).
+    KeeperSuspended = 31,
 }
 
 
@@ -287,6 +290,14 @@ trait IDataStore {
     fn set_address(env: Env, caller: Address, key: BytesN<32>, value: Address) -> Address;
     fn get_bool(env: Env, key: BytesN<32>) -> bool;
     fn get_min_execution_fee(env: Env) -> u128;
+    fn record_keeper_execution(
+        env: Env,
+        caller: Address,
+        keeper: Address,
+        executed_price: u128,
+        expected_price: u128,
+    );
+    fn is_keeper_suspended(env: Env, keeper: Address) -> bool;
 }
 
 #[allow(dead_code)]
@@ -1125,6 +1136,12 @@ impl OrderHandler {
             panic_with_error!(&env, Error::MarketPaused);
         }
 
+        // Issue #587: a keeper whose accumulated slash penalty has reached the
+        // configured threshold may no longer execute orders.
+        if ds.is_keeper_suspended(&keeper) {
+            panic_with_error!(&env, Error::KeeperSuspended);
+        }
+
         // Load market props
         let market = load_market_props(&env, &data_store, &order.market);
 
@@ -1172,6 +1189,20 @@ impl OrderHandler {
                 panic_with_error!(&env, Error::UnsatisfiedTrigger);
             }
             _ => {}
+        }
+
+        // Issue #587: record execution quality for trigger orders so the #514
+        // reputation/slashing mechanism is fed by real keeper executions.
+        // The variance between the trigger the user set and the oracle price
+        // the keeper executed at measures how late the keeper was; >5% slashes.
+        let executed_price = index_price.mid_price();
+        if order.trigger_price > 0 && executed_price > 0 {
+            ds.record_keeper_execution(
+                &handler,
+                &keeper,
+                &(executed_price as u128),
+                &(order.trigger_price as u128),
+            );
         }
 
         // Dispatch by order type
