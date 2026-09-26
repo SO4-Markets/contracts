@@ -91,7 +91,8 @@ impl DepositVault {
     /// Snapshot the balance of `token` in this vault.
     /// Returns the amount received since the last snapshot (delta).
     /// Called by deposit_handler right after the user's transfer lands.
-    /// Only callable by a CONTROLLER (deposit_handler).
+    /// Callable by **any** CONTROLLER holder, not just deposit_handler
+    /// (see module docs, issue #718).
     pub fn record_transfer_in(env: Env, caller: Address, token: Address) -> i128 {
         caller.require_auth();
         require_controller(&env, &caller);
@@ -110,7 +111,8 @@ impl DepositVault {
     }
 
     /// Transfer `amount` of `token` from this vault to `receiver`.
-    /// Only callable by a CONTROLLER (deposit_handler).
+    /// Callable by **any** CONTROLLER holder, not just deposit_handler —
+    /// every holder can move vault funds (see module docs, issue #718).
     pub fn transfer_out(
         env: Env,
         caller: Address,
