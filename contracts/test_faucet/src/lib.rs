@@ -429,4 +429,53 @@ mod tests {
         let faucet_id = env.register(TestFaucet, ());
         TestFaucetClient::new(&env, &faucet_id).initialize(&admin, &10);
     }
+
+    #[test]
+    fn admin_getter_returns_configured_admin() {
+        let (_env, admin, _token_id, faucet) = setup();
+        assert_eq!(faucet.admin(), admin);
+    }
+
+    #[test]
+    #[should_panic]
+    fn remove_token_causes_claim_to_revert() {
+        let (env, admin, token_id, faucet) = setup();
+        let user = Address::generate(&env);
+
+        assert_eq!(faucet.claim_amount(&token_id), 100_0000000);
+        faucet.remove_token(&admin, &token_id);
+        assert_eq!(faucet.claim_amount(&token_id), 0);
+
+        faucet.claim(&user, &token_id);
+    }
+
+    #[test]
+    #[should_panic]
+    fn remove_token_causes_claim_many_to_revert() {
+        let (env, admin, token_id, faucet) = setup();
+        let user = Address::generate(&env);
+
+        faucet.remove_token(&admin, &token_id);
+        faucet.claim_many(&user, &Vec::from_array(&env, [token_id]));
+    }
+
+    #[test]
+    fn set_cooldown_updates_enforcement_and_zero_disables_cooldown() {
+        let (env, admin, token_id, faucet) = setup();
+        let user = Address::generate(&env);
+
+        assert_eq!(faucet.cooldown_ledgers(), 10);
+        faucet.claim(&user, &token_id);
+
+        faucet.set_cooldown(&admin, &0);
+        assert_eq!(faucet.cooldown_ledgers(), 0);
+        faucet.claim(&user, &token_id);
+
+        faucet.set_cooldown(&admin, &50);
+        assert_eq!(faucet.cooldown_ledgers(), 50);
+        assert!(faucet.try_claim(&user, &token_id).is_err());
+
+        env.ledger().set_sequence_number(51);
+        faucet.claim(&user, &token_id);
+    }
 }
