@@ -429,4 +429,61 @@ mod tests {
         let faucet_id = env.register(TestFaucet, ());
         TestFaucetClient::new(&env, &faucet_id).initialize(&admin, &10);
     }
+
+    /// Issue #772: admin getter returns the configured admin address.
+    #[test]
+    fn admin_getter_returns_configured_admin() {
+        let (_env, admin, _token_id, faucet) = setup();
+        assert_eq!(faucet.admin(), admin);
+    }
+
+    /// Issue #772: remove_token causes subsequent claim to revert with TokenNotEnabled.
+    #[test]
+    #[should_panic]
+    fn remove_token_causes_claim_to_revert() {
+        let (env, admin, token_id, faucet) = setup();
+        let user = Address::generate(&env);
+
+        assert_eq!(faucet.claim_amount(&token_id), 100_0000000);
+        faucet.remove_token(&admin, &token_id);
+        assert_eq!(faucet.claim_amount(&token_id), 0);
+
+        faucet.claim(&user, &token_id);
+    }
+
+    /// Issue #772: remove_token causes claim_many to revert for the removed token.
+    #[test]
+    #[should_panic]
+    fn remove_token_causes_claim_many_to_revert() {
+        let (env, admin, token_id, faucet) = setup();
+        let user = Address::generate(&env);
+
+        faucet.remove_token(&admin, &token_id);
+        faucet.claim_many(&user, &Vec::from_array(&env, [token_id]));
+    }
+
+    /// Issue #772: set_cooldown updates cooldown and zero disables cooldown enforcement.
+    #[test]
+    fn set_cooldown_updates_enforcement_and_zero_disables_cooldown() {
+        let (env, admin, token_id, faucet) = setup();
+        let user = Address::generate(&env);
+
+        assert_eq!(faucet.cooldown_ledgers(), 10);
+        faucet.claim(&user, &token_id);
+
+        // Setting cooldown to 0 disables cooldown
+        faucet.set_cooldown(&admin, &0);
+        assert_eq!(faucet.cooldown_ledgers(), 0);
+        faucet.claim(&user, &token_id);
+
+        // Setting cooldown to 50 re-enables enforcement
+        faucet.set_cooldown(&admin, &50);
+        assert_eq!(faucet.cooldown_ledgers(), 50);
+        assert!(faucet.try_claim(&user, &token_id).is_err());
+
+        // Advancing past 50 ledgers allows claiming again
+        env.ledger().set_sequence_number(51);
+        faucet.claim(&user, &token_id);
+    }
 }
+
