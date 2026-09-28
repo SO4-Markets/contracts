@@ -453,12 +453,34 @@ impl ReferralStorage {
         if tier == 0 || tier > 2 {
             panic_with_error!(&env, Error::InvalidTier);
         }
-        // Issue #636: a zero threshold would make increment_referrer_volume's
-        // `cumulative_volume >= threshold` check trivially true for any nonzero
-        // (unsigned) volume, instantly qualifying every referrer for this tier.
         if threshold_usd == 0 {
             panic_with_error!(&env, Error::InvalidInput);
         }
+
+        if tier > 1 {
+            if let Some(lower_threshold) = env
+                .storage()
+                .persistent()
+                .get::<_, u128>(&ReferralKey::TierUpgradeThreshold(tier - 1))
+            {
+                if threshold_usd <= lower_threshold {
+                    panic_with_error!(&env, Error::InvalidInput);
+                }
+            }
+        }
+
+        if tier < 2 {
+            if let Some(higher_threshold) = env
+                .storage()
+                .persistent()
+                .get::<_, u128>(&ReferralKey::TierUpgradeThreshold(tier + 1))
+            {
+                if threshold_usd >= higher_threshold {
+                    panic_with_error!(&env, Error::InvalidInput);
+                }
+            }
+        }
+
         env.storage()
             .persistent()
             .set(&ReferralKey::TierUpgradeThreshold(tier), &threshold_usd);
@@ -527,7 +549,7 @@ impl ReferralStorage {
             .persistent()
             .extend_ttl(&vol_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
 
-        // Auto-upgrade: find the highest tier whose threshold the referrer now qualifies for
+        // Auto-upgrade: sequentially evaluate thresholds starting from old_tier + 1
         let old_tier: u32 = env
             .storage()
             .persistent()
@@ -539,15 +561,23 @@ impl ReferralStorage {
         while t <= 2 {
             let threshold_key = ReferralKey::TierUpgradeThreshold(t);
             if let Some(threshold) = env.storage().persistent().get::<_, u128>(&threshold_key) {
-                // Extend TTL on every read so config value doesn't expire
+                // Extend TTL on read so config value doesn't expire
                 env.storage().persistent().extend_ttl(
                     &threshold_key,
                     MIN_BUMP_THRESHOLD,
                     PERSISTENT_BUMP_TARGET,
                 );
+
+                // Enforce sequential qualification: referrer must meet this tier's threshold
+                // before higher tiers are evaluated.
                 if cumulative_volume >= threshold {
                     new_tier = t;
+                } else {
+                    break;
                 }
+            } else {
+                // Unconfigured threshold breaks the upgrade chain
+                break;
             }
             t += 1;
         }
