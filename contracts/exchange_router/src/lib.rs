@@ -121,7 +121,12 @@ trait IDataStore {
     fn set_bool(env: Env, caller: Address, key: BytesN<32>, value: bool) -> bool;
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
-    fn set_position_manager(env: Env, caller: Address, market: Address, manager: Address) -> Address;
+    fn set_position_manager(
+        env: Env,
+        caller: Address,
+        market: Address,
+        manager: Address,
+    ) -> Address;
     fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address>;
     fn remove_position_manager(env: Env, owner: Address, market: Address) -> bool;
 }
@@ -144,7 +149,11 @@ trait IWithdrawalHandler {
 #[soroban_sdk::contractclient(name = "OrderHandlerClient")]
 trait IOrderHandler {
     fn create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32>;
-    fn create_orders(env: Env, caller: Address, requests: Vec<CreateOrderParams>) -> Vec<BytesN<32>>;
+    fn create_orders(
+        env: Env,
+        caller: Address,
+        requests: Vec<CreateOrderParams>,
+    ) -> Vec<BytesN<32>>;
     fn update_order(
         env: Env,
         caller: Address,
@@ -258,10 +267,8 @@ impl ExchangeRouter {
         // Issue #606: re-pointing the withdrawal handler is a high-impact
         // admin action — emit an event so off-chain monitoring has an audit
         // trail, matching schedule_unpause's existing pattern in this file.
-        env.events().publish(
-            (soroban_sdk::symbol_short!("wth_hdlr"),),
-            new_handler,
-        );
+        env.events()
+            .publish((soroban_sdk::symbol_short!("wth_hdlr"),), new_handler);
     }
 
     /// Update the deposit_handler address. Only the stored admin may call this.
@@ -294,10 +301,8 @@ impl ExchangeRouter {
         env.storage()
             .instance()
             .set(&InstanceKey::DepositHandler, &new_handler);
-        env.events().publish(
-            (soroban_sdk::symbol_short!("dep_hdlr"),),
-            new_handler,
-        );
+        env.events()
+            .publish((soroban_sdk::symbol_short!("dep_hdlr"),), new_handler);
     }
 
     /// Update the order_handler address. Only the stored admin may call this.
@@ -328,10 +333,8 @@ impl ExchangeRouter {
         env.storage()
             .instance()
             .set(&InstanceKey::OrderHandler, &new_handler);
-        env.events().publish(
-            (soroban_sdk::symbol_short!("ord_hdlr"),),
-            new_handler,
-        );
+        env.events()
+            .publish((soroban_sdk::symbol_short!("ord_hdlr"),), new_handler);
     }
 
     /// Update the fee_handler address. Only the stored admin may call this.
@@ -362,10 +365,8 @@ impl ExchangeRouter {
         env.storage()
             .instance()
             .set(&InstanceKey::FeeHandler, &new_handler);
-        env.events().publish(
-            (soroban_sdk::symbol_short!("fee_hdlr"),),
-            new_handler,
-        );
+        env.events()
+            .publish((soroban_sdk::symbol_short!("fee_hdlr"),), new_handler);
     }
 
     /// Default timelock for unpausing: ~4 hours at 5 s/ledger (issue #282).
@@ -429,17 +430,14 @@ impl ExchangeRouter {
             .instance()
             .get(&InstanceKey::DataStore)
             .unwrap();
-        let scheduled_at =
-            (env.ledger().sequence() + Self::UNPAUSE_TIMELOCK_LEDGERS) as u128;
+        let scheduled_at = (env.ledger().sequence() + Self::UNPAUSE_TIMELOCK_LEDGERS) as u128;
         DataStoreClient::new(&env, &data_store).set_u128(
             &env.current_contract_address(),
             &scheduled_unpause_ledger_key(&env),
             &scheduled_at,
         );
-        env.events().publish(
-            (soroban_sdk::symbol_short!("unpause_s"),),
-            scheduled_at,
-        );
+        env.events()
+            .publish((soroban_sdk::symbol_short!("unpause_s"),), scheduled_at);
     }
 
     /// Execute a previously scheduled unpause if the timelock has expired (issue #282).
@@ -462,8 +460,7 @@ impl ExchangeRouter {
         let ds = DataStoreClient::new(&env, &data_store);
         let router = env.current_contract_address();
 
-        let scheduled =
-            ds.get_u128(&scheduled_unpause_ledger_key(&env));
+        let scheduled = ds.get_u128(&scheduled_unpause_ledger_key(&env));
         if scheduled == 0 {
             panic_with_error!(&env, Error::UnpauseNotScheduled);
         }
@@ -767,7 +764,9 @@ impl ExchangeRouter {
     /// Revoke an existing manager with remove_position_manager.
     pub fn set_position_manager(env: Env, caller: Address, market: Address, manager: Address) {
         caller.require_auth();
-        let data_store: Address = env.storage().instance()
+        let data_store: Address = env
+            .storage()
+            .instance()
             .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let data_store_client = DataStoreClient::new(&env, &data_store);
@@ -776,7 +775,9 @@ impl ExchangeRouter {
 
     /// Query the current position manager for an account on a specific market.
     pub fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address> {
-        let data_store: Address = env.storage().instance()
+        let data_store: Address = env
+            .storage()
+            .instance()
             .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let data_store_client = DataStoreClient::new(&env, &data_store);
@@ -787,7 +788,9 @@ impl ExchangeRouter {
     /// owner can call this; get_position_manager returns None afterwards.
     pub fn remove_position_manager(env: Env, caller: Address, market: Address) -> bool {
         caller.require_auth();
-        let data_store: Address = env.storage().instance()
+        let data_store: Address = env
+            .storage()
+            .instance()
             .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let data_store_client = DataStoreClient::new(&env, &data_store);
@@ -1500,7 +1503,10 @@ mod tests {
             },
         );
 
-        assert!(result.is_err(), "create_deposit must fail with Paused error");
+        assert!(
+            result.is_err(),
+            "create_deposit must fail with Paused error"
+        );
 
         // No tokens should have moved — user still holds everything
         let user_bal = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&user);
@@ -1550,7 +1556,10 @@ mod tests {
             "deposit must be gone after cancel"
         );
         let balance = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&user);
-        assert_eq!(balance, ONE_TOKEN, "tokens must be refunded after cancel while paused");
+        assert_eq!(
+            balance, ONE_TOKEN,
+            "tokens must be refunded after cancel while paused"
+        );
     }
 
     /// Issue #453: multicall's pause check must not block a CancelDeposit action,
@@ -1591,7 +1600,10 @@ mod tests {
             "deposit must be gone after multicall cancel while paused"
         );
         let balance = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&user);
-        assert_eq!(balance, ONE_TOKEN, "tokens must be refunded after multicall cancel while paused");
+        assert_eq!(
+            balance, ONE_TOKEN,
+            "tokens must be refunded after multicall cancel while paused"
+        );
     }
 
     /// A multicall containing a state-creating action must still revert while
@@ -1959,12 +1971,12 @@ mod tests {
         env.mock_all_auths();
         let (admin, ds_id, _, _, router_id, _) = setup(&env);
         let client = ExchangeRouterClient::new(&env, &router_id);
-        
+
         let ds = DataStoreClient::new(&env, &ds_id);
         let unpause_key = keys::unpause_time_key(&env);
 
         client.schedule_unpause(&admin);
-        
+
         // Assert unpause timestamp is scheduled for 1 hour from now
         let expected_time = env.ledger().timestamp() + 3600;
         let actual_time = ds.get_u64(&unpause_key);
@@ -1977,9 +1989,9 @@ mod tests {
         env.mock_all_auths();
         let (admin, ds_id, _, _, router_id, _) = setup(&env);
         let client = ExchangeRouterClient::new(&env, &router_id);
-        
+
         let ds = DataStoreClient::new(&env, &ds_id);
-        
+
         // Set pause manually first
         client.pause(&admin);
         assert_eq!(ds.get_bool(&keys::global_pause_key(&env)), true);
@@ -1987,7 +1999,7 @@ mod tests {
         // Schedule unpause
         client.schedule_unpause(&admin);
         let unpause_time = ds.get_u64(&keys::unpause_time_key(&env));
-        
+
         // Fast forward ledger time
         env.ledger().with_mut(|li| {
             li.timestamp = unpause_time + 1;
@@ -2003,17 +2015,20 @@ mod tests {
         env.mock_all_auths();
         let (admin, ds_id, _, _, router_id, _) = setup(&env);
         let client = ExchangeRouterClient::new(&env, &router_id);
-        
+
         let ds = DataStoreClient::new(&env, &ds_id);
-        
+
         // Set volume and time arbitrarily
         ds.set_u128(&admin, &keys::volume_tracker_key(&env), &1000);
         ds.set_u64(&admin, &keys::volume_time_key(&env), &1000);
 
         client.reset_circuit_breaker(&admin);
-        
+
         assert_eq!(ds.get_u128(&keys::volume_tracker_key(&env)), 0);
-        assert_eq!(ds.get_u64(&keys::volume_time_key(&env)), env.ledger().timestamp());
+        assert_eq!(
+            ds.get_u64(&keys::volume_time_key(&env)),
+            env.ledger().timestamp()
+        );
     }
 
     #[test]
@@ -2037,5 +2052,225 @@ mod tests {
         let w = setup();
         let client = ExchangeRouterClient::new(&w.env, &w.router);
         client.reset_circuit_breaker(&w.market_tk);
+    }
+
+    fn create_pending_order(
+        w: &World,
+        user: &Address,
+        collateral: i128,
+        order_type: OrderType,
+        trigger_price: i128,
+    ) -> BytesN<32> {
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(user, &collateral);
+        soroban_sdk::token::Client::new(&w.env, &w.long_tk).transfer(
+            user,
+            &w.ord_vault,
+            &collateral,
+        );
+        OHClient::new(&w.env, &w.ord_handler).create_order(
+            user,
+            &CreateOrderParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: soroban_sdk::Vec::new(&w.env),
+                size_delta_usd: 4_000 * FLOAT_PRECISION,
+                collateral_delta_amount: collateral,
+                trigger_price,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type,
+                is_long: true,
+                expiry_ledger: None,
+                on_behalf_of: None,
+            },
+        )
+    }
+
+    fn setup_with_pause_flag() -> World {
+        let w = setup();
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_bool(&w.admin, &gmx_keys::global_pause_key(&w.env), &false);
+        ds_c.set_bool(
+            &w.admin,
+            &gmx_keys::is_market_paused_key(&w.env, &w.market_tk),
+            &false,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::min_deposit_usd_key(&w.env, &w.market_tk),
+            &0,
+        );
+        ds_c.set_u128(&w.admin, &gmx_keys::max_swap_path_length_key(&w.env), &5);
+        w
+    }
+
+    #[test]
+    fn standalone_cancel_order_forwards_to_handler() {
+        let w = setup_with_pause_flag();
+        let fp = FLOAT_PRECISION;
+        let trader = Address::generate(&w.env);
+        set_prices(&w, 2_000 * fp);
+
+        let key = create_pending_order(&w, &trader, ONE_TOKEN, OrderType::MarketIncrease, 0);
+        let tk = soroban_sdk::token::Client::new(&w.env, &w.long_tk);
+        assert_eq!(
+            tk.balance(&trader),
+            0,
+            "collateral sits in vault before cancel"
+        );
+
+        ExchangeRouterClient::new(&w.env, &w.router).cancel_order(&trader, &key);
+
+        assert!(
+            OHClient::new(&w.env, &w.ord_handler)
+                .get_order(&key)
+                .is_none(),
+            "order must be removed after standalone cancel_order"
+        );
+        assert_eq!(
+            tk.balance(&trader),
+            ONE_TOKEN,
+            "collateral must be refunded"
+        );
+    }
+
+    #[test]
+    fn standalone_cancel_order_succeeds_when_paused() {
+        let w = setup_with_pause_flag();
+        let trader = Address::generate(&w.env);
+        set_prices(&w, 2_000 * FLOAT_PRECISION);
+
+        let key = create_pending_order(&w, &trader, ONE_TOKEN, OrderType::MarketIncrease, 0);
+        let router = ExchangeRouterClient::new(&w.env, &w.router);
+        router.set_paused(&true);
+        router.cancel_order(&trader, &key);
+
+        assert!(OHClient::new(&w.env, &w.ord_handler)
+            .get_order(&key)
+            .is_none());
+    }
+
+    #[test]
+    fn standalone_cancel_order_wrong_caller_fails() {
+        let w = setup_with_pause_flag();
+        let trader = Address::generate(&w.env);
+        let attacker = Address::generate(&w.env);
+        set_prices(&w, 2_000 * FLOAT_PRECISION);
+
+        let key = create_pending_order(&w, &trader, ONE_TOKEN, OrderType::MarketIncrease, 0);
+        let res = ExchangeRouterClient::new(&w.env, &w.router).try_cancel_order(&attacker, &key);
+        assert!(res.is_err(), "non-owner cancel must revert");
+        assert!(OHClient::new(&w.env, &w.ord_handler)
+            .get_order(&key)
+            .is_some());
+    }
+
+    #[test]
+    fn standalone_update_order_forwards_to_handler() {
+        let w = setup_with_pause_flag();
+        let fp = FLOAT_PRECISION;
+        let trader = Address::generate(&w.env);
+        set_prices(&w, 2_000 * fp);
+
+        let key =
+            create_pending_order(&w, &trader, ONE_TOKEN, OrderType::LimitIncrease, 1_900 * fp);
+
+        let new_size = 2_000 * fp;
+        let new_trigger = 1_800 * fp;
+        ExchangeRouterClient::new(&w.env, &w.router).update_order(
+            &trader,
+            &UpdateOrderParams {
+                key: key.clone(),
+                size_delta_usd: new_size,
+                acceptable_price: 0,
+                trigger_price: new_trigger,
+                min_output_amount: 0,
+            },
+        );
+
+        let order = OHClient::new(&w.env, &w.ord_handler)
+            .get_order(&key)
+            .expect("order must still exist after update");
+        assert_eq!(order.size_delta_usd, new_size);
+        assert_eq!(order.trigger_price, new_trigger);
+    }
+
+    #[test]
+    fn standalone_update_order_reverts_when_paused() {
+        let w = setup_with_pause_flag();
+        let fp = FLOAT_PRECISION;
+        let trader = Address::generate(&w.env);
+        set_prices(&w, 2_000 * fp);
+
+        let key =
+            create_pending_order(&w, &trader, ONE_TOKEN, OrderType::LimitIncrease, 1_900 * fp);
+        let router = ExchangeRouterClient::new(&w.env, &w.router);
+        router.set_paused(&true);
+
+        let res = router.try_update_order(
+            &trader,
+            &UpdateOrderParams {
+                key,
+                size_delta_usd: 1_000 * fp,
+                acceptable_price: 0,
+                trigger_price: 1_800 * fp,
+                min_output_amount: 0,
+            },
+        );
+        assert!(res.is_err(), "update_order must revert while paused");
+    }
+
+    #[test]
+    fn standalone_cancel_withdrawal_succeeds_when_paused() {
+        let w = setup_with_pause_flag();
+        let lp = Address::generate(&w.env);
+        set_prices(&w, 2_000 * FLOAT_PRECISION);
+
+        let lp_tokens = 5 * ONE_TOKEN;
+        MtClient::new(&w.env, &w.market_tk).mint(&w.admin, &lp, &lp_tokens);
+        assert_eq!(MtClient::new(&w.env, &w.market_tk).balance(&lp), lp_tokens);
+
+        let key = WithdrawalHandlerClient::new(&w.env, &w.wth_handler).create_withdrawal(
+            &lp,
+            &CreateWithdrawalParams {
+                receiver: lp.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp_tokens,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
+
+        assert_eq!(
+            soroban_sdk::token::Client::new(&w.env, &w.market_tk).balance(&w.wth_vault),
+            lp_tokens,
+            "LP tokens should sit in the withdrawal vault after create"
+        );
+
+        WVClient::new(&w.env, &w.wth_vault).record_transfer_in(&w.admin, &w.market_tk);
+
+        assert_eq!(
+            WVClient::new(&w.env, &w.wth_vault).get_recorded_balance(&w.market_tk),
+            lp_tokens,
+            "vault must have recorded the transfer-in"
+        );
+        let router = ExchangeRouterClient::new(&w.env, &w.router);
+        router.set_paused(&true);
+        router.cancel_withdrawal(&lp, &key);
+
+        assert!(
+            WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
+                .get_withdrawal(&key)
+                .is_none(),
+            "withdrawal must be removed after standalone cancel"
+        );
+        assert_eq!(
+            MtClient::new(&w.env, &w.market_tk).balance(&lp),
+            lp_tokens,
+            "LP tokens must be returned"
+        );
     }
 }

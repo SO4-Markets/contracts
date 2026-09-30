@@ -99,6 +99,14 @@ pub enum Error {
     SelfReferralNotAllowed = 13,
 }
 
+#[contractevent(topics = ["ref_set_tier"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReferrerTierSet {
+    pub referrer: Address,
+    pub old_tier: u32,
+    pub new_tier: u32,
+    pub admin: Address,
+}
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 /// Validates that `code` is non-empty, at most `MAX_REFERRAL_CODE_LENGTH` bytes,
@@ -166,7 +174,9 @@ impl ReferralStorage {
             panic_with_error!(&env, Error::CodeAlreadyTaken);
         }
         env.storage().persistent().set(&key, &caller);
-        env.storage().persistent().extend_ttl(&key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
         env.events().publish_event(&CodeRegistered { caller, code });
     }
 
@@ -187,9 +197,17 @@ impl ReferralStorage {
         }
         let trader_key = ReferralKey::TraderCode(trader.clone());
         env.storage().persistent().set(&trader_key, &code);
-        env.storage().persistent().extend_ttl(&trader_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        env.storage().persistent().extend_ttl(
+            &trader_key,
+            MIN_BUMP_THRESHOLD,
+            PERSISTENT_BUMP_TARGET,
+        );
         // Also keep the code-owner entry alive while a trader references it.
-        env.storage().persistent().extend_ttl(&owner_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        env.storage().persistent().extend_ttl(
+            &owner_key,
+            MIN_BUMP_THRESHOLD,
+            PERSISTENT_BUMP_TARGET,
+        );
         env.events().publish_event(&TraderCodeSet { trader, code });
     }
 
@@ -200,10 +218,18 @@ impl ReferralStorage {
         // 1-20 bytes, never exactly 32), so this must read back as `Bytes`, not
         // the fixed-size `BytesN<32>` the earlier version of this function used.
         let code: Bytes = env.storage().persistent().get(&trader_key)?;
-        env.storage().persistent().extend_ttl(&trader_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        env.storage().persistent().extend_ttl(
+            &trader_key,
+            MIN_BUMP_THRESHOLD,
+            PERSISTENT_BUMP_TARGET,
+        );
         let owner_key = ReferralKey::CodeOwner(code);
         let referrer: Address = env.storage().persistent().get(&owner_key)?;
-        env.storage().persistent().extend_ttl(&owner_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        env.storage().persistent().extend_ttl(
+            &owner_key,
+            MIN_BUMP_THRESHOLD,
+            PERSISTENT_BUMP_TARGET,
+        );
         Some(referrer)
     }
 
@@ -228,9 +254,23 @@ impl ReferralStorage {
         if tier > 2 {
             panic_with_error!(&env, Error::InvalidTier);
         }
-        let tier_key = ReferralKey::ReferrerTier(referrer);
+
+        let tier_key = ReferralKey::ReferrerTier(referrer.clone());
+        let old_tier: u32 = env.storage().persistent().get(&tier_key).unwrap_or(0u32);
+
         env.storage().persistent().set(&tier_key, &tier);
-        env.storage().persistent().extend_ttl(&tier_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        env.storage().persistent().extend_ttl(
+            &tier_key,
+            MIN_BUMP_THRESHOLD,
+            PERSISTENT_BUMP_TARGET,
+        );
+
+        env.events().publish_event(&ReferrerTierSet {
+            referrer,
+            old_tier,
+            new_tier: tier,
+            admin,
+        });
     }
 
     /// Configure the rebate/discount parameters for a tier (admin only).
@@ -249,15 +289,24 @@ impl ReferralStorage {
         }
         let tier_key = ReferralKey::TierConfig(tier);
         env.storage().persistent().set(&tier_key, &config);
-        env.storage().persistent().extend_ttl(&tier_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        env.storage().persistent().extend_ttl(
+            &tier_key,
+            MIN_BUMP_THRESHOLD,
+            PERSISTENT_BUMP_TARGET,
+        );
         // Validate config parameters
-        let discount_bps = ((config.total_rebate_bps as u64) * (config.discount_share_bps as u64) / (gmx_math::BPS_DIVISOR as u64)) as u32;
+        let discount_bps = ((config.total_rebate_bps as u64) * (config.discount_share_bps as u64)
+            / (gmx_math::BPS_DIVISOR as u64)) as u32;
         let rebate_bps = if config.total_rebate_bps >= discount_bps {
             config.total_rebate_bps - discount_bps
         } else {
             panic_with_error!(&env, Error::InvalidTierConfig);
         };
-        if discount_bps > (gmx_math::BPS_DIVISOR as u32) || rebate_bps > (gmx_math::BPS_DIVISOR as u32) || config.total_rebate_bps > (gmx_math::BPS_DIVISOR as u32) || config.discount_share_bps > (gmx_math::BPS_DIVISOR as u32) {
+        if discount_bps > (gmx_math::BPS_DIVISOR as u32)
+            || rebate_bps > (gmx_math::BPS_DIVISOR as u32)
+            || config.total_rebate_bps > (gmx_math::BPS_DIVISOR as u32)
+            || config.discount_share_bps > (gmx_math::BPS_DIVISOR as u32)
+        {
             panic_with_error!(&env, Error::InvalidTierConfig);
         }
         env.storage()
@@ -328,19 +377,31 @@ impl ReferralStorage {
             Some(c) => c,
             None => return 0,
         };
-        env.storage().persistent().extend_ttl(&trader_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        env.storage().persistent().extend_ttl(
+            &trader_key,
+            MIN_BUMP_THRESHOLD,
+            PERSISTENT_BUMP_TARGET,
+        );
 
         let owner_key = ReferralKey::CodeOwner(code);
         let referrer: Address = match env.storage().persistent().get(&owner_key) {
             Some(r) => r,
             None => return 0,
         };
-        env.storage().persistent().extend_ttl(&owner_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        env.storage().persistent().extend_ttl(
+            &owner_key,
+            MIN_BUMP_THRESHOLD,
+            PERSISTENT_BUMP_TARGET,
+        );
 
         let tier_key = ReferralKey::ReferrerTier(referrer);
         let tier: u32 = env.storage().persistent().get(&tier_key).unwrap_or(0);
         if tier > 0 {
-            env.storage().persistent().extend_ttl(&tier_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+            env.storage().persistent().extend_ttl(
+                &tier_key,
+                MIN_BUMP_THRESHOLD,
+                PERSISTENT_BUMP_TARGET,
+            );
         }
 
         let config_key = ReferralKey::TierConfig(tier);
@@ -348,7 +409,11 @@ impl ReferralStorage {
             Some(c) => c,
             None => return 0,
         };
-        env.storage().persistent().extend_ttl(&config_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        env.storage().persistent().extend_ttl(
+            &config_key,
+            MIN_BUMP_THRESHOLD,
+            PERSISTENT_BUMP_TARGET,
+        );
 
         // discount = total_rebate * discount_share / 10_000
         config.total_rebate_bps * config.discount_share_bps / (gmx_math::BPS_DIVISOR as u32)
@@ -388,12 +453,34 @@ impl ReferralStorage {
         if tier == 0 || tier > 2 {
             panic_with_error!(&env, Error::InvalidTier);
         }
-        // Issue #636: a zero threshold would make increment_referrer_volume's
-        // `cumulative_volume >= threshold` check trivially true for any nonzero
-        // (unsigned) volume, instantly qualifying every referrer for this tier.
         if threshold_usd == 0 {
             panic_with_error!(&env, Error::InvalidInput);
         }
+
+        if tier > 1 {
+            if let Some(lower_threshold) = env
+                .storage()
+                .persistent()
+                .get::<_, u128>(&ReferralKey::TierUpgradeThreshold(tier - 1))
+            {
+                if threshold_usd <= lower_threshold {
+                    panic_with_error!(&env, Error::InvalidInput);
+                }
+            }
+        }
+
+        if tier < 2 {
+            if let Some(higher_threshold) = env
+                .storage()
+                .persistent()
+                .get::<_, u128>(&ReferralKey::TierUpgradeThreshold(tier + 1))
+            {
+                if threshold_usd >= higher_threshold {
+                    panic_with_error!(&env, Error::InvalidInput);
+                }
+            }
+        }
+
         env.storage()
             .persistent()
             .set(&ReferralKey::TierUpgradeThreshold(tier), &threshold_usd);
@@ -458,9 +545,11 @@ impl ReferralStorage {
         let cumulative_volume = prev_volume.saturating_add(volume_usd);
         env.storage().persistent().set(&vol_key, &cumulative_volume);
         // Extend TTL so volume counter doesn't expire between trades
-        env.storage().persistent().extend_ttl(&vol_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        env.storage()
+            .persistent()
+            .extend_ttl(&vol_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
 
-        // Auto-upgrade: find the highest tier whose threshold the referrer now qualifies for
+        // Auto-upgrade: sequentially evaluate thresholds starting from old_tier + 1
         let old_tier: u32 = env
             .storage()
             .persistent()
@@ -471,16 +560,24 @@ impl ReferralStorage {
         let mut t = old_tier + 1;
         while t <= 2 {
             let threshold_key = ReferralKey::TierUpgradeThreshold(t);
-            if let Some(threshold) = env
-                .storage()
-                .persistent()
-                .get::<_, u128>(&threshold_key)
-            {
-                // Extend TTL on every read so config value doesn't expire
-                env.storage().persistent().extend_ttl(&threshold_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+            if let Some(threshold) = env.storage().persistent().get::<_, u128>(&threshold_key) {
+                // Extend TTL on read so config value doesn't expire
+                env.storage().persistent().extend_ttl(
+                    &threshold_key,
+                    MIN_BUMP_THRESHOLD,
+                    PERSISTENT_BUMP_TARGET,
+                );
+
+                // Enforce sequential qualification: referrer must meet this tier's threshold
+                // before higher tiers are evaluated.
                 if cumulative_volume >= threshold {
                     new_tier = t;
+                } else {
+                    break;
                 }
+            } else {
+                // Unconfigured threshold breaks the upgrade chain
+                break;
             }
             t += 1;
         }
@@ -653,8 +750,8 @@ mod tests {
     fn set_tier_config_valid_discount_and_rebate_succeeds() {
         let w = setup();
         let cfg = TierConfig {
-            total_rebate_bps: 1200,      // total rebate (discount + rebate)
-            discount_share_bps: 8333,    // discount share (~83.33% of 1200 = 1000)
+            total_rebate_bps: 1200,   // total rebate (discount + rebate)
+            discount_share_bps: 8333, // discount share (~83.33% of 1200 = 1000)
         };
         client(&w).set_tier_config(&w.admin, &0u32, &cfg);
     }
@@ -678,7 +775,7 @@ mod tests {
         let w = setup();
         let cfg = TierConfig {
             total_rebate_bps: 11_000,
-            discount_share_bps: 8181,    // 9000 discount share (9000/11000 * 10000)
+            discount_share_bps: 8181, // 9000 discount share (9000/11000 * 10000)
         };
         client(&w).set_tier_config(&w.admin, &0u32, &cfg);
     }
@@ -1062,7 +1159,10 @@ mod tests {
         client(&w).set_tier_config(
             &w.admin,
             &2u32,
-            &TierConfig { total_rebate_bps: 3_000, discount_share_bps: 5_000 },
+            &TierConfig {
+                total_rebate_bps: 3_000,
+                discount_share_bps: 5_000,
+            },
         );
         client(&w).set_trader_referral_code(&trader, &code);
         // discount = 3_000 * 5_000 / 10_000 = 1_500
@@ -1091,11 +1191,17 @@ mod tests {
 
         // Cross threshold → tier 1
         client(&w).increment_referrer_volume(&order_handler, &referrer, &2_000u128);
-        assert_eq!(client(&w).get_referrer_cumulative_volume(&referrer), 2_000u128);
+        assert_eq!(
+            client(&w).get_referrer_cumulative_volume(&referrer),
+            2_000u128
+        );
 
         // Another increment below threshold — tier stays at 1 (not reset)
         client(&w).increment_referrer_volume(&order_handler, &referrer, &1u128);
-        assert_eq!(client(&w).get_referrer_cumulative_volume(&referrer), 2_001u128);
+        assert_eq!(
+            client(&w).get_referrer_cumulative_volume(&referrer),
+            2_001u128
+        );
     }
 
     // ─── Issue #444: manual tier downgrade must be durable ───────────────────
@@ -1126,7 +1232,10 @@ mod tests {
         client(&w).set_tier_config(
             &w.admin,
             &1u32,
-            &TierConfig { total_rebate_bps: 2_000, discount_share_bps: 5_000 },
+            &TierConfig {
+                total_rebate_bps: 2_000,
+                discount_share_bps: 5_000,
+            },
         );
         client(&w).set_trader_referral_code(&trader, &code);
         assert_eq!(
@@ -1159,7 +1268,10 @@ mod tests {
         client(&w).set_tier_config(
             &w.admin,
             &1u32,
-            &TierConfig { total_rebate_bps: 2_000, discount_share_bps: 5_000 },
+            &TierConfig {
+                total_rebate_bps: 2_000,
+                discount_share_bps: 5_000,
+            },
         );
         client(&w).set_trader_referral_code(&trader, &code);
         assert_eq!(
@@ -1177,9 +1289,8 @@ mod tests {
         let w = setup();
         let referrer = Address::generate(&w.env);
         let impostor = Address::generate(&w.env);
-        ReferralStorageClient::new(&w.env, &w.handler).set_referrer_volume(
-            &impostor, &referrer, &0u128,
-        );
+        ReferralStorageClient::new(&w.env, &w.handler)
+            .set_referrer_volume(&impostor, &referrer, &0u128);
     }
 
     /// Persistent referral-code storage survives an upgrade (Soroban host
