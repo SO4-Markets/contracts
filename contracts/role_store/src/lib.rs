@@ -736,4 +736,24 @@ mod tests {
         assert!(!client.has_role(&stranger, &roles::controller(&env)));
         assert_eq!(client.get_roles(&stranger).len(), 0);
     }
+
+    /// get_all_roles returns every distinct role ID granted in the contract.
+    #[test]
+    fn test_get_all_roles_returns_granted_roles() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let role1 = roles::controller(&env);
+        let role2 = roles::keeper(&env);
+        let user = Address::generate(&env);
+
+        assert_eq!(client.get_all_roles().len(), 1);
+        assert_eq!(client.get_all_roles().get(0).unwrap(), roles::role_admin(&env));
+
+        client.grant_role(&admin, &user, &role1);
+        client.grant_role(&admin, &user, &role2);
+
+        let all_roles = client.get_all_roles();
+        assert_eq!(all_roles.len(), 3);
+        assert_eq!(client.get_role_count(), 3);
+    }
 }

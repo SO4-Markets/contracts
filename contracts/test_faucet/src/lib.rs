@@ -465,7 +465,9 @@ mod tests {
         let user = Address::generate(&env);
 
         assert_eq!(faucet.cooldown_ledgers(), 10);
+        assert_eq!(faucet.last_claim_ledger(&user, &token_id), 0);
         faucet.claim(&user, &token_id);
+        assert_eq!(faucet.last_claim_ledger(&user, &token_id), env.ledger().sequence());
 
         faucet.set_cooldown(&admin, &0);
         assert_eq!(faucet.cooldown_ledgers(), 0);
