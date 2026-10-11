@@ -128,7 +128,7 @@ stellar contract invoke \
 bash scripts/submit_prices.sh testnet my-keeper
 ```
 
-`submit_prices.sh` calls `oracle.set_prices_simple` — the unsigned test-only price path, gated behind the `testutils` feature — for the configured token. It does not sign a price bundle or exercise the signature/key-lookup path at all; that path is only reached via the real `set_prices` entrypoint, not this script.
+`submit_prices.sh` calls `oracle.set_prices` — submitting a signed price bundle (fetched automatically from `ORACLE_URL` or passed via explicit keeper signature) for the configured token against standard deployments. The unsigned `set_prices_simple` entrypoint remains available strictly in test/testutils environments.
 
 ---
 
