@@ -1316,4 +1316,85 @@ mod tests {
             "well-collateralised position with healthy net collateral must not be liquidatable"
         );
     }
+
+    /// Issue #779: Boundary test for is_liquidatable at exact threshold remaining == min_required.
+    /// Strict inequality (remaining < min_required) means remaining == min_required is healthy (false),
+    /// while remaining == min_required - 1 unit is liquidatable (true).
+    #[test]
+    fn is_liquidatable_exact_boundary_remaining_equals_min_required() {
+        let w = setup();
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        let market = make_market(&w);
+
+        let price = 2_000 * FP;
+        let price_props = PriceProps {
+            min: price,
+            max: price,
+        };
+
+        // 10% min collateral factor
+        let min_factor = FP / 10;
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::min_collateral_factor_key(&w.env, &w.market_tk),
+            &(min_factor as u128),
+        );
+
+        // Position: size = $10 000 (10_000 * FP).
+        // min_required = 10_000 * FP * (FP / 10) / FP = 1_000 * FP ($1 000).
+        // Collateral token price = $2 000 (2_000 * FP).
+        // Collateral needed for exactly $1 000 USD:
+        // collateral_usd = collateral_amount * (2_000 * FP) / TOKEN_PRECISION = 1_000 * FP
+        // collateral_amount = 1_000 * TOKEN_PRECISION / 2_000 = ONE_TOKEN / 2 (0.5 tokens).
+        let size_usd = 10_000 * FP;
+        let exact_collateral = ONE_TOKEN / 2;
+
+        let pos_exact = make_position(&w, size_usd, exact_collateral, price);
+        // remaining == min_required exactly ($1 000 == $1 000)
+        assert!(
+            !is_liquidatable(&w.env, &w.ds, &pos_exact, &market, price, &price_props),
+            "position with remaining == min_required must not be liquidatable (strict <)"
+        );
+
+        // One unit below threshold: 1 raw token unit less collateral
+        let pos_below = make_position(&w, size_usd, exact_collateral - 1, price);
+        assert!(
+            is_liquidatable(&w.env, &w.ds, &pos_below, &market, price, &price_props),
+            "position with remaining < min_required by 1 unit must be liquidatable"
+        );
+    }
+
+    /// Issue #779: Boundary test for is_liquidatable when min_collateral_factor == 0 (fallback).
+    /// Fallback check is remaining < 0.
+    /// remaining == 0 must evaluate to false (healthy), remaining < 0 must evaluate to true (liquidatable).
+    #[test]
+    fn is_liquidatable_exact_boundary_zero_factor_fallback() {
+        let w = setup();
+        let market = make_market(&w);
+
+        let price = 2_000 * FP;
+        let size_usd = 10_000 * FP;
+        // 0 collateral, 0 fees, entry_price == exit_price -> collateral_usd = 0, pnl = 0 -> remaining = 0
+        let pos_zero = make_position(&w, size_usd, 0, price);
+        let price_props = PriceProps {
+            min: price,
+            max: price,
+        };
+
+        assert!(
+            !is_liquidatable(&w.env, &w.ds, &pos_zero, &market, price, &price_props),
+            "position with factor=0 and remaining == 0 must not be liquidatable (remaining < 0)"
+        );
+
+        // When price drops by 1 unit, pnl < 0 -> remaining < 0 -> liquidatable
+        let drop_props = PriceProps {
+            min: price - 1,
+            max: price - 1,
+        };
+        assert!(
+            is_liquidatable(&w.env, &w.ds, &pos_zero, &market, price, &drop_props),
+            "position with factor=0 and remaining < 0 must be liquidatable"
+        );
+    }
 }
+
