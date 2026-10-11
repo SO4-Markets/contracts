@@ -128,8 +128,7 @@ def extract_pub_fns(source: str) -> list[FnInfo]:
             else:
                 # Find the end of this function (next pub fn or end of impl block)
                 next_fn = impl_body.find("pub fn ", fn_open_brace + 1)
-                next_pub = impl_body.find("pub ", fn_open_brace + 1)
-                end = next_pub if next_pub != -1 else len(impl_body)
+                end = next_fn if next_fn != -1 else len(impl_body)
                 fn_body = impl_body[fn_open_brace:end]
 
             # Classify auth
