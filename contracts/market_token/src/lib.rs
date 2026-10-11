@@ -368,14 +368,11 @@ fn change_total_supply(env: &Env, delta: i128) {
 
 fn spend_allowance(env: &Env, from: &Address, spender: &Address, amount: i128) {
     let key = DataKey::Allowance(from.clone(), spender.clone());
-    let data: AllowanceData = env
-        .storage()
-        .temporary()
-        .get(&key)
-        .unwrap_or(AllowanceData {
-            amount: 0,
-            expiration_ledger: 0,
-        });
+    let data: Option<AllowanceData> = env.storage().temporary().get(&key);
+    let data = match data {
+        Some(d) => d,
+        None => panic_with_error!(env, Error::InsufficientAllowance),
+    };
     if env.ledger().sequence() > data.expiration_ledger {
         panic_with_error!(env, Error::AllowanceExpired);
     }
@@ -795,6 +792,42 @@ mod tests {
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
                 Error::AllowanceExpired as u32
+            )))
+        );
+    }
+
+    // ── Issue #791: spend_allowance with no granted allowance ─────────────────
+
+    /// Issue #791: transfer_from and burn_from must return InsufficientAllowance
+    /// (not AllowanceExpired) when no allowance was ever granted.
+    #[test]
+    fn spend_allowance_without_grant_reverts_with_insufficient_allowance() {
+        let (env, admin, _, mt_id, _, _) = setup();
+        let client = MarketTokenClient::new(&env, &mt_id);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        client.mint(&admin, &alice, &1000_0000i128);
+
+        // Advance ledger so sequence > 0
+        env.ledger().set_sequence_number(50);
+
+        // transfer_from with no prior approve must return InsufficientAllowance
+        let xfer_res = client.try_transfer_from(&spender, &alice, &bob, &100_0000i128);
+        assert_eq!(
+            xfer_res,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::InsufficientAllowance as u32
+            )))
+        );
+
+        // burn_from with no prior approve must also return InsufficientAllowance
+        let burn_res = client.try_burn_from(&spender, &alice, &100_0000i128);
+        assert_eq!(
+            burn_res,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::InsufficientAllowance as u32
             )))
         );
     }
