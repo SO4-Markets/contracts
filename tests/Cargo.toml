@@ -116,7 +116,23 @@ path = "resource_bench.rs"
 [[test]]
 name = "clob_model"
 path = "clob_model.rs"
+
+[[test]]
 name = "clob_properties"
 path = "clob_properties.rs"
+
+[[test]]
 name = "privileged_auth_matrix"
 path = "privileged_auth_matrix.rs"
+
+[[test]]
+name = "token_custody"
+path = "token_custody.rs"
+
+[[test]]
+name = "storage_ttl_archive"
+path = "storage_ttl_archive.rs"
+
+[[test]]
+name = "order_lifecycle"
+path = "order_lifecycle.rs"

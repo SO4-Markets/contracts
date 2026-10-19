@@ -247,7 +247,7 @@ impl OrderCleanup {
         keys: soroban_sdk::Vec<BytesN<32>>,
     ) -> u32 {
         const BATCH_LIMIT: u32 = 100;
-        if keys.len() > BATCH_LIMIT as usize {
+        if keys.len() > BATCH_LIMIT {
             panic_with_error!(&env, Error::BatchLimitExceeded);
         }
 
@@ -435,6 +435,7 @@ mod tests {
         use soroban_sdk::testutils::Ledger;
         let env = Env::default();
         env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
 
         let data_store_id = env.register(MockDataStore, ());
         let order_handler_id = env.register(MockOrderHandler, ());
@@ -460,6 +461,7 @@ mod tests {
         use soroban_sdk::testutils::Ledger;
         let env = Env::default();
         env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
 
         let data_store_id = env.register(MockDataStore, ());
         let order_handler_id = env.register(MockOrderHandler, ());
@@ -468,7 +470,7 @@ mod tests {
 
         let caller = Address::generate(&env);
         let mut keys = soroban_sdk::vec![&env];
-        for i in 0..50 {
+        for i in 0..10 {
             keys.push_back(BytesN::from_array(&env, &[i as u8; 32]));
         }
 

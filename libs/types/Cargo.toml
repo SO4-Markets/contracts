@@ -10,3 +10,6 @@ soroban-sdk = { workspace = true }
 soroban-token-sdk = { version = "25" }
 
 [lib]
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

@@ -1056,9 +1056,9 @@ mod tests {
             },
         );
 
-        // Ledger advances with no fresh price submitted — the stored price is now stale.
+        // Ledger advances past PRICE_FRESHNESS_WINDOW (20) with no fresh price — stored price is now stale.
         let seq = env.ledger().sequence();
-        env.ledger().set_sequence_number(seq + 1);
+        env.ledger().set_sequence_number(seq + 25);
 
         hc.execute_deposit(&w.keeper, &dep_key);
     }

@@ -6,14 +6,13 @@ use data_store::{DataStore, DataStoreClient as DsClient};
 use deposit_handler::{DepositHandler, DepositHandlerClient};
 use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
 use gmx_keys::roles;
-use gmx_types::{CreateDepositParams, OrderType};
 use market_token::{MarketToken, MarketTokenClient as MtClient};
 use oracle::{Oracle, OracleClient as OClient};
-use order_handler::{CreateOrderParams, OrderHandler, OrderHandlerClient};
+use order_handler::{OrderHandler, OrderHandlerClient};
 use order_vault::{OrderVault, OrderVaultClient as OVClient};
 use role_store::{RoleStore, RoleStoreClient as RsClient};
-use rollback_harness::{RollbackHarness, StateSnapshot};
-use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env, Map, Vec};
+use rollback_harness::RollbackHarness;
+use soroban_sdk::{testutils::Address as _, Address, Env, Map, Vec};
 
 #[allow(dead_code)]
 struct World {
@@ -95,7 +94,6 @@ fn setup() -> World {
         &ds,
         &oracle_addr,
         &ord_vault,
-        &market_tk,
     );
     rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
 
@@ -131,7 +129,7 @@ fn snapshot_captures_protocol_state() {
         orders,
     );
 
-    assert_eq!(world.env.ledger().sequence(), snapshot.block_height);
+    assert_eq!(world.env.ledger().sequence() as u64, snapshot.block_height);
 }
 
 #[test]

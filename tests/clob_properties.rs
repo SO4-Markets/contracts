@@ -98,6 +98,9 @@ impl Rng {
         self.next_u64() % n
     }
     fn range(&mut self, lo: u128, hi: u128) -> u128 {
+        if hi <= lo {
+            return lo;
+        }
         lo + u128::from(self.next_u64()) % (hi - lo + 1)
     }
     fn trader(&mut self) -> usize {
@@ -630,7 +633,7 @@ fn equal_price_fills_follow_fifo_with_cancels_and_reductions() {
             }
             let idx = rng.below(queue.len() as u64) as usize;
             let (id, qty) = queue[idx];
-            if rng.below(2) == 0 {
+            if rng.below(2) == 0 || qty <= 1 {
                 engine.apply(&Action::Cancel { id }).expect("cancel");
                 queue.remove(idx);
                 cancelled.push(id);

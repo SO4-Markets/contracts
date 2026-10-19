@@ -6,17 +6,16 @@ use data_store::{DataStore, DataStoreClient as DsClient};
 use deposit_handler::{DepositHandler, DepositHandlerClient};
 use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
 use gmx_keys::roles;
-use gmx_math::{FLOAT_PRECISION, TOKEN_PRECISION};
-use gmx_types::{CreateDepositParams, OrderType, TokenPrice};
+use gmx_math::TOKEN_PRECISION;
 use market_token::{MarketToken, MarketTokenClient as MtClient};
 use oracle::{Oracle, OracleClient as OClient};
-use order_handler::{CreateOrderParams, OrderHandler, OrderHandlerClient};
+use order_handler::{OrderHandler, OrderHandlerClient};
 use order_vault::{OrderVault, OrderVaultClient as OVClient};
 use role_store::{RoleStore, RoleStoreClient as RsClient};
 use settlement_invariants::{
-    BidTakerInvariant, AskTakerInvariant, LockedLiabilityInvariant, InvariantChecker,
+    BidTakerInvariant, AskTakerInvariant, LockedLiabilityInvariant,
 };
-use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env, Vec};
+use soroban_sdk::{testutils::Address as _, Address, Env};
 
 #[allow(dead_code)]
 struct World {
@@ -99,7 +98,6 @@ fn setup() -> World {
         &ds,
         &oracle_addr,
         &ord_vault,
-        &market_tk,
     );
     rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
 
@@ -115,8 +113,8 @@ fn setup() -> World {
         ord_handler,
         market_tk,
         long_tk,
-        short_tk,
-        index_tk: short_tk.clone(),
+        short_tk: short_tk.clone(),
+        index_tk: short_tk,
     }
 }
 

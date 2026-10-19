@@ -1168,7 +1168,7 @@ mod tests {
             PRICE_FRESHNESS_WINDOW
         ));
         // Stays tighter than the set_prices acceptance window.
-        assert!(PRICE_FRESHNESS_WINDOW < 60);
+        const { assert!(PRICE_FRESHNESS_WINDOW < 60) };
     }
 
     // ── Issue #172: ledger sequence wrap-around staleness ─────────────────────

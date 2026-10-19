@@ -236,7 +236,9 @@ fn assert_conserved(l: &Ledger) {
     assert_eq!((base, quote), (0, 0), "base/quote not conserved: {l:?}");
 }
 
-fn top_of_book<E: BookView>(e: &E) -> (Option<(u64, u64)>, Option<(u64, u64)>) {
+type TopOfBook = (Option<(u64, u64)>, Option<(u64, u64)>);
+
+fn top_of_book<E: BookView>(e: &E) -> TopOfBook {
     (
         e.best_bid().map(|p| (p, e.level_qty(Side::Buy, p))),
         e.best_ask().map(|p| (p, e.level_qty(Side::Sell, p))),
@@ -716,8 +718,8 @@ fn replay(trace: &[Action], max_fills: usize) -> Result<(Book, Reference), Strin
                 }
             }
         }
-        compare_state(&reference, &book).map_err(&fail)?;
-        book.check_structure().map_err(&fail)?;
+        compare_state(&reference, &book).map_err(fail)?;
+        book.check_structure().map_err(fail)?;
         if let Some(report) = crossed_report(&book) {
             return Err(fail(report));
         }
@@ -1040,7 +1042,7 @@ fn maximum_valid_vector_settles_exactly() {
         .fills;
     assert_eq!(fills.len(), 1);
     let n = MAX_PRICE as u128 * MAX_QTY as u128;
-    let taker_fee = (n * 30 + 9_999) / 10_000;
+    let taker_fee = (n * 30).div_ceil(10_000);
     let maker_fee = n * 10 / 10_000;
     assert_eq!(b.ledger.quote(1), -((n + taker_fee) as i128));
     assert_eq!(b.ledger.quote(2), (n - maker_fee) as i128);

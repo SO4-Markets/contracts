@@ -4,7 +4,7 @@
 //! Each upgradeable contract must check its storage version at init and verify
 //! compatibility before processing. Major version changes trigger migration.
 
-use soroban_sdk::{contracttype, Env};
+use soroban_sdk::{contracttype, BytesN, Env, Vec};
 
 /// Storage version triple: major.minor.patch
 /// Changes are consensus-critical and must be coordinated.
@@ -56,7 +56,7 @@ pub enum VersionDataKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpgradeProposal {
     /// New WASM hash.
-    pub wasm_hash: [u8; 32],
+    pub wasm_hash: BytesN<32>,
     /// When this upgrade was proposed.
     pub proposed_at: u64,
     /// When this upgrade becomes effective (proposed_at + timelock).
@@ -99,7 +99,7 @@ pub fn verify_version(env: &Env, required: StorageVersion) -> Result<StorageVers
 /// Propose an upgrade to a new WASM hash with a timelock.
 pub fn propose_upgrade(
     env: &Env,
-    wasm_hash: [u8; 32],
+    wasm_hash: BytesN<32>,
     timelock_seconds: u64,
 ) -> Result<UpgradeProposal, &'static str> {
     let now = env.ledger().timestamp();
@@ -175,19 +175,12 @@ pub fn confirm_upgrade(
 pub fn rollback_to_previous(env: &Env, rollback_window_seconds: u64) -> Result<StorageVersion, &'static str> {
     let storage = env.storage().instance();
 
-    let current: StorageVersion = storage
+    let _current: StorageVersion = storage
         .get(&VersionDataKey::StorageVersion)
         .ok_or("Current version not found")?;
 
     let proposal = storage
-        .get::<VersionDataKey, UpgradeProposal>(&VersionDataKey::PendingUpgrade)
-        .or_else(|| {
-            // If no pending, find the most recent upgrade (from history)
-            let history: Vec<StorageVersion> = storage
-                .get(&VersionDataKey::PreviousVersions)
-                .unwrap_or_else(|| Vec::new(env));
-            history.back()
-        });
+        .get::<VersionDataKey, UpgradeProposal>(&VersionDataKey::PendingUpgrade);
 
     if let Some(p) = proposal {
         if env.ledger().timestamp() > p.effective_at + rollback_window_seconds {
@@ -202,7 +195,7 @@ pub fn rollback_to_previous(env: &Env, rollback_window_seconds: u64) -> Result<S
         .get(&VersionDataKey::PreviousVersions)
         .ok_or("No previous versions available")?;
 
-    let previous = history.pop().ok_or("No previous version")?;
+    let previous = history.pop_back().ok_or("No previous version")?;
 
     // Update history and current version
     storage.set(&VersionDataKey::PreviousVersions, &history);

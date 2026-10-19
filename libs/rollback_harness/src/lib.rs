@@ -34,7 +34,7 @@ impl StateSnapshot {
             fees,
             liabilities,
             orders,
-            block_height: env.ledger().sequence(),
+            block_height: env.ledger().sequence() as u64,
             timestamp: env.ledger().timestamp(),
         }
     }
@@ -58,8 +58,7 @@ impl StateSnapshot {
         };
 
         // Compare balances
-        let mut balance_iter = self.balances.iter();
-        while let Some((token, original_balance)) = balance_iter.next() {
+        for (token, original_balance) in self.balances.iter() {
             let current = current_balances
                 .get(token.clone())
                 .unwrap_or(0);
@@ -70,8 +69,7 @@ impl StateSnapshot {
         }
 
         // Compare fees
-        let mut fee_iter = self.fees.iter();
-        while let Some((token, original_fee)) = fee_iter.next() {
+        for (token, original_fee) in self.fees.iter() {
             let current = current_fees
                 .get(token.clone())
                 .unwrap_or(0);
@@ -82,8 +80,7 @@ impl StateSnapshot {
         }
 
         // Compare liabilities
-        let mut liability_iter = self.liabilities.iter();
-        while let Some((account, original_liability)) = liability_iter.next() {
+        for (account, original_liability) in self.liabilities.iter() {
             let current = current_liabilities
                 .get(account.clone())
                 .unwrap_or(0);
@@ -115,10 +112,9 @@ pub struct RollbackValidation {
 
 impl RollbackValidation {
     /// Assert that state fully reverted; panic with details if not.
-    pub fn assert_fully_reverted(&self, env: &Env) {
+    pub fn assert_fully_reverted(&self, _env: &Env) {
         if !self.state_fully_reverted {
-            // In a real implementation, would format detailed mismatch message
-            soroban_sdk::panic_with_error!(env, soroban_sdk::Status::UnknownError);
+            panic!("State did not fully revert");
         }
     }
 
@@ -156,12 +152,11 @@ impl RollbackHarness {
 
     /// Assert conservation: sum of all deltas = 0.
     pub fn assert_conservation(
-        env: &Env,
+        _env: &Env,
         balance_deltas: &Vec<(Address, i128)>,
     ) -> Result<(), &'static str> {
         let mut sum: i128 = 0;
-        let mut iter = balance_deltas.iter();
-        while let Some((_, delta)) = iter.next() {
+        for (_, delta) in balance_deltas.iter() {
             sum = sum.checked_add(delta).ok_or("overflow")?;
         }
         if sum == 0 {
@@ -185,7 +180,7 @@ mod tests {
         let orders: Vec<OrderProps> = Vec::new(&env);
 
         let snapshot = StateSnapshot::new(&env, balances, fees, liabilities, orders);
-        assert!(snapshot.balances_match.is_some() == false);
+        assert!(snapshot.balances.is_empty());
     }
 
     #[test]

@@ -118,6 +118,7 @@ pub enum OrderType {
 
 /// Mirrors GMX's Order.Props.
 #[contracttype]
+#[derive(Clone, Debug)]
 pub struct OrderProps {
     pub account: Address,
     pub receiver: Address,
@@ -433,6 +434,12 @@ mod tests {
 pub mod errors;
 pub mod market_state;
 pub mod event_schema;
+pub mod market_config;
+pub mod roles;
+pub mod storage_version;
+pub mod token_support;
+pub mod storage_classification;
+pub mod order_model;
 
 pub use errors::ProtocolError;
 pub use market_state::{MarketState, TransitionAuthority, validate_state_transition};
@@ -445,3 +452,11 @@ pub use event_schema::{
     WithdrawalCreatedEvent, WithdrawalExecutedEvent,
     FundingRateUpdatedEvent, TransactionRejectedEvent,
 };
+pub use token_support::{
+    SafeCustodyLedger, TokenCapability, TokenListingPolicy,
+};
+pub use storage_classification::{
+    filter_renewable_accounts, is_abandoned_zero_balance, should_renew_order,
+    should_renew_trader_balance, StorageTier, TtlConfig,
+};
+pub use order_model::{OrderError, OrderSide, RestingOrder};

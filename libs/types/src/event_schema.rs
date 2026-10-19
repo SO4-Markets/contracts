@@ -11,7 +11,7 @@
 //!   - Topic/data encoding uses compact formats
 //!   - Payload budgets are maintained for each event type
 
-use soroban_sdk::{contracttype, Address};
+use soroban_sdk::{contracttype, Address, BytesN};
 
 // ─── Event Schema Version ─────────────────────────────────────────────────────
 /// Current schema version constant for all events. Increment when event layout changes.
@@ -54,7 +54,7 @@ pub struct MarketStateTransitionEvent {
 #[contracttype]
 pub struct OrderCreatedEvent {
     pub schema_version: u32,
-    pub order_key: [u8; 32],      // order hash/identifier
+    pub order_key: BytesN<32>,      // order hash/identifier
     pub account: Address,
     pub market: Address,
     pub order_type: u32,           // OrderType variant
@@ -74,7 +74,7 @@ pub struct OrderCreatedEvent {
 #[contracttype]
 pub struct OrderExecutedEvent {
     pub schema_version: u32,
-    pub order_key: [u8; 32],
+    pub order_key: BytesN<32>,
     pub account: Address,
     pub market: Address,
     pub execution_price: i128,     // actual execution price
@@ -93,7 +93,7 @@ pub struct OrderExecutedEvent {
 #[contracttype]
 pub struct OrderCancelledEvent {
     pub schema_version: u32,
-    pub order_key: [u8; 32],
+    pub order_key: BytesN<32>,
     pub account: Address,
     pub market: Address,
     pub cancellation_reason: u32,  // 0=user, 1=expired, 2=market_paused, etc.

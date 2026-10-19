@@ -7,7 +7,6 @@
 
 #![no_std]
 
-use gmx_types::{OrderType, OrderProps};
 use soroban_sdk::{Address, Env, Map};
 
 /// Account balance delta for a specific token and trader.
@@ -129,18 +128,16 @@ pub struct InvariantChecker;
 impl InvariantChecker {
     /// Check that balances, fees, and liabilities sum to zero (conservation).
     pub fn check_conservation(
-        env: &Env,
+        _env: &Env,
         balances: &Map<Address, i128>,
         fees: &Map<Address, i128>,
     ) -> Result<(), &'static str> {
         let mut sum: i128 = 0;
-        let mut iter = balances.iter();
-        while let Some((_, balance)) = iter.next() {
+        for (_, balance) in balances.iter() {
             sum = sum.checked_add(balance).ok_or("balance overflow")?;
         }
 
-        let mut fee_iter = fees.iter();
-        while let Some((_, fee)) = fee_iter.next() {
+        for (_, fee) in fees.iter() {
             sum = sum.checked_add(fee).ok_or("fee overflow")?;
         }
 
@@ -153,8 +150,8 @@ impl InvariantChecker {
 
     /// Check that all token movements are tracked.
     pub fn check_accounting_complete(
-        env: &Env,
-        token: &Address,
+        _env: &Env,
+        _token: &Address,
         expected_movements: &[(Address, i128)],
     ) -> Result<(), &'static str> {
         let mut accounted: i128 = 0;
@@ -171,20 +168,20 @@ impl InvariantChecker {
 
     /// Format failure message with account, token, and amount details.
     pub fn format_invariant_failure(
+        env: &Env,
         reason: &str,
-        account: Option<&Address>,
-        token: Option<&Address>,
-        amount: Option<i128>,
+        _account: Option<&Address>,
+        _token: Option<&Address>,
+        _amount: Option<i128>,
     ) -> soroban_sdk::String {
-        // Return a string formatted with the reason.
-        // In real implementation, would use proper format macros.
-        soroban_sdk::String::from_str(&soroban_sdk::Env::new(), reason)
+        soroban_sdk::String::from_str(env, reason)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Address as _;
 
     #[test]
     fn bid_taker_invariant_validates() {

@@ -1560,6 +1560,8 @@ dependencies = [
  "order-vault",
  "referral-storage",
  "role-store",
+ "rollback_harness",
+ "settlement_invariants",
  "soroban-sdk",
 ]
 
@@ -1910,6 +1912,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rollback_harness"
+version = "0.1.0"
+dependencies = [
+ "gmx-types",
+ "settlement_invariants",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2086,6 +2097,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "settlement_invariants"
+version = "0.1.0"
+dependencies = [
+ "gmx-math",
+ "gmx-types",
+ "soroban-sdk",
 ]
 
 [[package]]
