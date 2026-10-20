@@ -7,6 +7,9 @@ use soroban_sdk::{Address, Env, i128};
 // ============ #880: Canonical Market Identity ============
 pub mod market_id;
 
+// ============ #881: Typed Atoms, Lots, Ticks, and Sequence Numbers ============
+pub mod units;
+
 // ============ #957: Base and Quote Balance Transfers ============
 #[derive(Clone)]
 pub struct Fill {
