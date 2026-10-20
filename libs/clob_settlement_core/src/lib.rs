@@ -10,6 +10,9 @@ pub mod market_id;
 // ============ #881: Typed Atoms, Lots, Ticks, and Sequence Numbers ============
 pub mod units;
 
+// ============ #882: Checked Tick and Lot to Quote Conversions ============
+pub mod conversion;
+
 // ============ #957: Base and Quote Balance Transfers ============
 #[derive(Clone)]
 pub struct Fill {
