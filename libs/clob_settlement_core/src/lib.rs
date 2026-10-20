@@ -13,6 +13,9 @@ pub mod units;
 // ============ #882: Checked Tick and Lot to Quote Conversions ============
 pub mod conversion;
 
+// ============ #885: Canonical Event Set and Identifier Fields ============
+pub mod events;
+
 // ============ #957: Base and Quote Balance Transfers ============
 #[derive(Clone)]
 pub struct Fill {
