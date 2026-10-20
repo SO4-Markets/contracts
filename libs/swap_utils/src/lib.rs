@@ -10,10 +10,9 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    claimable_fee_amount_key, market_index_token_key, market_long_token_key,
-    market_short_token_key, max_swap_path_length_key,
+    market_index_token_key, market_long_token_key, market_short_token_key, max_swap_path_length_key,
 };
-use gmx_market_utils::apply_delta_to_pool_amount;
+use gmx_market_utils::{apply_delta_to_claimable_fee_amount, apply_delta_to_pool_amount};
 use gmx_pricing_utils::{apply_swap_impact_value, get_swap_output_amount, get_swap_price_impact};
 use gmx_types::{MarketProps, PriceProps};
 use soroban_sdk::{Address, BytesN, Env, Map, Vec};
@@ -101,15 +100,19 @@ fn swap_with_prices(
         env, data_store, caller, market, token_out, price_out, impact_usd,
     );
 
-    // 4. Update pool amounts; track swap fee in claimable_fee_amount_key so
-    //    fee_handler.claim_fees sweeps all fee paths consistently.
+    // 4. Update pool amounts; track swap fee in claimable_fee_amount (per market
+    //    and global total) so fee_handler.claim_fees sweeps all fee paths
+    //    consistently.
     apply_delta_to_pool_amount(env, data_store, caller, market, token_in, amount_in);
     apply_delta_to_pool_amount(env, data_store, caller, market, token_out, -amount_out);
     if fee_amount > 0 {
-        DataStoreClient::new(env, data_store).apply_delta_to_u128(
+        apply_delta_to_claimable_fee_amount(
+            env,
+            data_store,
             caller,
-            &claimable_fee_amount_key(env, &market.market_token, token_out),
-            &fee_amount,
+            &market.market_token,
+            token_out,
+            fee_amount,
         );
     }
 

@@ -282,6 +282,12 @@ mod tests {
             &gmx_keys::claimable_fee_amount_key(&env, &bad_market, &token),
             &bad_claimable,
         );
+        // Accrual moves the global fee total with the per-market ledger.
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::total_claimable_fee_amount_key(&env, &token),
+            &(bad_claimable as i128),
+        );
         ds_c.set_u128(
             &admin,
             &gmx_keys::pool_amount_key(&env, &bad_market, &token),
@@ -294,6 +300,12 @@ mod tests {
             &admin,
             &gmx_keys::claimable_fee_amount_key(&env, &good_market, &token),
             &good_claimable,
+        );
+        // Accrual moves the global fee total with the per-market ledger.
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::total_claimable_fee_amount_key(&env, &token),
+            &(good_claimable as i128),
         );
         ds_c.set_u128(
             &admin,
@@ -376,6 +388,12 @@ mod tests {
                 &admin,
                 &gmx_keys::claimable_fee_amount_key(&env, &market_tk, &token),
                 &fees,
+            );
+            // Accrual moves the global fee total with the per-market ledger.
+            ds_c.apply_delta_to_u128(
+                &admin,
+                &gmx_keys::total_claimable_fee_amount_key(&env, &token),
+                &(fees as i128),
             );
             ds_c.set_u128(
                 &admin,

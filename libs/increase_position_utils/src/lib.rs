@@ -18,11 +18,14 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    account_position_list_key, claimable_fee_amount_key, collateral_sum_key,
-    cumulative_borrowing_factor_key, funding_amount_per_size_key, max_position_size_usd_key,
-    pool_amount_key, position_key, position_list_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET,
+    account_position_list_key, collateral_sum_key, cumulative_borrowing_factor_key,
+    funding_amount_per_size_key, max_position_size_usd_key, pool_amount_key, position_key,
+    position_list_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET,
 };
-use gmx_market_utils::{apply_delta_to_open_interest, apply_delta_to_open_interest_in_tokens};
+use gmx_market_utils::{
+    apply_delta_to_claimable_fee_amount, apply_delta_to_open_interest,
+    apply_delta_to_open_interest_in_tokens,
+};
 use gmx_math::{mul_div_wide, TOKEN_PRECISION};
 use gmx_position_utils::get_position_fees;
 use gmx_pricing_utils::get_execution_price;
@@ -169,11 +172,14 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
     if lp_fee_amount > 0 {
         let pool_key = pool_amount_key(env, &p.market.market_token, p.collateral_token);
         ds.apply_delta_to_u128(p.caller, &pool_key, &lp_fee_amount);
-        // Track claimable fees for claim_fees entrypoint
-        ds.apply_delta_to_u128(
+        // Track claimable fees (per market and global total) for claim_fees
+        apply_delta_to_claimable_fee_amount(
+            env,
+            p.data_store,
             p.caller,
-            &claimable_fee_amount_key(env, &p.market.market_token, p.collateral_token),
-            &lp_fee_amount,
+            &p.market.market_token,
+            p.collateral_token,
+            lp_fee_amount,
         );
     }
     // Net change to the position's collateral: supplied collateral minus all

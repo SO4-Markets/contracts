@@ -405,6 +405,11 @@ fn run_scenarios() -> BTreeMap<&'static str, Metrics> {
             &gmx_keys::claimable_fee_amount_key(env, &w.market_tk, &w.long_tk),
             &fees,
         );
+        ds_c.apply_delta_to_u128(
+            &w.admin,
+            &gmx_keys::total_claimable_fee_amount_key(env, &w.long_tk),
+            &(fees as i128),
+        );
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::pool_amount_key(env, &w.market_tk, &w.long_tk),
@@ -423,6 +428,15 @@ fn run_scenarios() -> BTreeMap<&'static str, Metrics> {
         &soroban_sdk::Vec::from_array(env, [w.market_tk.clone()]),
     );
     out.insert("fees/claim_token_fees", Metrics::of_last_invocation(env));
+
+    fh.reconcile_token_fees(
+        &w.long_tk,
+        &soroban_sdk::Vec::from_array(env, [w.market_tk.clone()]),
+    );
+    out.insert(
+        "fees/reconcile_token_fees",
+        Metrics::of_last_invocation(env),
+    );
 
     out
 }
