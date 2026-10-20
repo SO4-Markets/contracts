@@ -4,6 +4,9 @@
 #![no_std]
 use soroban_sdk::{Address, Env, i128};
 
+// ============ #880: Canonical Market Identity ============
+pub mod market_id;
+
 // ============ #957: Base and Quote Balance Transfers ============
 #[derive(Clone)]
 pub struct Fill {
