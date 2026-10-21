@@ -66,6 +66,9 @@ impl PermissionMap {
     /// Get the required role(s) for an entrypoint.
     /// Returns None if entrypoint is permissionless.
     pub fn required_role(entrypoint: &str) -> Option<Role> {
+        if Self::is_permissionless(entrypoint) {
+            return None;
+        }
         match entrypoint {
             // Market management
             "create_market" => Some(Role::MarketAdmin),
@@ -235,48 +238,26 @@ impl RoleState {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RoleEvent {
-    /// A role was granted to an address.
-    RoleGranted {
-        role: Role,
-        to: Address,
-        by: Address,
-    },
+    /// A role was granted to an address: (role, to, by).
+    RoleGranted(Role, Address, Address),
 
-    /// A role rotation was proposed.
-    RotationProposed {
-        role: Role,
-        from: Address,
-        to: Address,
-        effective_at: u64,
-        by: Address,
-    },
+    /// A role rotation was proposed: (role, from, to, effective_at, by).
+    RotationProposed(Role, Address, Address, u64, Address),
 
-    /// A role rotation was finalized.
-    RotationFinalized {
-        role: Role,
-        from: Address,
-        to: Address,
-        by: Address,
-    },
+    /// A role rotation was finalized: (role, from, to, by).
+    RotationFinalized(Role, Address, Address, Address),
 
-    /// A role rotation was cancelled.
-    RotationCancelled {
-        role: Role,
-        pending: Address,
-        by: Address,
-    },
+    /// A role rotation was cancelled: (role, pending, by).
+    RotationCancelled(Role, Address, Address),
 
-    /// A role was revoked from an address.
-    RoleRevoked {
-        role: Role,
-        from: Address,
-        by: Address,
-    },
+    /// A role was revoked from an address: (role, from, by).
+    RoleRevoked(Role, Address, Address),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::{testutils::Address as _, Env};
 
     #[test]
     fn test_permission_map() {
@@ -304,8 +285,9 @@ mod tests {
 
     #[test]
     fn test_role_state_rotation() {
-        let initial = Address::random(&soroban_sdk::Env::default());
-        let new_holder = Address::random(&soroban_sdk::Env::default());
+        let env = Env::default();
+        let initial = Address::generate(&env);
+        let new_holder = Address::generate(&env);
 
         let mut role_state = RoleState::new(initial.clone());
 
@@ -331,8 +313,9 @@ mod tests {
 
     #[test]
     fn test_role_revocation() {
-        let initial = Address::random(&soroban_sdk::Env::default());
-        let pending = Address::random(&soroban_sdk::Env::default());
+        let env = Env::default();
+        let initial = Address::generate(&env);
+        let pending = Address::generate(&env);
 
         let mut role_state = RoleState::new(initial.clone());
         role_state.propose_rotation(pending.clone(), 100, 0);

@@ -307,3 +307,7 @@ gaps:
 Adding those mechanisms changes runtime behavior and rent costs and should be a
 separate, tested contract change rather than being smuggled into a documentation
 issue.
+
+## CLOB Storage Classification & TTL Extension Policy
+
+For the Central Limit Order Book (CLOB) engine, storage entries and TTL extension thresholds are formally classified into three tiers (Permanent-Critical, Live-While-Active, and Disposable/Indexable). See [CLOB Storage Classification](clob-storage-classification.md) (`docs/clob-storage-classification.md`) for full specification of renewal responsibilities, archive/restore handling, and zero-balance account non-renewal rules (Issues #915 and #916).

@@ -98,6 +98,9 @@ impl Rng {
         self.next_u64() % n
     }
     fn range(&mut self, lo: u128, hi: u128) -> u128 {
+        if hi <= lo {
+            return lo;
+        }
         lo + u128::from(self.next_u64()) % (hi - lo + 1)
     }
     fn trader(&mut self) -> usize {

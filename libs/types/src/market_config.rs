@@ -46,7 +46,7 @@ impl MarketConfig {
         if price == 0 {
             return Err("Price must be non-zero");
         }
-        if price % self.tick_size != 0 {
+        if !price.is_multiple_of(self.tick_size) {
             return Err("Price not aligned to tick size");
         }
         Ok(())
@@ -57,7 +57,7 @@ impl MarketConfig {
         if amount == 0 {
             return Err("Amount must be non-zero");
         }
-        if amount % self.base_lot_size != 0 {
+        if !amount.is_multiple_of(self.base_lot_size) {
             return Err("Amount not aligned to lot size");
         }
         Ok(())

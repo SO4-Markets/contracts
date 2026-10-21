@@ -118,6 +118,7 @@ pub enum OrderType {
 
 /// Mirrors GMX's Order.Props.
 #[contracttype]
+#[derive(Clone, Debug)]
 pub struct OrderProps {
     pub account: Address,
     pub receiver: Address,
