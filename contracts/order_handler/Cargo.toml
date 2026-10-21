@@ -1,0 +1,43 @@
+[package]
+name = "order-handler"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+soroban-sdk                  = { workspace = true }
+gmx-types                    = { path = "../../libs/types" }
+gmx-math                     = { path = "../../libs/math" }
+gmx-keys                     = { path = "../../libs/keys" }
+gmx-market-utils             = { path = "../../libs/market_utils" }
+gmx-position-utils           = { path = "../../libs/position_utils" }
+gmx-pricing-utils            = { path = "../../libs/pricing_utils" }
+gmx-swap-utils               = { path = "../../libs/swap_utils" }
+gmx-increase-position-utils  = { path = "../../libs/increase_position_utils" }
+gmx-decrease-position-utils  = { path = "../../libs/decrease_position_utils" }
+
+[dev-dependencies]
+soroban-sdk       = { workspace = true, features = ["testutils"] }
+role-store        = { path = "../role_store" }
+data-store        = { path = "../data_store" }
+oracle            = { path = "../oracle", features = ["testutils"] }
+order-vault       = { path = "../order_vault" }
+deposit-vault     = { path = "../deposit_vault" }
+deposit-handler   = { path = "../deposit_handler" }
+market-token      = { path = "../market_token" }
+market-factory    = { path = "../market_factory" }
+referral-storage  = { path = "../referral_storage" }
+gmx-types         = { path = "../../libs/types" }
+gmx-keys          = { path = "../../libs/keys" }
+gmx-math          = { path = "../../libs/math" }
+settlement_invariants = { path = "../../libs/settlement_invariants" }
+rollback_harness  = { path = "../../libs/rollback_harness" }
+criterion         = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "order_execution"
+harness = false

@@ -1,0 +1,18 @@
+[package]
+name = "role-store"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+gmx-types = { path = "../../libs/types" }
+gmx-math = { path = "../../libs/math" }
+gmx-keys = { path = "../../libs/keys" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

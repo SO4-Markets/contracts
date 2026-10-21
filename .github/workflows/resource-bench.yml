@@ -1,0 +1,93 @@
+name: Resource Benchmarks
+
+# Resource regression gate (#1064): deterministic Soroban metering for core
+# flows, compared against docs/benchmarks/resource-baseline.json.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "contracts/**"
+      - "libs/**"
+      - "tests/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "docs/benchmarks/**"
+      - "scripts/bench_compare.py"
+      - "scripts/test_bench_compare.py"
+      - ".github/workflows/resource-bench.yml"
+  push:
+    branches: [main]
+    paths:
+      - "contracts/**"
+      - "libs/**"
+      - "tests/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "docs/benchmarks/**"
+      - "scripts/bench_compare.py"
+      - "scripts/test_bench_compare.py"
+      - ".github/workflows/resource-bench.yml"
+  schedule:
+    - cron: "0 6 * * 1" # weekly trend run
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  resource-bench:
+    name: resource regression report
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
+
+      - name: Unit-test the compare script
+        run: python3 scripts/test_bench_compare.py
+
+      # Baseline updates must carry an explicit rationale.
+      - name: Check baseline changes carry a rationale
+        if: github.event_name == 'pull_request'
+        run: |
+          base_file="$RUNNER_TEMP/base-baseline.json"
+          if ! git show "origin/${{ github.base_ref }}:docs/benchmarks/resource-baseline.json" > "$base_file" 2>/dev/null; then
+            rm -f "$base_file"
+          fi
+          python3 scripts/bench_compare.py check-rationale --base "$base_file" --head docs/benchmarks/resource-baseline.json
+
+      - name: Run resource benchmarks
+        run: |
+          mkdir -p target/bench
+          RESOURCE_BENCH_OUT="$PWD/target/bench/resource-bench.json" cargo test -p gmx-integration-tests --test resource_bench
+
+      - name: Compare against baseline
+        run: |
+          python3 scripts/bench_compare.py compare \
+            --baseline docs/benchmarks/resource-baseline.json \
+            --current target/bench/resource-bench.json \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resource-bench
+          path: target/bench/resource-bench.json
+          if-no-files-found: ignore

@@ -1,0 +1,216 @@
+name: CI
+
+# Core build/test gate (#1057). Runs on every PR into main and every push to
+# main: two individually-green PRs can still combine into a broken main, and a
+# broken main must leave a visible failing run. Replaces lint.yml, test.yml and
+# wasm-size.yml; the size budget lives in the wasm-size job below.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # Supersede stale PR runs, but never cancel a run on main: every push to
+  # main must finish with a pass/fail result.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable + rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (all targets)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable + clippy + wasm32v1-none
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          # tests/router_and_factory_coverage.rs embeds market_token.wasm.
+          targets: wasm32v1-none
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-clippy-
+
+      - name: Build WASM fixtures used by tests
+        run: make test-wasm
+
+      # --all-targets: without it, #[cfg(test)] modules and tests/ are never
+      # compiled, and test code silently rots while lint stays green.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  build:
+    name: build contracts (wasm32v1-none)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable + wasm32v1-none
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-
+
+      # Every contract in mx/common.mk CONTRACTS, for the deploy target.
+      # Contract-macro limits (e.g. 32-char function names) are only enforced
+      # here, not by `cargo check` / `cargo test`.
+      - name: Build deployable contracts
+        run: make build-wasm
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable + wasm32v1-none
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
+      # Builds the WASM fixtures, then `cargo test --workspace`. A test target
+      # that fails to compile or a failing test fails this job.
+      - name: make test
+        run: make test
+
+  # Blocks a PR whose contracts grow past the budget in scripts/wasm-size-check.py.
+  # On push to main there is no base to compare with, so sizes are only reported.
+  wasm-size:
+    name: Build & check WASM sizes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so the PR base branch can be added as a worktree.
+          fetch-depth: 0
+
+      - name: Install Rust stable + wasm32v1-none
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-size-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-size-
+
+      - name: Install wasm-opt
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y binaryen
+
+      # Optimised copies go to a directory outside the tree, so the base build
+      # below cannot overwrite them.
+      - name: Build PR contracts
+        run: |
+          cargo build --target wasm32v1-none --release
+          mkdir -p "$RUNNER_TEMP/wasm-head"
+          for f in target/wasm32v1-none/release/*.wasm; do
+            wasm-opt -O3 -o "$RUNNER_TEMP/wasm-head/$(basename "$f")" "$f"
+          done
+
+      - name: Build base contracts
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git worktree add "$RUNNER_TEMP/base" "origin/$BASE_REF"
+          cd "$RUNNER_TEMP/base"
+          cargo build --target wasm32v1-none --release
+          mkdir -p "$RUNNER_TEMP/wasm-base"
+          for f in target/wasm32v1-none/release/*.wasm; do
+            wasm-opt -O3 -o "$RUNNER_TEMP/wasm-base/$(basename "$f")" "$f"
+          done
+
+      - name: Check size budget
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 scripts/wasm-size-check.py "$RUNNER_TEMP/wasm-head" "$RUNNER_TEMP/wasm-base"
+          else
+            python3 scripts/wasm-size-check.py "$RUNNER_TEMP/wasm-head"
+          fi
+
+  # Single status to mark as required in branch protection: it is red unless
+  # every job above succeeded (a skipped or cancelled job counts as failure).
+  ci-passed:
+    name: CI passed
+    if: always()
+    needs: [fmt, clippy, build, test, wasm-size]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every CI job to succeed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" != "success" ]; then
+              echo "::error::a required CI job finished with '$r'"
+              exit 1
+            fi
+          done

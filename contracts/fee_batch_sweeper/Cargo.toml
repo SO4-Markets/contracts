@@ -1,0 +1,20 @@
+[package]
+name = "fee-batch-sweeper"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+fee-handler = { path = "../fee_handler" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+gmx-keys = { path = "../../libs/keys" }
+role-store = { path = "../role_store" }
+data-store = { path = "../data_store" }
+market-token = { path = "../market_token" }

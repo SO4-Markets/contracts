@@ -1,0 +1,17 @@
+[package]
+name = "referral-storage"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+gmx-keys    = { path = "../../libs/keys" }
+gmx-math    = { path = "../../libs/math" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

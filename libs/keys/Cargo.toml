@@ -1,0 +1,14 @@
+[package]
+name = "gmx-keys"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[lib]
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

@@ -1,0 +1,247 @@
+{
+  "schema": 1,
+  "meta": {
+    "rationale": "Global per-token fee ledger (#971): claim_fees and claim_token_fees now read and write total_claimable_fee_amount(token) alongside the per-market entry (+1 read, +1 write; claim_token_fees also sums accrued balances for its aggregate bound). Add fees/reconcile_token_fees. Other scenarios unchanged. Recorded from CI run 39360901483 (ubuntu, soroban-sdk 25.3.1).",
+    "updated": "2026-10-20"
+  },
+  "thresholds": {
+    "instructions": {
+      "pct": 2.0,
+      "abs": 10000
+    },
+    "mem_bytes": {
+      "pct": 2.0,
+      "abs": 10000
+    },
+    "disk_read_entries": {
+      "pct": 0.0,
+      "abs": 0
+    },
+    "memory_read_entries": {
+      "pct": 0.0,
+      "abs": 0
+    },
+    "write_entries": {
+      "pct": 0.0,
+      "abs": 0
+    },
+    "disk_read_bytes": {
+      "pct": 5.0,
+      "abs": 64
+    },
+    "write_bytes": {
+      "pct": 5.0,
+      "abs": 64
+    },
+    "contract_events_size_bytes": {
+      "pct": 5.0,
+      "abs": 32
+    },
+    "fee_total_stroops": {
+      "pct": 2.0,
+      "abs": 1000
+    }
+  },
+  "bounded_constants": {
+    "MAX_BATCH_CLAIM_SIZE": {
+      "file": "contracts/fee_batch_sweeper/src/lib.rs",
+      "value": 20
+    },
+    "MAX_CLEAR_PRICES_BATCH_SIZE": {
+      "file": "contracts/oracle/src/lib.rs",
+      "value": 20
+    },
+    "MAX_MULTICALL_BATCH_SIZE": {
+      "file": "contracts/exchange_router/src/lib.rs",
+      "value": 20
+    },
+    "MAX_ORDER_BATCH_SIZE": {
+      "file": "contracts/order_handler/src/lib.rs",
+      "value": 5
+    },
+    "MAX_POW_FACTOR_WHOLE_EXPONENT": {
+      "file": "libs/math/src/lib.rs",
+      "value": 10
+    },
+    "MAX_PRICE_BATCH_SIZE": {
+      "file": "contracts/oracle/src/lib.rs",
+      "value": 20
+    },
+    "MAX_REFERRAL_CODE_LENGTH": {
+      "file": "contracts/referral_storage/src/lib.rs",
+      "value": 20
+    },
+    "MAX_STATS_MARKETS": {
+      "file": "contracts/reader/src/lib.rs",
+      "value": 20
+    },
+    "MAX_SWAP_PATH_LENGTH": {
+      "file": "libs/swap_utils/src/lib.rs",
+      "value": 5
+    },
+    "MAX_TOKEN_FEE_MARKETS": {
+      "file": "contracts/fee_handler/src/lib.rs",
+      "value": 20
+    },
+    "PERSISTENT_BUMP_TARGET": {
+      "file": "libs/keys/src/lib.rs",
+      "value": 518400
+    }
+  },
+  "scenarios": {
+    "bounds/create_orders_max_batch": {
+      "instructions": 2918225,
+      "mem_bytes": 561774,
+      "disk_read_entries": 0,
+      "memory_read_entries": 17,
+      "write_entries": 9,
+      "disk_read_bytes": 0,
+      "write_bytes": 4884,
+      "contract_events_size_bytes": 1380,
+      "fee_total_stroops": 3577120
+    },
+    "fees/claim_fees": {
+      "instructions": 1168169,
+      "mem_bytes": 251695,
+      "disk_read_entries": 1,
+      "memory_read_entries": 16,
+      "write_entries": 6,
+      "disk_read_bytes": 92,
+      "write_bytes": 940,
+      "contract_events_size_bytes": 700,
+      "fee_total_stroops": 2050514
+    },
+    "fees/claim_token_fees": {
+      "instructions": 1260465,
+      "mem_bytes": 263820,
+      "disk_read_entries": 0,
+      "memory_read_entries": 16,
+      "write_entries": 6,
+      "disk_read_bytes": 0,
+      "write_bytes": 940,
+      "contract_events_size_bytes": 904,
+      "fee_total_stroops": 1389086
+    },
+    "fees/reconcile_token_fees": {
+      "instructions": 310170,
+      "mem_bytes": 61110,
+      "disk_read_entries": 0,
+      "memory_read_entries": 7,
+      "write_entries": 0,
+      "disk_read_bytes": 0,
+      "write_bytes": 0,
+      "contract_events_size_bytes": 0,
+      "fee_total_stroops": 776
+    },
+    "fees/set_fee_receiver": {
+      "instructions": 103444,
+      "mem_bytes": 28084,
+      "disk_read_entries": 0,
+      "memory_read_entries": 3,
+      "write_entries": 2,
+      "disk_read_bytes": 0,
+      "write_bytes": 512,
+      "contract_events_size_bytes": 176,
+      "fee_total_stroops": 1324611
+    },
+    "fees/set_market_fee_receiver": {
+      "instructions": 129327,
+      "mem_bytes": 38519,
+      "disk_read_entries": 0,
+      "memory_read_entries": 4,
+      "write_entries": 2,
+      "disk_read_bytes": 0,
+      "write_bytes": 248,
+      "contract_events_size_bytes": 212,
+      "fee_total_stroops": 1830717
+    },
+    "lifecycle/create_deposit": {
+      "instructions": 1789986,
+      "mem_bytes": 405459,
+      "disk_read_entries": 2,
+      "memory_read_entries": 25,
+      "write_entries": 11,
+      "disk_read_bytes": 184,
+      "write_bytes": 2420,
+      "contract_events_size_bytes": 712,
+      "fee_total_stroops": 5808028
+    },
+    "lifecycle/create_order_decrease": {
+      "instructions": 802274,
+      "mem_bytes": 218118,
+      "disk_read_entries": 0,
+      "memory_read_entries": 13,
+      "write_entries": 5,
+      "disk_read_bytes": 0,
+      "write_bytes": 1364,
+      "contract_events_size_bytes": 276,
+      "fee_total_stroops": 3939583
+    },
+    "lifecycle/create_order_increase": {
+      "instructions": 1014150,
+      "mem_bytes": 268306,
+      "disk_read_entries": 0,
+      "memory_read_entries": 17,
+      "write_entries": 6,
+      "disk_read_bytes": 0,
+      "write_bytes": 1512,
+      "contract_events_size_bytes": 276,
+      "fee_total_stroops": 4756144
+    },
+    "lifecycle/create_withdrawal": {
+      "instructions": 1227929,
+      "mem_bytes": 385414,
+      "disk_read_entries": 0,
+      "memory_read_entries": 18,
+      "write_entries": 8,
+      "disk_read_bytes": 0,
+      "write_bytes": 1540,
+      "contract_events_size_bytes": 400,
+      "fee_total_stroops": 2505273
+    },
+    "lifecycle/execute_deposit": {
+      "instructions": 2732541,
+      "mem_bytes": 570820,
+      "disk_read_entries": 2,
+      "memory_read_entries": 34,
+      "write_entries": 14,
+      "disk_read_bytes": 184,
+      "write_bytes": 2068,
+      "contract_events_size_bytes": 828,
+      "fee_total_stroops": 3695803
+    },
+    "lifecycle/execute_order_decrease": {
+      "instructions": 6453952,
+      "mem_bytes": 1433690,
+      "disk_read_entries": 0,
+      "memory_read_entries": 47,
+      "write_entries": 19,
+      "disk_read_bytes": 0,
+      "write_bytes": 2184,
+      "contract_events_size_bytes": 1444,
+      "fee_total_stroops": 3281191
+    },
+    "lifecycle/execute_order_increase": {
+      "instructions": 4974076,
+      "mem_bytes": 1152312,
+      "disk_read_entries": 0,
+      "memory_read_entries": 46,
+      "write_entries": 17,
+      "disk_read_bytes": 0,
+      "write_bytes": 2796,
+      "contract_events_size_bytes": 1320,
+      "fee_total_stroops": 7030323
+    },
+    "lifecycle/execute_withdrawal": {
+      "instructions": 4157671,
+      "mem_bytes": 871960,
+      "disk_read_entries": 0,
+      "memory_read_entries": 41,
+      "write_entries": 14,
+      "disk_read_bytes": 0,
+      "write_bytes": 2064,
+      "contract_events_size_bytes": 1348,
+      "fee_total_stroops": 1547958
+    }
+  }
+}

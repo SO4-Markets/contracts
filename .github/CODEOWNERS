@@ -1,0 +1,11 @@
+# Every change needs review from a code owner. Enable "Require review from
+# Code Owners" in branch protection for `main` to enforce this.
+*                       @SO4-Markets/maintainers
+
+# Fund-holding and privileged contracts
+/contracts/             @SO4-Markets/maintainers
+/libs/                  @SO4-Markets/maintainers
+
+# CI, security policy and ownership rules themselves
+/.github/               @SO4-Markets/maintainers
+/SECURITY.md            @SO4-Markets/maintainers
