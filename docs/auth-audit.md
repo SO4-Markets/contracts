@@ -263,26 +263,29 @@ File: `contracts/fee_handler/src/lib.rs`
 
 | Function | Expected Auth | Status | Notes |
 |---|---|---|---|
-| `initialize` | caller/admin/keeper | ✅ PASS | line 373, before state change |
-| `claimable_fees` | read-only | ➖ N/A | line 392, read-only |
-| `claim_fees` | caller/admin/keeper | ✅ PASS | line 417, before state change |
-| `claimable_fees_by_token` | read-only | ➖ N/A | line 434, read-only |
-| `claim_token_fees` | caller/admin/keeper | ✅ PASS | line 465, before state change |
-| `get_fee_receiver` | read-only | ➖ N/A | line 498, read-only |
-| `get_protocol_fee_receiver` | read-only | ➖ N/A | line 503, read-only |
-| `get_market_fee_receiver` | read-only | ➖ N/A | line 508, read-only |
-| `set_fee_receiver` | caller/admin/keeper | ✅ PASS | line 515, before state change |
-| `set_market_fee_receiver` | caller/admin/keeper | ✅ PASS | line 535, before state change |
-| `set_auto_compound` | caller/admin/keeper | ✅ PASS | line 567, before state change |
-| `is_auto_compound` | read-only | ➖ N/A | line 587, read-only |
-| `record_fee_accrual` | caller/admin/keeper | ✅ PASS | line 598, before state change |
-| `upgrade` | caller/admin/keeper | ✅ PASS | line 628, before state change |
-| `claimable_ui_fees` | read-only | ➖ N/A | line 641, read-only |
-| `accrue_ui_fee` | caller/admin/keeper | ✅ PASS | line 662, before state change |
-| `claim_ui_fees` | caller/admin/keeper | ✅ PASS | line 710, before state change |
-| `claim_funding_fees` | caller/admin/keeper | ✅ PASS | line 753, before state change |
-| `get_ui_fee_factor` | read-only | ➖ N/A | line 796, read-only |
-| `set_ui_fee_factor` | caller/admin/keeper | ✅ PASS | line 809, before state change |
+| `initialize` | caller/admin/keeper | ✅ PASS | line 435, before state change |
+| `claimable_fees` | read-only | ➖ N/A | line 454, read-only |
+| `claim_fees` | caller/admin/keeper | ✅ PASS | line 479, before state change |
+| `claimable_fees_by_token` | read-only | ➖ N/A | line 496, read-only |
+| `claim_token_fees` | caller/admin/keeper | ✅ PASS | line 527, before state change |
+| `total_claimable_fees` | read-only | ➖ N/A | line 573, read-only |
+| `reconcile_token_fees` | read-only | ➖ N/A | line 583, read-only |
+| `backfill_fee_total` | caller/admin/keeper | ✅ PASS | line 628, before state change |
+| `get_fee_receiver` | read-only | ➖ N/A | line 663, read-only |
+| `get_protocol_fee_receiver` | read-only | ➖ N/A | line 668, read-only |
+| `get_market_fee_receiver` | read-only | ➖ N/A | line 673, read-only |
+| `set_fee_receiver` | caller/admin/keeper | ✅ PASS | line 680, before state change |
+| `set_market_fee_receiver` | caller/admin/keeper | ✅ PASS | line 700, before state change |
+| `set_auto_compound` | caller/admin/keeper | ✅ PASS | line 732, before state change |
+| `is_auto_compound` | read-only | ➖ N/A | line 752, read-only |
+| `record_fee_accrual` | caller/admin/keeper | ✅ PASS | line 763, before state change |
+| `upgrade` | caller/admin/keeper | ✅ PASS | line 796, before state change |
+| `claimable_ui_fees` | read-only | ➖ N/A | line 809, read-only |
+| `accrue_ui_fee` | caller/admin/keeper | ✅ PASS | line 830, before state change |
+| `claim_ui_fees` | caller/admin/keeper | ✅ PASS | line 878, before state change |
+| `claim_funding_fees` | caller/admin/keeper | ✅ PASS | line 921, before state change |
+| `get_ui_fee_factor` | read-only | ➖ N/A | line 964, read-only |
+| `set_ui_fee_factor` | caller/admin/keeper | ✅ PASS | line 977, before state change |
 
 ---
 
@@ -524,7 +527,7 @@ File: `contracts/test_token/src/lib.rs`
 
 | Total public functions audited | Auth-bearing | Read-only (N/A) | PASS | FAIL |
 |---|---|---|---|---|
-| 292 | 167 | 125 | **167** | **0** |
+| 295 | 168 | 127 | **168** | **0** |
 
 All `require_auth` call-sites fire **before** any storage read or write that could be influenced by the caller's identity. No failures were identified. No linked bug issues are raised.
 

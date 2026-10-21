@@ -318,6 +318,26 @@ The Make wrapper performs the same operation using `.deployed/testnet.env`:
 make upgrade-contract CONTRACT=order_handler NETWORK="$NETWORK" SOURCE="$SOURCE"
 ```
 
+### Upgrading to the global fee ledger
+
+`fee_handler` now keeps `total_claimable_fee_amount(token)` equal to the sum of
+the per-market fee ledgers, and claims revert with `FeeLedgerMismatch` if the
+global total does not cover them. Fees accrued by older code are only in the
+per-market ledgers, so upgrade in this order:
+
+1. Upgrade `fee_handler`.
+2. For each fee token, call
+   `backfill_fee_total --token <TOKEN> --markets '[<MARKET>, ...]'` (admin;
+   at most 20 markets per call; repeat calls skip markets already added).
+3. Upgrade the contracts that accrue fees: `order_handler` and
+   `liquidation_handler`. `adl_handler` is not upgradeable, so redeploy it and
+   re-grant its roles.
+4. Check `reconcile_token_fees --token <TOKEN> --markets '[...]'` returns
+   `reconciled: true`.
+
+Don't backfill a market after step 3. Its ledger would already be counted, so
+backfilling it would overstate the global total.
+
 Currently upgradeable contracts are `oracle`, `market_factory`,
 `deposit_handler`, `withdrawal_handler`, `order_handler`,
 `liquidation_handler`, `fee_handler`, `referral_storage`, `reader`, and

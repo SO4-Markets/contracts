@@ -323,4 +323,46 @@ fn token_level_sweep_pays_each_market_from_its_own_pool() {
         .try_claim_token_fees(&w.fee_keeper, &w.short_tk, &pair(&w, &market_a, &market_a))
         .is_err());
     assert_eq!(fh.claimable_fees(&market_a, &w.short_tk), fee_a);
+    assert_eq!(fh.total_claimable_fees(&w.short_tk), fee_a);
+}
+
+/// Settlement keeps the global fee total for the shared token equal to the
+/// sum of the per-market ledgers, and the reconciliation API agrees with
+/// custody and pool accounting before and after the token-level sweep.
+#[test]
+fn global_fee_total_reconciles_with_markets_through_settlement_and_sweep() {
+    let w = setup();
+    let fh = FHClient::new(&w.env, &w.fee_handler);
+    let market_a = add_market(&w, "GMA");
+    let market_b = add_market(&w, "GMB");
+    let both = pair(&w, &market_a, &market_b);
+
+    open_short(&w, &market_a, 8_000);
+    open_short(&w, &market_b, 4_000);
+    let fee_a = fh.claimable_fees(&market_a, &w.short_tk);
+    let fee_b = fh.claimable_fees(&market_b, &w.short_tk);
+    assert!(fee_a > 0 && fee_b > 0);
+
+    assert_eq!(fh.total_claimable_fees(&w.short_tk), fee_a + fee_b);
+    let rec = fh.reconcile_token_fees(&w.short_tk, &both);
+    assert!(rec.reconciled);
+    assert_eq!(rec.ledger_total, fee_a + fee_b);
+    assert_eq!(rec.markets_total, fee_a + fee_b);
+    for row in rec.markets.iter() {
+        assert!(row.backed);
+        assert!(row.pool_amount >= row.claimable);
+    }
+
+    // Omitting a market shows the shortfall instead of a false balance.
+    let partial =
+        fh.reconcile_token_fees(&w.short_tk, &Vec::from_array(&w.env, [market_a.clone()]));
+    assert!(!partial.reconciled);
+    assert_eq!(partial.ledger_total - partial.markets_total, fee_b);
+
+    let swept = fh.claim_token_fees(&w.fee_keeper, &w.short_tk, &both);
+    assert_eq!(swept.total, fee_a + fee_b);
+    assert_eq!(fh.total_claimable_fees(&w.short_tk), 0);
+    let rec = fh.reconcile_token_fees(&w.short_tk, &both);
+    assert!(rec.reconciled);
+    assert_eq!((rec.ledger_total, rec.markets_total), (0, 0));
 }

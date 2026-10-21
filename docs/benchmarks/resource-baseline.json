@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "meta": {
-    "rationale": "Add fees/claim_token_fees (token-level fee sweep with per-market attribution, #970) and bound MAX_TOKEN_FEE_MARKETS = 20; all existing scenarios unchanged. Recorded locally with soroban-sdk 25.3.1 (existing scenarios match CI run 39335378079 exactly).",
+    "rationale": "Global per-token fee ledger (#971): claim_fees and claim_token_fees now read and write total_claimable_fee_amount(token) alongside the per-market entry (+1 read, +1 write; claim_token_fees also sums accrued balances for its aggregate bound). Add fees/reconcile_token_fees. Other scenarios unchanged. Recorded from CI run 39360901483 (ubuntu, soroban-sdk 25.3.1).",
     "updated": "2026-10-20"
   },
   "thresholds": {
@@ -101,26 +101,37 @@
       "fee_total_stroops": 3577120
     },
     "fees/claim_fees": {
-      "instructions": 994709,
-      "mem_bytes": 212081,
+      "instructions": 1168169,
+      "mem_bytes": 251695,
       "disk_read_entries": 1,
-      "memory_read_entries": 15,
-      "write_entries": 5,
+      "memory_read_entries": 16,
+      "write_entries": 6,
       "disk_read_bytes": 92,
-      "write_bytes": 800,
+      "write_bytes": 940,
       "contract_events_size_bytes": 700,
-      "fee_total_stroops": 2033352
+      "fee_total_stroops": 2050514
     },
     "fees/claim_token_fees": {
-      "instructions": 964590,
-      "mem_bytes": 198923,
+      "instructions": 1260465,
+      "mem_bytes": 263820,
       "disk_read_entries": 0,
-      "memory_read_entries": 15,
-      "write_entries": 5,
+      "memory_read_entries": 16,
+      "write_entries": 6,
       "disk_read_bytes": 0,
-      "write_bytes": 800,
+      "write_bytes": 940,
       "contract_events_size_bytes": 904,
-      "fee_total_stroops": 1371618
+      "fee_total_stroops": 1389086
+    },
+    "fees/reconcile_token_fees": {
+      "instructions": 310170,
+      "mem_bytes": 61110,
+      "disk_read_entries": 0,
+      "memory_read_entries": 7,
+      "write_entries": 0,
+      "disk_read_bytes": 0,
+      "write_bytes": 0,
+      "contract_events_size_bytes": 0,
+      "fee_total_stroops": 776
     },
     "fees/set_fee_receiver": {
       "instructions": 103444,

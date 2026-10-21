@@ -193,6 +193,29 @@ token (e.g. every `*/USDC` market). The topology is market-scoped for both custo
   and `total` uses checked addition (`FeeOverflow`, #11).
 - `reader::get_protocol_stats` rejects duplicate markets for the same reason (`DuplicateMarket`, #6).
 
+**Treasury reconciliation (global total vs sub-ledgers):** `total_claimable_fee_amount(token)` is the
+protocol's global fee liability in `token`. It always equals the sum of
+`claimable_fee_amount(market, token)` over every market:
+
+- Accrual: every fee path (`increase_position_utils`, `decrease_position_utils`, `swap_utils`,
+  `fee_handler::record_fee_accrual`) moves the per-market entry and the global total in the same
+  call. The three settlement paths share one implementation,
+  `gmx_market_utils::apply_delta_to_claimable_fee_amount`.
+- Claims: `claim_fees` and `claim_token_fees` release the transferred amount from the global total
+  in the same call as the per-market entry. A claim larger than the global total reverts with
+  `FeeLedgerMismatch` (#12), so a per-market entry the global ledger does not cover can never be
+  withdrawn.
+- Aggregate bound: `claim_token_fees` also checks that its total withdrawal is at most the listed
+  markets' summed accrued balances and at most the global total (`ExceedsAccruedFees`, #13).
+
+| Entrypoint | Auth | Behaviour |
+|---|---|---|
+| `total_claimable_fees(token)` | none (view) | The global total. |
+| `reconcile_token_fees(token, markets)` | none (view) | `FeeReconciliation { token, ledger_total, markets_total, reconciled, markets: [MarketFeeReconciliation { market, claimable, pool_amount, custody, backed }] }`. `backed` is `claimable <= pool_amount && claimable <= custody`; `reconciled` holds when every listed market is backed and `markets_total == ledger_total`. Pass every market that accrues `token`: a missing market shows up as `ledger_total > markets_total`. |
+| `backfill_fee_total(token, markets)` | stored admin | Upgrade migration: adds each listed `(market, token)` ledger accrued before the global total existed, at most once per pair (`fee_bkfl` `FeeTotalBackfilled { market, token, amount, total }`). |
+
+All three reject duplicate markets and accept at most `MAX_TOKEN_FEE_MARKETS` (20).
+
 **Risk:** NONE — correct CEI ordering; destination is trusted configuration only.
 
 ---

@@ -5,8 +5,8 @@
 
 use gmx_keys::{
     auto_compound_fees_key, claimable_fee_amount_key, claimable_funding_amount_key,
-    claimable_ui_fee_amount_key, pool_amount_key, roles, ui_fee_factor_key, MIN_BUMP_THRESHOLD,
-    PERSISTENT_BUMP_TARGET,
+    claimable_ui_fee_amount_key, pool_amount_key, roles, total_claimable_fee_amount_key,
+    ui_fee_factor_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET,
 };
 use gmx_math::FLOAT_PRECISION;
 use soroban_sdk::{
@@ -36,6 +36,9 @@ enum InstanceKey {
 #[contracttype]
 enum PersistentKey {
     MarketFeeReceiver(Address),
+    /// Set once `backfill_fee_total` has added `(market, token)`'s pre-upgrade
+    /// ledger into the global total, so it can never be added twice.
+    FeeTotalBackfilled(Address, Address),
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -66,6 +69,13 @@ pub enum Error {
     DuplicateMarket = 10,
     /// Summing per-market fee ledgers overflowed `u128`.
     FeeOverflow = 11,
+    /// A claim would release more than the global
+    /// `total_claimable_fee_amount(token)`, so the global ledger no longer covers
+    /// the per-market ledgers (e.g. a pre-upgrade ledger not yet backfilled).
+    FeeLedgerMismatch = 12,
+    /// A token-level sweep would withdraw more than the listed markets had
+    /// accrued.
+    ExceedsAccruedFees = 13,
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -86,6 +96,37 @@ pub struct TokenFeeAttribution {
     pub token: Address,
     pub total: u128,
     pub markets: Vec<MarketFeeAmount>,
+}
+
+/// One market's row in a treasury reconciliation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketFeeReconciliation {
+    pub market: Address,
+    /// `claimable_fee_amount(market, token)`.
+    pub claimable: u128,
+    /// `pool_amount(market, token)`: the pool accounting that must back it.
+    pub pool_amount: u128,
+    /// The token balance the market pool actually holds.
+    pub custody: i128,
+    /// `claimable <= pool_amount` and `claimable <= custody`.
+    pub backed: bool,
+}
+
+/// Global fee liability in one token compared with the per-market sub-ledgers.
+/// `reconciled` holds when the listed markets sum exactly to the global ledger
+/// and each is backed, i.e. the list is the complete set of markets accruing
+/// `token` and nothing is double counted or missing.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeReconciliation {
+    pub token: Address,
+    /// `total_claimable_fee_amount(token)`.
+    pub ledger_total: u128,
+    /// Checked sum of `markets[i].claimable`.
+    pub markets_total: u128,
+    pub reconciled: bool,
+    pub markets: Vec<MarketFeeReconciliation>,
 }
 
 // ─── External clients ─────────────────────────────────────────────────────────
@@ -189,6 +230,17 @@ pub struct TokenFeesClaimed {
     pub token: Address,
     pub total: u128,
     pub market_count: u32,
+}
+
+/// Emitted by `backfill_fee_total` for each pre-upgrade ledger added to the
+/// global total.
+#[contractevent(topics = ["fee_bkfl"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeTotalBackfilled {
+    pub market: Address,
+    pub token: Address,
+    pub amount: u128,
+    pub total: u128,
 }
 
 #[contractevent(topics = ["fee_acc"])]
@@ -338,6 +390,16 @@ fn claim_market_fees(env: &Env, ds: &DataStoreClient, market: &Address, token: &
         return 0;
     }
 
+    // Release the same amount from the global ledger, so it keeps equalling
+    // the sum of the per-market ledgers. A shortfall means the global ledger
+    // does not cover this market's entry: reject rather than let it drift.
+    let total_key = total_claimable_fee_amount_key(env, token);
+    let total = ds.get_u128(&total_key);
+    if transfer_amount > total {
+        panic_with_error!(env, Error::FeeLedgerMismatch);
+    }
+    ds.set_u128(&handler, &total_key, &(total - transfer_amount));
+
     // Transfer from market_token pool to receiver
     MarketTokenClient::new(env, market).withdraw_from_pool(
         &handler,
@@ -473,12 +535,24 @@ impl FeeHandler {
         require_fee_keeper_role(&env, &keeper);
         require_distinct_markets(&env, &markets);
         let ds = DataStoreClient::new(&env, &data_store(&env));
+        let ledger_before = ds.get_u128(&total_claimable_fee_amount_key(&env, &token));
+        let mut accrued_before = 0u128;
         let mut total = 0u128;
         let mut entries = Vec::new(&env);
         for market in markets.iter() {
+            accrued_before = checked_fee_add(
+                &env,
+                accrued_before,
+                ds.get_u128(&claimable_fee_amount_key(&env, &market, &token)),
+            );
             let amount = claim_market_fees(&env, &ds, &market, &token);
             total = checked_fee_add(&env, total, amount);
             entries.push_back(MarketFeeAmount { market, amount });
+        }
+        // The aggregate withdrawal is bounded by what the listed markets had
+        // accrued and by the global ledger.
+        if total > accrued_before || total > ledger_before {
+            panic_with_error!(&env, Error::ExceedsAccruedFees);
         }
         env.events().publish_event(&TokenFeesClaimed {
             token: token.clone(),
@@ -490,6 +564,97 @@ impl FeeHandler {
             total,
             markets: entries,
         }
+    }
+
+    // ── Treasury reconciliation ──────────────────────────────────────────────
+
+    /// Return the global protocol fee liability in `token`:
+    /// `total_claimable_fee_amount(token)`, which every accrual and claim keeps
+    /// equal to the sum of the per-market ledgers.
+    pub fn total_claimable_fees(env: Env, token: Address) -> u128 {
+        DataStoreClient::new(&env, &data_store(&env))
+            .get_u128(&total_claimable_fee_amount_key(&env, &token))
+    }
+
+    /// Reconcile the global fee ledger for `token` against `markets`'
+    /// sub-ledgers, pool accounting and custody. View only. Pass every market
+    /// that accrues `token`; `reconciled` is then true exactly when the global
+    /// total equals the per-market sum and every market's fees are backed.
+    /// Duplicate markets are rejected; at most `MAX_TOKEN_FEE_MARKETS`.
+    pub fn reconcile_token_fees(
+        env: Env,
+        token: Address,
+        markets: Vec<Address>,
+    ) -> FeeReconciliation {
+        require_distinct_markets(&env, &markets);
+        let ds = DataStoreClient::new(&env, &data_store(&env));
+        let ledger_total = ds.get_u128(&total_claimable_fee_amount_key(&env, &token));
+        let token_client = PoolTokenClient::new(&env, &token);
+        let mut markets_total = 0u128;
+        let mut all_backed = true;
+        let mut rows = Vec::new(&env);
+        for market in markets.iter() {
+            let claimable = ds.get_u128(&claimable_fee_amount_key(&env, &market, &token));
+            let pool_amount = ds.get_u128(&pool_amount_key(&env, &market, &token));
+            let custody = token_client.balance(&market);
+            let backed = claimable <= pool_amount && custody >= 0 && claimable <= custody as u128;
+            all_backed &= backed;
+            markets_total = checked_fee_add(&env, markets_total, claimable);
+            rows.push_back(MarketFeeReconciliation {
+                market,
+                claimable,
+                pool_amount,
+                custody,
+                backed,
+            });
+        }
+        FeeReconciliation {
+            token,
+            ledger_total,
+            markets_total,
+            reconciled: all_backed && ledger_total == markets_total,
+            markets: rows,
+        }
+    }
+
+    /// Upgrade migration: add `markets`' existing `claimable_fee_amount(market,
+    /// token)` ledgers, accrued before the global total existed, into
+    /// `total_claimable_fee_amount(token)`. Admin only. Each `(market, token)` is
+    /// added at most once (later calls skip it) and emits `FeeTotalBackfilled`.
+    ///
+    /// Run it after upgrading `fee_handler` and before upgrading the contracts
+    /// that accrue fees, so no ledger entry is already in the total. Returns the
+    /// global total afterwards. Duplicate markets are rejected; at most
+    /// `MAX_TOKEN_FEE_MARKETS`.
+    pub fn backfill_fee_total(env: Env, token: Address, markets: Vec<Address>) -> u128 {
+        require_admin(&env);
+        require_distinct_markets(&env, &markets);
+        let ds = DataStoreClient::new(&env, &data_store(&env));
+        let handler = env.current_contract_address();
+        let total_key = total_claimable_fee_amount_key(&env, &token);
+        let mut total = ds.get_u128(&total_key);
+        for market in markets.iter() {
+            let flag = PersistentKey::FeeTotalBackfilled(market.clone(), token.clone());
+            if env.storage().persistent().has(&flag) {
+                continue;
+            }
+            env.storage().persistent().set(&flag, &true);
+            env.storage().persistent().extend_ttl(
+                &flag,
+                MIN_BUMP_THRESHOLD,
+                PERSISTENT_BUMP_TARGET,
+            );
+            let amount = ds.get_u128(&claimable_fee_amount_key(&env, &market, &token));
+            total = checked_fee_add(&env, total, amount);
+            env.events().publish_event(&FeeTotalBackfilled {
+                market,
+                token: token.clone(),
+                amount,
+                total,
+            });
+        }
+        ds.set_u128(&handler, &total_key, &total);
+        total
     }
 
     // ── Constrained fee recipients ───────────────────────────────────────────
@@ -611,9 +776,12 @@ impl FeeHandler {
             .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let key = claimable_fee_amount_key(&env, &market, &token);
-        DataStoreClient::new(&env, &data_store).apply_delta_to_u128(
+        let ds = DataStoreClient::new(&env, &data_store);
+        ds.apply_delta_to_u128(&caller, &key, &(amount as i128));
+        // Keep the global ledger equal to the sum of the per-market ledgers.
+        ds.apply_delta_to_u128(
             &caller,
-            &key,
+            &total_claimable_fee_amount_key(&env, &token),
             &(amount as i128),
         );
 
@@ -943,7 +1111,7 @@ mod tests {
         let fee_key = gmx_keys::claimable_fee_amount_key(&w.env, &w.market_tk, &w.long_tk);
         let pool_key = gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk);
         let ds_c = DsClient::new(&w.env, &w.ds);
-        ds_c.set_u128(&w.admin, &fee_key, &fee_amount);
+        set_fee_ledger(&w, &w.market_tk, fee_amount);
         ds_c.set_u128(&w.admin, &pool_key, &fee_amount);
 
         // Mint tokens into the market pool so withdraw_from_pool can transfer
@@ -996,8 +1164,7 @@ mod tests {
     fn claim_fees_by_non_keeper_reverts() {
         let w = setup();
         // Seed some fees so the call reaches the role check
-        let fee_key = gmx_keys::claimable_fee_amount_key(&w.env, &w.market_tk, &w.long_tk);
-        DsClient::new(&w.env, &w.ds).set_u128(&w.admin, &fee_key, &(ONE_TOKEN as u128));
+        set_fee_ledger(&w, &w.market_tk, ONE_TOKEN as u128);
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &ONE_TOKEN);
 
         let intruder = Address::generate(&w.env);
@@ -1016,7 +1183,7 @@ mod tests {
         let fee_key = gmx_keys::claimable_fee_amount_key(&w.env, &w.market_tk, &w.long_tk);
         let pool_key = gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk);
         let ds_c = DsClient::new(&w.env, &w.ds);
-        ds_c.set_u128(&w.admin, &fee_key, &claimable);
+        set_fee_ledger(&w, &w.market_tk, claimable);
         // pool_amount accounting matches claimable — only the real balance is short.
         ds_c.set_u128(&w.admin, &pool_key, &claimable);
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &pool_held);
@@ -1067,10 +1234,9 @@ mod tests {
         let claimable: u128 = ONE_TOKEN as u128 * 5;
         let pool_amount: u128 = ONE_TOKEN as u128 * 3; // accounting says only 3 are backed
 
-        let fee_key = gmx_keys::claimable_fee_amount_key(&w.env, &w.market_tk, &w.long_tk);
         let pool_key = gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk);
         let ds_c = DsClient::new(&w.env, &w.ds);
-        ds_c.set_u128(&w.admin, &fee_key, &claimable);
+        set_fee_ledger(&w, &w.market_tk, claimable);
         ds_c.set_u128(&w.admin, &pool_key, &pool_amount);
         // Even if the real token balance could cover it, the accounting check must
         // reject the claim before any transfer is attempted.
@@ -1088,7 +1254,6 @@ mod tests {
         let w = setup();
         w.env.cost_estimate().budget().reset_unlimited();
 
-        let fee_key = gmx_keys::claimable_fee_amount_key(&w.env, &w.market_tk, &w.long_tk);
         let pool_key = gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk);
         let ds_c = DsClient::new(&w.env, &w.ds);
 
@@ -1111,7 +1276,7 @@ mod tests {
                 .wrapping_add(1_442_695_040_888_963_407);
             let pool_amount = ((state >> 20) % max_per_iter as u64) as u128;
 
-            ds_c.set_u128(&w.admin, &fee_key, &claimable);
+            set_fee_ledger(&w, &w.market_tk, claimable);
             ds_c.set_u128(&w.admin, &pool_key, &pool_amount);
 
             if claimable > pool_amount {
@@ -1199,13 +1364,23 @@ mod tests {
 
     /// Seed `amount` of claimable protocol fees for `market`, backed by matching
     /// `pool_amount` accounting and real pool tokens.
+    /// Set `market`'s fee ledger to `amount` and move the global total by the
+    /// same delta, as real accrual does.
+    fn set_fee_ledger(w: &World, market: &Address, amount: u128) {
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        let key = gmx_keys::claimable_fee_amount_key(&w.env, market, &w.long_tk);
+        let delta = amount as i128 - ds_c.get_u128(&key) as i128;
+        ds_c.set_u128(&w.admin, &key, &amount);
+        ds_c.apply_delta_to_u128(
+            &w.admin,
+            &gmx_keys::total_claimable_fee_amount_key(&w.env, &w.long_tk),
+            &delta,
+        );
+    }
+
     fn seed_fees(w: &World, market: &Address, amount: u128) {
         let ds_c = DsClient::new(&w.env, &w.ds);
-        ds_c.set_u128(
-            &w.admin,
-            &gmx_keys::claimable_fee_amount_key(&w.env, market, &w.long_tk),
-            &amount,
-        );
+        set_fee_ledger(w, market, amount);
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::pool_amount_key(&w.env, market, &w.long_tk),
@@ -1653,11 +1828,7 @@ mod tests {
         let fh = FeeHandlerClient::new(&w.env, &w.handler);
         let market_b = second_market(&w);
         seed_fees(&w, &w.market_tk, 700);
-        DsClient::new(&w.env, &w.ds).set_u128(
-            &w.admin,
-            &gmx_keys::claimable_fee_amount_key(&w.env, &market_b, &w.long_tk),
-            &300,
-        );
+        set_fee_ledger(&w, &market_b, 300);
 
         assert_err(
             fh.try_claim_token_fees(
@@ -1694,6 +1865,244 @@ mod tests {
                 .unwrap_err()
                 .unwrap(),
             Error::FeeOverflow,
+        );
+    }
+
+    // ── Treasury reconciliation (global total vs per-market sub-ledgers) ─────
+
+    fn total(w: &World) -> u128 {
+        FeeHandlerClient::new(&w.env, &w.handler).total_claimable_fees(&w.long_tk)
+    }
+
+    /// Write a per-market ledger without touching the global total, as a fee
+    /// accrued before the global total existed would be.
+    fn set_pre_upgrade_ledger(w: &World, market: &Address, amount: u128) {
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::claimable_fee_amount_key(&w.env, market, &w.long_tk),
+            &amount,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::pool_amount_key(&w.env, market, &w.long_tk),
+            &amount,
+        );
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(market, &(amount as i128));
+    }
+
+    /// The global total equals the per-market sum through accrual and claims,
+    /// and reconciliation reports a missing market as unreconciled.
+    #[test]
+    fn global_fee_total_reconciles_with_market_ledgers() {
+        let w = setup();
+        let fh = FeeHandlerClient::new(&w.env, &w.handler);
+        let market_b = second_market(&w);
+        seed_fees(&w, &w.market_tk, 700);
+        seed_fees(&w, &market_b, 300);
+        let both = markets(&w, &[&w.market_tk, &market_b]);
+
+        assert_eq!(total(&w), 1_000);
+        let rec = fh.reconcile_token_fees(&w.long_tk, &both);
+        assert!(rec.reconciled);
+        assert_eq!((rec.ledger_total, rec.markets_total), (1_000, 1_000));
+        assert_eq!(
+            rec.markets,
+            Vec::from_array(
+                &w.env,
+                [
+                    MarketFeeReconciliation {
+                        market: w.market_tk.clone(),
+                        claimable: 700,
+                        pool_amount: 700,
+                        custody: 700,
+                        backed: true,
+                    },
+                    MarketFeeReconciliation {
+                        market: market_b.clone(),
+                        claimable: 300,
+                        pool_amount: 300,
+                        custody: 300,
+                        backed: true,
+                    },
+                ],
+            )
+        );
+
+        // Leaving a market out of the list is visible as a shortfall.
+        let partial = fh.reconcile_token_fees(&w.long_tk, &markets(&w, &[&w.market_tk]));
+        assert!(!partial.reconciled);
+        assert_eq!((partial.ledger_total, partial.markets_total), (1_000, 700));
+
+        fh.claim_fees(&w.keeper, &w.market_tk, &w.long_tk);
+        assert_eq!(total(&w), 300);
+        assert!(fh.reconcile_token_fees(&w.long_tk, &both).reconciled);
+
+        fh.claim_token_fees(&w.keeper, &w.long_tk, &both);
+        assert_eq!(total(&w), 0);
+        let rec = fh.reconcile_token_fees(&w.long_tk, &both);
+        assert!(rec.reconciled);
+        assert_eq!((rec.ledger_total, rec.markets_total), (0, 0));
+    }
+
+    /// A per-market entry the global ledger does not cover cannot be
+    /// withdrawn: the claim reverts and nothing moves.
+    #[test]
+    fn claim_rejects_fees_not_covered_by_global_ledger() {
+        let w = setup();
+        let fh = FeeHandlerClient::new(&w.env, &w.handler);
+        set_pre_upgrade_ledger(&w, &w.market_tk, 500);
+
+        assert_err(
+            fh.try_claim_fees(&w.keeper, &w.market_tk, &w.long_tk)
+                .unwrap_err()
+                .unwrap(),
+            Error::FeeLedgerMismatch,
+        );
+        assert_err(
+            fh.try_claim_token_fees(&w.keeper, &w.long_tk, &markets(&w, &[&w.market_tk]))
+                .unwrap_err()
+                .unwrap(),
+            Error::FeeLedgerMismatch,
+        );
+        assert_eq!(ledger(&w, &w.market_tk), (500, 500));
+        assert_eq!(balance(&w, &w.market_tk), 500);
+        assert_eq!(balance(&w, &w.treasury), 0);
+        assert!(
+            !fh.reconcile_token_fees(&w.long_tk, &markets(&w, &[&w.market_tk]))
+                .reconciled
+        );
+    }
+
+    /// The upgrade backfill adds each pre-upgrade ledger exactly once, after
+    /// which the totals reconcile and the fees are claimable.
+    #[test]
+    fn backfill_adds_each_pre_upgrade_ledger_once() {
+        use soroban_sdk::testutils::Events as _;
+        use soroban_sdk::Event as _;
+
+        let w = setup();
+        let fh = FeeHandlerClient::new(&w.env, &w.handler);
+        let market_b = second_market(&w);
+        set_pre_upgrade_ledger(&w, &w.market_tk, 500);
+        set_pre_upgrade_ledger(&w, &market_b, 200);
+        let both = markets(&w, &[&w.market_tk, &market_b]);
+
+        assert_eq!(
+            fh.backfill_fee_total(&w.long_tk, &markets(&w, &[&w.market_tk])),
+            500
+        );
+        let auths = w.env.auths();
+        assert_eq!(auths.len(), 1);
+        assert_eq!(auths[0].0, w.admin);
+
+        // Re-listing the first market adds nothing; only market B is new.
+        assert_eq!(fh.backfill_fee_total(&w.long_tk, &both), 700);
+        assert_eq!(
+            w.env.events().all().filter_by_contract(&w.handler),
+            [FeeTotalBackfilled {
+                market: market_b.clone(),
+                token: w.long_tk.clone(),
+                amount: 200,
+                total: 700,
+            }
+            .to_xdr(&w.env, &w.handler)]
+        );
+        assert_eq!(fh.backfill_fee_total(&w.long_tk, &both), 700);
+        assert!(fh.reconcile_token_fees(&w.long_tk, &both).reconciled);
+
+        assert_eq!(fh.claim_token_fees(&w.keeper, &w.long_tk, &both).total, 700);
+        assert_eq!(total(&w), 0);
+        assert_eq!(balance(&w, &w.treasury), 700);
+    }
+
+    #[test]
+    fn backfill_requires_admin_auth() {
+        use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+        use soroban_sdk::IntoVal;
+
+        let w = setup();
+        let fh = FeeHandlerClient::new(&w.env, &w.handler);
+        set_pre_upgrade_ledger(&w, &w.market_tk, 500);
+        let list = markets(&w, &[&w.market_tk]);
+        let attacker = Address::generate(&w.env);
+
+        let result = fh
+            .mock_auths(&[MockAuth {
+                address: &attacker,
+                invoke: &MockAuthInvoke {
+                    contract: &w.handler,
+                    fn_name: "backfill_fee_total",
+                    args: (w.long_tk.clone(), list.clone()).into_val(&w.env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_backfill_fee_total(&w.long_tk, &list);
+        assert!(result.is_err());
+        assert_eq!(total(&w), 0);
+    }
+
+    /// A market whose fees are not backed by its pool accounting or custody is
+    /// flagged and makes the reconciliation fail even when the sums agree.
+    #[test]
+    fn reconciliation_flags_unbacked_market() {
+        let w = setup();
+        let fh = FeeHandlerClient::new(&w.env, &w.handler);
+        seed_fees(&w, &w.market_tk, 400);
+        DsClient::new(&w.env, &w.ds).set_u128(
+            &w.admin,
+            &gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk),
+            &100,
+        );
+
+        let rec = fh.reconcile_token_fees(&w.long_tk, &markets(&w, &[&w.market_tk]));
+        assert_eq!((rec.ledger_total, rec.markets_total), (400, 400));
+        assert!(!rec.markets.get_unchecked(0).backed);
+        assert!(!rec.reconciled);
+    }
+
+    #[test]
+    fn record_fee_accrual_moves_global_total() {
+        let w = setup();
+        let fh = FeeHandlerClient::new(&w.env, &w.handler);
+        fh.record_fee_accrual(&w.admin, &w.market_tk, &w.long_tk, &1u32, &250u128);
+        assert_eq!(total(&w), 250);
+        assert_eq!(fh.claimable_fees(&w.market_tk, &w.long_tk), 250);
+    }
+
+    #[test]
+    fn reconciliation_and_backfill_are_bounded_and_reject_duplicates() {
+        let w = setup();
+        let fh = FeeHandlerClient::new(&w.env, &w.handler);
+        let dup = markets(&w, &[&w.market_tk, &w.market_tk]);
+        let mut too_many = Vec::new(&w.env);
+        for _ in 0..=MAX_TOKEN_FEE_MARKETS {
+            too_many.push_back(Address::generate(&w.env));
+        }
+
+        assert_err(
+            fh.try_reconcile_token_fees(&w.long_tk, &dup)
+                .unwrap_err()
+                .unwrap(),
+            Error::DuplicateMarket,
+        );
+        assert_err(
+            fh.try_backfill_fee_total(&w.long_tk, &dup)
+                .unwrap_err()
+                .unwrap(),
+            Error::DuplicateMarket,
+        );
+        assert_err(
+            fh.try_reconcile_token_fees(&w.long_tk, &too_many)
+                .unwrap_err()
+                .unwrap(),
+            Error::TooManyMarkets,
+        );
+        assert_err(
+            fh.try_backfill_fee_total(&w.long_tk, &too_many)
+                .unwrap_err()
+                .unwrap(),
+            Error::TooManyMarkets,
         );
     }
 
@@ -1950,10 +2359,9 @@ mod tests {
         let fee_amount: u128 = ONE_TOKEN as u128 * 5;
 
         // Seed claimable fees and matching pool_amount accounting in DataStore.
-        let claim_key = gmx_keys::claimable_fee_amount_key(&w.env, &w.market_tk, &w.long_tk);
         let pool_key = gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk);
         let ds_c = DsClient::new(&w.env, &w.ds);
-        ds_c.set_u128(&w.handler, &claim_key, &fee_amount);
+        set_fee_ledger(&w, &w.market_tk, fee_amount);
         ds_c.set_u128(&w.handler, &pool_key, &fee_amount);
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(fee_amount as i128));
 
