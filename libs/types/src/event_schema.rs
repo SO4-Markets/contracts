@@ -54,10 +54,10 @@ pub struct MarketStateTransitionEvent {
 #[contracttype]
 pub struct OrderCreatedEvent {
     pub schema_version: u32,
-    pub order_key: BytesN<32>,      // order hash/identifier
+    pub order_key: BytesN<32>, // order hash/identifier
     pub account: Address,
     pub market: Address,
-    pub order_type: u32,           // OrderType variant
+    pub order_type: u32, // OrderType variant
     pub size_delta_usd: i128,
     pub is_long: bool,
     pub execution_fee: i128,
@@ -77,8 +77,8 @@ pub struct OrderExecutedEvent {
     pub order_key: BytesN<32>,
     pub account: Address,
     pub market: Address,
-    pub execution_price: i128,     // actual execution price
-    pub output_amount: i128,       // amount received by user
+    pub execution_price: i128, // actual execution price
+    pub output_amount: i128,   // amount received by user
     pub execution_fee_paid: i128,
     pub at_ledger: u64,
 }
@@ -96,7 +96,7 @@ pub struct OrderCancelledEvent {
     pub order_key: BytesN<32>,
     pub account: Address,
     pub market: Address,
-    pub cancellation_reason: u32,  // 0=user, 1=expired, 2=market_paused, etc.
+    pub cancellation_reason: u32, // 0=user, 1=expired, 2=market_paused, etc.
     pub refund_amount: i128,
     pub at_ledger: u64,
 }
@@ -138,7 +138,7 @@ pub struct PositionDecreasedEvent {
     pub position_size_usd: i128,
     pub collateral_amount: i128,
     pub execution_price: i128,
-    pub pnl_usd: i128,             // realized profit/loss
+    pub pnl_usd: i128, // realized profit/loss
     pub is_fully_closed: bool,
     pub borrowing_fee: i128,
     pub funding_fee: i128,
@@ -273,8 +273,8 @@ pub struct TransactionRejectedEvent {
     pub schema_version: u32,
     pub account: Address,
     pub market: Address,
-    pub error_code: u32,           // ProtocolError variant
-    pub reason: u32,               // specific failure context
+    pub error_code: u32, // ProtocolError variant
+    pub reason: u32,     // specific failure context
     pub at_ledger: u64,
 }
 

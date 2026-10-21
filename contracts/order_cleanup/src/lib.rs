@@ -449,11 +449,13 @@ mod tests {
         }
 
         env.ledger().set_timestamp(114_400);
-        let res = client.try_clean_expired_orders_batch(&data_store_id, &order_handler_id, &caller, &keys);
-        assert_eq!(
-            res.unwrap_err().unwrap(),
-            Error::BatchLimitExceeded.into()
+        let res = client.try_clean_expired_orders_batch(
+            &data_store_id,
+            &order_handler_id,
+            &caller,
+            &keys,
         );
+        assert_eq!(res.unwrap_err().unwrap(), Error::BatchLimitExceeded.into());
     }
 
     #[test]
@@ -475,7 +477,12 @@ mod tests {
         }
 
         env.ledger().set_timestamp(114_400);
-        let res = client.try_clean_expired_orders_batch(&data_store_id, &order_handler_id, &caller, &keys);
+        let res = client.try_clean_expired_orders_batch(
+            &data_store_id,
+            &order_handler_id,
+            &caller,
+            &keys,
+        );
         assert!(res.is_ok());
     }
 }

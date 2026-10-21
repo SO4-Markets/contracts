@@ -236,6 +236,7 @@ fn assert_conserved(l: &Ledger) {
     assert_eq!((base, quote), (0, 0), "base/quote not conserved: {l:?}");
 }
 
+/// Best bid and best ask as `(price, quantity)`.
 type TopOfBook = (Option<(u64, u64)>, Option<(u64, u64)>);
 
 fn top_of_book<E: BookView>(e: &E) -> TopOfBook {

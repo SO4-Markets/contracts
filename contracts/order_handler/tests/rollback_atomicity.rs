@@ -121,13 +121,8 @@ fn snapshot_captures_protocol_state() {
     let liabilities: Map<Address, i128> = Map::new(&world.env);
     let orders: Vec<gmx_types::OrderProps> = Vec::new(&world.env);
 
-    let snapshot = RollbackHarness::snapshot_protocol_state(
-        &world.env,
-        balances,
-        fees,
-        liabilities,
-        orders,
-    );
+    let snapshot =
+        RollbackHarness::snapshot_protocol_state(&world.env, balances, fees, liabilities, orders);
 
     assert_eq!(world.env.ledger().sequence() as u64, snapshot.block_height);
 }
@@ -143,13 +138,8 @@ fn rollback_detects_state_changes() {
     let liabilities: Map<Address, i128> = Map::new(&world.env);
     let orders: Vec<gmx_types::OrderProps> = Vec::new(&world.env);
 
-    let snapshot = RollbackHarness::snapshot_protocol_state(
-        &world.env,
-        balances,
-        fees,
-        liabilities,
-        orders,
-    );
+    let snapshot =
+        RollbackHarness::snapshot_protocol_state(&world.env, balances, fees, liabilities, orders);
 
     // Mutate balances after snapshot
     let mut new_balances: Map<Address, i128> = Map::new(&world.env);
@@ -167,7 +157,10 @@ fn rollback_detects_state_changes() {
     );
 
     assert!(!validation.is_valid(), "should detect balance change");
-    assert!(!validation.balances_match, "balance_mismatch should be detected");
+    assert!(
+        !validation.balances_match,
+        "balance_mismatch should be detected"
+    );
 }
 
 #[test]
@@ -199,7 +192,10 @@ fn rollback_validates_full_revert() {
     );
 
     assert!(validation.is_valid(), "should validate full revert");
-    assert!(validation.state_fully_reverted, "state_fully_reverted should be true");
+    assert!(
+        validation.state_fully_reverted,
+        "state_fully_reverted should be true"
+    );
 }
 
 #[test]

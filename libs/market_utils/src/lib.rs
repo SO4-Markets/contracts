@@ -7,14 +7,15 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    borrowing_exponent_factor_key, borrowing_factor_key, cumulative_borrowing_factor_key,
-    cumulative_borrowing_factor_updated_at_key, funding_amount_per_size_key,
-    funding_decrease_factor_per_second_key, funding_exponent_factor_key, funding_factor_key,
-    funding_increase_factor_per_second_key, funding_updated_at_key,
-    max_funding_factor_per_second_key, max_open_interest_key, max_pnl_factor_for_adl_key,
-    max_pool_amount_key, min_funding_factor_per_second_key, open_interest_in_tokens_key,
-    open_interest_key, pool_amount_key, position_impact_pool_amount_key,
-    saved_funding_factor_per_second_key, swap_impact_pool_amount_key,
+    borrowing_exponent_factor_key, borrowing_factor_key, claimable_fee_amount_key,
+    cumulative_borrowing_factor_key, cumulative_borrowing_factor_updated_at_key,
+    funding_amount_per_size_key, funding_decrease_factor_per_second_key,
+    funding_exponent_factor_key, funding_factor_key, funding_increase_factor_per_second_key,
+    funding_updated_at_key, max_funding_factor_per_second_key, max_open_interest_key,
+    max_pnl_factor_for_adl_key, max_pool_amount_key, min_funding_factor_per_second_key,
+    open_interest_in_tokens_key, open_interest_key, pool_amount_key,
+    position_impact_pool_amount_key, saved_funding_factor_per_second_key,
+    swap_impact_pool_amount_key, total_claimable_fee_amount_key,
 };
 use gmx_math::{mul_div_wide, pow_factor, FLOAT_PRECISION, TOKEN_PRECISION};
 use gmx_types::{MarketProps, PoolValueInfo, PriceProps};
@@ -64,6 +65,28 @@ pub fn apply_delta_to_pool_amount(
 ) -> u128 {
     let key = pool_amount_key(env, &market.market_token, token);
     DataStoreClient::new(env, ds).apply_delta_to_u128(caller, &key, &delta)
+}
+
+/// Accrue (`delta > 0`) or release (`delta < 0`) protocol fees for
+/// `(market_token, token)`. The per-market ledger and the global
+/// `total_claimable_fee_amount(token)` move together in the same call, so the
+/// global total always equals the sum of the per-market ledgers. This is the
+/// single implementation every fee accrual path uses.
+pub fn apply_delta_to_claimable_fee_amount(
+    env: &Env,
+    ds: &Address,
+    caller: &Address,
+    market_token: &Address,
+    token: &Address,
+    delta: i128,
+) -> u128 {
+    let ds_c = DataStoreClient::new(env, ds);
+    ds_c.apply_delta_to_u128(caller, &total_claimable_fee_amount_key(env, token), &delta);
+    ds_c.apply_delta_to_u128(
+        caller,
+        &claimable_fee_amount_key(env, market_token, token),
+        &delta,
+    )
 }
 
 pub fn get_swap_impact_pool_amount(

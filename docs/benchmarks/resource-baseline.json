@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "meta": {
-    "rationale": "Initial resource baseline for the CI regression gate (#1064): soroban-sdk 25.3.1, native contract registration.",
-    "updated": "2026-10-16"
+    "rationale": "Global per-token fee ledger (#971): claim_fees and claim_token_fees now read and write total_claimable_fee_amount(token) alongside the per-market entry (+1 read, +1 write; claim_token_fees also sums accrued balances for its aggregate bound). Add fees/reconcile_token_fees. Other scenarios unchanged. Recorded from CI run 39360901483 (ubuntu, soroban-sdk 25.3.1).",
+    "updated": "2026-10-20"
   },
   "thresholds": {
     "instructions": {
@@ -79,6 +79,10 @@
       "file": "libs/swap_utils/src/lib.rs",
       "value": 5
     },
+    "MAX_TOKEN_FEE_MARKETS": {
+      "file": "contracts/fee_handler/src/lib.rs",
+      "value": 20
+    },
     "PERSISTENT_BUMP_TARGET": {
       "file": "libs/keys/src/lib.rs",
       "value": 518400
@@ -95,6 +99,61 @@
       "write_bytes": 4884,
       "contract_events_size_bytes": 1380,
       "fee_total_stroops": 3577120
+    },
+    "fees/claim_fees": {
+      "instructions": 1168169,
+      "mem_bytes": 251695,
+      "disk_read_entries": 1,
+      "memory_read_entries": 16,
+      "write_entries": 6,
+      "disk_read_bytes": 92,
+      "write_bytes": 940,
+      "contract_events_size_bytes": 700,
+      "fee_total_stroops": 2050514
+    },
+    "fees/claim_token_fees": {
+      "instructions": 1260465,
+      "mem_bytes": 263820,
+      "disk_read_entries": 0,
+      "memory_read_entries": 16,
+      "write_entries": 6,
+      "disk_read_bytes": 0,
+      "write_bytes": 940,
+      "contract_events_size_bytes": 904,
+      "fee_total_stroops": 1389086
+    },
+    "fees/reconcile_token_fees": {
+      "instructions": 310170,
+      "mem_bytes": 61110,
+      "disk_read_entries": 0,
+      "memory_read_entries": 7,
+      "write_entries": 0,
+      "disk_read_bytes": 0,
+      "write_bytes": 0,
+      "contract_events_size_bytes": 0,
+      "fee_total_stroops": 776
+    },
+    "fees/set_fee_receiver": {
+      "instructions": 103444,
+      "mem_bytes": 28084,
+      "disk_read_entries": 0,
+      "memory_read_entries": 3,
+      "write_entries": 2,
+      "disk_read_bytes": 0,
+      "write_bytes": 512,
+      "contract_events_size_bytes": 176,
+      "fee_total_stroops": 1324611
+    },
+    "fees/set_market_fee_receiver": {
+      "instructions": 129327,
+      "mem_bytes": 38519,
+      "disk_read_entries": 0,
+      "memory_read_entries": 4,
+      "write_entries": 2,
+      "disk_read_bytes": 0,
+      "write_bytes": 248,
+      "contract_events_size_bytes": 212,
+      "fee_total_stroops": 1830717
     },
     "lifecycle/create_deposit": {
       "instructions": 1789986,

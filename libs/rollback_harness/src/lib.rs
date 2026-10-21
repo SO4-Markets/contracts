@@ -10,14 +10,13 @@ use gmx_types::OrderProps;
 use soroban_sdk::{Address, Env, Map, Vec};
 
 /// Complete state snapshot before operation.
-#[derive(Clone, Debug)]
 pub struct StateSnapshot {
-    pub balances: Map<Address, i128>,         // token -> balance
-    pub fees: Map<Address, i128>,             // token -> fee pool
-    pub liabilities: Map<Address, i128>,      // account -> liability
-    pub orders: Vec<OrderProps>,              // open orders
-    pub block_height: u64,                    // ledger height
-    pub timestamp: u64,                       // block timestamp
+    pub balances: Map<Address, i128>,    // token -> balance
+    pub fees: Map<Address, i128>,        // token -> fee pool
+    pub liabilities: Map<Address, i128>, // account -> liability
+    pub orders: Vec<OrderProps>,         // open orders
+    pub block_height: u64,               // ledger height
+    pub timestamp: u64,                  // block timestamp
 }
 
 impl StateSnapshot {
@@ -59,31 +58,29 @@ impl StateSnapshot {
 
         // Compare balances
         for (token, original_balance) in self.balances.iter() {
-            let current = current_balances
-                .get(token.clone())
-                .unwrap_or(0);
+            let current = current_balances.get(token.clone()).unwrap_or(0);
             if original_balance != current {
                 diffs.balances_match = false;
-                diffs.balance_mismatches.push_back((token, original_balance, current));
+                diffs
+                    .balance_mismatches
+                    .push_back((token, original_balance, current));
             }
         }
 
         // Compare fees
         for (token, original_fee) in self.fees.iter() {
-            let current = current_fees
-                .get(token.clone())
-                .unwrap_or(0);
+            let current = current_fees.get(token.clone()).unwrap_or(0);
             if original_fee != current {
                 diffs.fees_match = false;
-                diffs.fee_mismatches.push_back((token, original_fee, current));
+                diffs
+                    .fee_mismatches
+                    .push_back((token, original_fee, current));
             }
         }
 
         // Compare liabilities
         for (account, original_liability) in self.liabilities.iter() {
-            let current = current_liabilities
-                .get(account.clone())
-                .unwrap_or(0);
+            let current = current_liabilities.get(account.clone()).unwrap_or(0);
             if original_liability != current {
                 diffs.liabilities_match = false;
                 diffs
@@ -114,7 +111,8 @@ impl RollbackValidation {
     /// Assert that state fully reverted; panic with details if not.
     pub fn assert_fully_reverted(&self, _env: &Env) {
         if !self.state_fully_reverted {
-            panic!("State did not fully revert");
+            // In a real implementation, would format detailed mismatch message
+            panic!("rollback: state not fully reverted");
         }
     }
 

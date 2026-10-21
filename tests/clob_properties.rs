@@ -633,7 +633,9 @@ fn equal_price_fills_follow_fifo_with_cancels_and_reductions() {
             }
             let idx = rng.below(queue.len() as u64) as usize;
             let (id, qty) = queue[idx];
-            if rng.below(2) == 0 || qty <= 1 {
+            // A reduction needs room below the live quantity (new_qty in
+            // 1..qty), so an order already at quantity 1 is cancelled instead.
+            if rng.below(2) == 0 || qty < 2 {
                 engine.apply(&Action::Cancel { id }).expect("cancel");
                 queue.remove(idx);
                 cancelled.push(id);

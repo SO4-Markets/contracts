@@ -320,11 +320,9 @@ fn keeper_entrypoints_reject_callers_without_their_role() {
         .try_execute_adl(&w.order_keeper, &w.trader, &market, &token, &true, &ONE_USD)
         .is_err());
     assert!(fh_c
-        .try_claim_fees(&w.order_keeper, &market, &token, &w.order_keeper)
+        .try_claim_fees(&w.order_keeper, &market, &token)
         .is_err());
-    assert!(fh_c
-        .try_claim_fees(&w.stranger, &market, &token, &w.stranger)
-        .is_err());
+    assert!(fh_c.try_claim_fees(&w.stranger, &market, &token).is_err());
 }
 
 // ─── Part 2: rotation, revocation, trusted-dependency substitution ───────────

@@ -283,12 +283,7 @@ fn unauthorized_claim_fees_reverts() {
     let fh_c = FHClient::new(&w.env, &w.fee_handler);
 
     // Try to claim fees without FEE_KEEPER role
-    let result = fh_c.try_claim_fees(
-        &w.unauthorized_user,
-        &w.market_tk,
-        &w.long_tk,
-        &w.unauthorized_user,
-    );
+    let result = fh_c.try_claim_fees(&w.unauthorized_user, &w.market_tk, &w.long_tk);
 
     assert!(
         result.is_err(),

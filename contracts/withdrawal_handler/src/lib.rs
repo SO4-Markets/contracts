@@ -1669,9 +1669,12 @@ mod tests {
             },
         );
 
-        // Ledger advances past PRICE_FRESHNESS_WINDOW (20) with no fresh price — stored price is now stale.
+        // Ledger advances past the oracle's freshness window with no fresh price
+        // submitted — the stored price is now stale (oracle#1205 accepts prices
+        // for PRICE_FRESHNESS_WINDOW ledgers, so a single-ledger step is not enough).
         let seq = env.ledger().sequence();
-        env.ledger().set_sequence_number(seq + 25);
+        env.ledger()
+            .set_sequence_number(seq + oracle::PRICE_FRESHNESS_WINDOW + 1);
 
         WithdrawalHandlerClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &wth_key);
     }

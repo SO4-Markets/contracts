@@ -2,7 +2,8 @@ name: CI
 
 # Core build/test gate (#1057). Runs on every PR into main and every push to
 # main: two individually-green PRs can still combine into a broken main, and a
-# broken main must leave a visible failing run. Replaces lint.yml + test.yml.
+# broken main must leave a visible failing run. Replaces lint.yml, test.yml and
+# wasm-size.yml; the size budget lives in the wasm-size job below.
 on:
   pull_request:
     branches: [main]
@@ -128,12 +129,78 @@ jobs:
       - name: make test
         run: make test
 
+  # Blocks a PR whose contracts grow past the budget in scripts/wasm-size-check.py.
+  # On push to main there is no base to compare with, so sizes are only reported.
+  wasm-size:
+    name: Build & check WASM sizes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so the PR base branch can be added as a worktree.
+          fetch-depth: 0
+
+      - name: Install Rust stable + wasm32v1-none
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-size-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-size-
+
+      - name: Install wasm-opt
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y binaryen
+
+      # Optimised copies go to a directory outside the tree, so the base build
+      # below cannot overwrite them.
+      - name: Build PR contracts
+        run: |
+          cargo build --target wasm32v1-none --release
+          mkdir -p "$RUNNER_TEMP/wasm-head"
+          for f in target/wasm32v1-none/release/*.wasm; do
+            wasm-opt -O3 -o "$RUNNER_TEMP/wasm-head/$(basename "$f")" "$f"
+          done
+
+      - name: Build base contracts
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git worktree add "$RUNNER_TEMP/base" "origin/$BASE_REF"
+          cd "$RUNNER_TEMP/base"
+          cargo build --target wasm32v1-none --release
+          mkdir -p "$RUNNER_TEMP/wasm-base"
+          for f in target/wasm32v1-none/release/*.wasm; do
+            wasm-opt -O3 -o "$RUNNER_TEMP/wasm-base/$(basename "$f")" "$f"
+          done
+
+      - name: Check size budget
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 scripts/wasm-size-check.py "$RUNNER_TEMP/wasm-head" "$RUNNER_TEMP/wasm-base"
+          else
+            python3 scripts/wasm-size-check.py "$RUNNER_TEMP/wasm-head"
+          fi
+
   # Single status to mark as required in branch protection: it is red unless
   # every job above succeeded (a skipped or cancelled job counts as failure).
   ci-passed:
     name: CI passed
     if: always()
-    needs: [fmt, clippy, build, test]
+    needs: [fmt, clippy, build, test, wasm-size]
     runs-on: ubuntu-latest
     steps:
       - name: Require every CI job to succeed

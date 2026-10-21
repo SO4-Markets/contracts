@@ -350,6 +350,20 @@ pub fn claimable_fee_amount_key(env: &Env, market: &Address, token: &Address) ->
     sha256(env, &b)
 }
 
+/// sha256("TOTAL_CLAIMABLE_FEE_AMOUNT" ‖ token)
+///
+/// Global protocol fee liability in `token`: always equal to the sum of
+/// `claimable_fee_amount(market, token)` over every market. Updated in the same
+/// call as each per-market entry via
+/// `gmx_market_utils::apply_delta_to_claimable_fee_amount` (accrual) and by
+/// `fee_handler` (claims).
+pub fn total_claimable_fee_amount_key(env: &Env, token: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "TOTAL_CLAIMABLE_FEE_AMOUNT");
+    push_addr(&mut b, env, token);
+    sha256(env, &b)
+}
+
 /// sha256("CLAIMABLE_UI_FEE_AMOUNT" ‖ token ‖ ui_receiver)
 ///
 /// Stores the UI fee accrued for a specific receiver + token pair.

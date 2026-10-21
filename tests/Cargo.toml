@@ -126,13 +126,9 @@ name = "privileged_auth_matrix"
 path = "privileged_auth_matrix.rs"
 
 [[test]]
-name = "token_custody"
-path = "token_custody.rs"
+name = "fee_receiver_routing"
+path = "fee_receiver_routing.rs"
 
 [[test]]
-name = "storage_ttl_archive"
-path = "storage_ttl_archive.rs"
-
-[[test]]
-name = "order_lifecycle"
-path = "order_lifecycle.rs"
+name = "shared_quote_token_fees"
+path = "shared_quote_token_fees.rs"

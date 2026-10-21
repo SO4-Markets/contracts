@@ -27,6 +27,7 @@ use std::collections::BTreeMap;
 use data_store::{DataStore, DataStoreClient as DsClient};
 use deposit_handler::{DepositHandler, DepositHandlerClient as DHClient};
 use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
+use fee_handler::{FeeHandler, FeeHandlerClient as FHClient};
 use gmx_keys::{market_index_token_key, market_long_token_key, market_short_token_key, roles};
 use gmx_math::FLOAT_PRECISION;
 use gmx_types::{
@@ -107,6 +108,8 @@ struct World {
     env: Env,
     admin: Address,
     keeper: Address,
+    rs: Address,
+    ds: Address,
     oracle: Address,
     ord_vault: Address,
     dep_handler: Address,
@@ -185,6 +188,8 @@ fn setup() -> World {
         env,
         admin,
         keeper,
+        rs,
+        ds,
         oracle,
         ord_vault,
         dep_handler,
@@ -368,6 +373,69 @@ fn run_scenarios() -> BTreeMap<&'static str, Metrics> {
     out.insert(
         "bounds/create_orders_max_batch",
         Metrics::of_last_invocation(&w.env),
+    );
+
+    // ── Fees: configure trusted recipients, then sweep to them ────────────────
+    // Evidence for the constrained-recipient model: claim_fees now resolves the
+    // per-market override and the protocol recipient before transferring.
+    let w = setup();
+    let env = &w.env;
+    let fee_keeper = Address::generate(env);
+    let rs_c = RsClient::new(env, &w.rs);
+    rs_c.grant_role(&w.admin, &fee_keeper, &roles::fee_keeper(env));
+    rs_c.grant_role(&w.admin, &w.market_tk, &roles::controller(env));
+    let fh_id = env.register(FeeHandler, ());
+    let fh = FHClient::new(env, &fh_id);
+    fh.initialize(&w.admin, &w.rs, &w.ds);
+    rs_c.grant_role(&w.admin, &fh_id, &roles::controller(env));
+
+    fh.set_fee_receiver(&Address::generate(env));
+    out.insert("fees/set_fee_receiver", Metrics::of_last_invocation(env));
+    fh.set_market_fee_receiver(&w.market_tk, &Some(Address::generate(env)));
+    out.insert(
+        "fees/set_market_fee_receiver",
+        Metrics::of_last_invocation(env),
+    );
+
+    let fees: u128 = ONE_TOKEN as u128;
+    let ds_c = DsClient::new(env, &w.ds);
+    let seed = || {
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::claimable_fee_amount_key(env, &w.market_tk, &w.long_tk),
+            &fees,
+        );
+        ds_c.apply_delta_to_u128(
+            &w.admin,
+            &gmx_keys::total_claimable_fee_amount_key(env, &w.long_tk),
+            &(fees as i128),
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::pool_amount_key(env, &w.market_tk, &w.long_tk),
+            &fees,
+        );
+        StellarAssetClient::new(env, &w.long_tk).mint(&w.market_tk, &(fees as i128));
+    };
+    seed();
+    fh.claim_fees(&fee_keeper, &w.market_tk, &w.long_tk);
+    out.insert("fees/claim_fees", Metrics::of_last_invocation(env));
+
+    seed();
+    fh.claim_token_fees(
+        &fee_keeper,
+        &w.long_tk,
+        &soroban_sdk::Vec::from_array(env, [w.market_tk.clone()]),
+    );
+    out.insert("fees/claim_token_fees", Metrics::of_last_invocation(env));
+
+    fh.reconcile_token_fees(
+        &w.long_tk,
+        &soroban_sdk::Vec::from_array(env, [w.market_tk.clone()]),
+    );
+    out.insert(
+        "fees/reconcile_token_fees",
+        Metrics::of_last_invocation(env),
     );
 
     out

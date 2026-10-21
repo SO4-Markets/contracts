@@ -12,9 +12,7 @@ use oracle::{Oracle, OracleClient as OClient};
 use order_handler::{OrderHandler, OrderHandlerClient};
 use order_vault::{OrderVault, OrderVaultClient as OVClient};
 use role_store::{RoleStore, RoleStoreClient as RsClient};
-use settlement_invariants::{
-    BidTakerInvariant, AskTakerInvariant, LockedLiabilityInvariant,
-};
+use settlement_invariants::{AskTakerInvariant, BidTakerInvariant, LockedLiabilityInvariant};
 use soroban_sdk::{testutils::Address as _, Address, Env};
 
 #[allow(dead_code)]
@@ -113,8 +111,8 @@ fn setup() -> World {
         ord_handler,
         market_tk,
         long_tk,
-        short_tk: short_tk.clone(),
-        index_tk: short_tk,
+        index_tk: short_tk.clone(),
+        short_tk,
     }
 }
 

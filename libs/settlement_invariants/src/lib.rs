@@ -36,8 +36,8 @@ pub struct LiabilityDelta {
 /// Settlement state snapshot for invariant validation.
 #[derive(Clone, Debug)]
 pub struct SettlementSnapshot {
-    pub balances: Map<Address, i128>, // token → balance
-    pub fees: Map<Address, i128>,     // token → fee pool balance
+    pub balances: Map<Address, i128>,    // token → balance
+    pub fees: Map<Address, i128>,        // token → fee pool balance
     pub liabilities: Map<Address, i128>, // account → liability
 }
 
@@ -174,6 +174,8 @@ impl InvariantChecker {
         _token: Option<&Address>,
         _amount: Option<i128>,
     ) -> soroban_sdk::String {
+        // Return a string formatted with the reason.
+        // In real implementation, would use proper format macros.
         soroban_sdk::String::from_str(env, reason)
     }
 }

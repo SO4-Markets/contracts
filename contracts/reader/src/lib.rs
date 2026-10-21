@@ -68,6 +68,9 @@ pub enum Error {
     /// (issue #371) so callers can match this condition as a typed error
     /// instead of a generic execution failure.
     InvalidMarket = 5,
+    /// `get_protocol_stats` listed the same market twice, which would count its
+    /// pool value, open interest and fee ledgers twice.
+    DuplicateMarket = 6,
 }
 
 // ─── External clients ─────────────────────────────────────────────────────────
@@ -302,7 +305,8 @@ impl Reader {
     /// View-only: reads `data_store` and `oracle`, writes nothing.
     ///
     /// Panics with `TooManyMarkets` if `markets.len() > MAX_STATS_MARKETS`, which
-    /// bounds the per-call compute cost. An empty `markets` vec is valid and
+    /// bounds the per-call compute cost, and with `DuplicateMarket` if a market
+    /// is listed twice. An empty `markets` vec is valid and
     /// returns all-zero stats (with `market_count = 0`). A market whose pool value
     /// is zero simply contributes zero — no special-casing, no panic.
     pub fn get_protocol_stats(
@@ -313,6 +317,14 @@ impl Reader {
     ) -> ProtocolStats {
         if markets.len() > MAX_STATS_MARKETS {
             panic_with_error!(&env, Error::TooManyMarkets);
+        }
+        // Bounded by MAX_STATS_MARKETS: each market's ledgers are summed once.
+        for i in 0..markets.len() {
+            for j in (i + 1)..markets.len() {
+                if markets.get_unchecked(i) == markets.get_unchecked(j) {
+                    panic_with_error!(&env, Error::DuplicateMarket);
+                }
+            }
         }
 
         let ds = DataStoreClient::new(&env, &data_store);
@@ -1868,6 +1880,27 @@ mod tests {
             markets.push_back(Address::generate(&w.env));
         }
         ReaderClient::new(&w.env, &w.reader).get_protocol_stats(&w.ds, &w.oracle, &markets);
+    }
+
+    /// Listing a market twice would count its fees (and pool value and OI)
+    /// twice in the protocol totals, so it is rejected.
+    #[test]
+    fn protocol_stats_rejects_duplicate_market() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let fee_units = 5 * gmx_math::TOKEN_PRECISION as u128;
+        let m = seed_market(&w, 100, 100, 0, 0, fee_units, fee_units, fp);
+        let other = seed_market(&w, 100, 100, 0, 0, 0, 0, fp);
+
+        let result = ReaderClient::new(&w.env, &w.reader).try_get_protocol_stats(
+            &w.ds,
+            &w.oracle,
+            &SdkVec::from_array(&w.env, [m.clone(), other, m]),
+        );
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            soroban_sdk::Error::from(Error::DuplicateMarket)
+        );
     }
 
     // ── Issue #218: get_position_leverage ────────────────────────────────────
