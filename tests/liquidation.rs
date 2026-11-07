@@ -47,7 +47,7 @@ use oracle::{Oracle, OracleClient as OClient};
 use order_handler::{OrderHandler, OrderHandlerClient as OHClient};
 use order_vault::{OrderVault, OrderVaultClient as OVClient};
 use role_store::{RoleStore, RoleStoreClient as RsClient};
-use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env, Vec};
+use soroban_sdk::{testutils::{Address as _, Ledger as _}, token::StellarAssetClient, Address, Env, Vec};
 
 const ONE_TOKEN: i128 = 10_000_000; // 10^7 (Stellar 7-decimal precision)
 const ONE_USD: i128 = FLOAT_PRECISION;
@@ -538,3 +538,34 @@ fn liquidation_requires_liquidation_keeper_role() {
         &true,
     );
 }
+
+// ─── Test 7 ───────────────────────────────────────────────────────────────────
+
+/// Issue #778: check_liquidatable panics when the oracle price is stale
+/// (ledger advanced after prices were submitted without fresh price update).
+#[test]
+#[should_panic]
+fn check_liquidatable_panics_when_oracle_price_is_stale() {
+    let w = setup();
+    let entry_price = 2_000i128;
+
+    set_prices(&w, entry_price);
+    seed_pool(&w, 1_000_000 * ONE_TOKEN);
+
+    let collateral = ONE_TOKEN;
+    let size_usd = 20_000 * ONE_USD;
+    open_long_position(&w, collateral, size_usd);
+
+    // Advance the ledger sequence so the stored price's ledger_seq != current ledger_seq
+    w.env.ledger().with_mut(|l| l.sequence += 1);
+
+    // check_liquidatable calls require_price_fresh(&index_token, &env.ledger().sequence())
+    // which must panic with Error::StalePrice
+    LiqClient::new(&w.env, &w.liq_handler).check_liquidatable(
+        &w.trader,
+        &w.market_tk,
+        &w.long_tk,
+        &true,
+    );
+}
+
