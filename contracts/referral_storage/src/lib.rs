@@ -1091,6 +1091,7 @@ mod tests {
         client(&w).register_code(&referrer, &code);
         client(&w).set_trader_referral_code(&trader, &code);
         assert_eq!(client(&w).get_trader_referrer(&trader), Some(referrer));
+        assert_eq!(client(&w).get_trader_referral_code(&trader), Some(code));
     }
 
     /// Code of exactly MAX_REFERRAL_CODE_LENGTH characters must succeed.
