@@ -2,7 +2,7 @@
 // Addresses issues #957, #958, #959, #960, #961, #962, #963, #964, #965, #967, #981
 
 #![no_std]
-use soroban_sdk::{Address, Env, i128};
+use soroban_sdk::{Address, Env};
 
 // #900: market configuration validation for creation and updates.
 pub mod market_config;
