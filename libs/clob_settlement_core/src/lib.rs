@@ -164,6 +164,64 @@ pub struct Fill {
     pub maker_is_sell: bool,
 }
 
+impl Fill {
+    /// Construct a `Fill` from price inputs, deriving `base_amount` and
+    /// `quote_amount` via `fill_quote_legs` so a `Fill` can never represent an
+    /// off-price trade (#1223).
+    ///
+    /// `remaining_before_lots` is the maker's resting quantity before this fill;
+    /// `fill_lots` is how many lots this fill consumes.  Both must be positive
+    /// and `fill_lots <= remaining_before_lots`.
+    pub fn new_from_price(
+        maker: Address,
+        taker: Address,
+        maker_is_sell: bool,
+        lot_size: i128,
+        remaining_before_lots: i128,
+        fill_lots: i128,
+        scaled_price: i128,
+    ) -> Result<Self, &'static str> {
+        if fill_lots <= 0 {
+            return Err("fill: fill_lots must be positive");
+        }
+        let base_amount = fill_lots.checked_mul(lot_size).ok_or("fill: base overflow")?;
+        let legs = fill_quote_legs(lot_size, remaining_before_lots, fill_lots, scaled_price)?;
+        Ok(Self {
+            maker,
+            taker,
+            base_amount,
+            // The taker's debit (buyer's locked quote released) is the
+            // authoritative quote amount for this fill.
+            quote_amount: legs.debit,
+            maker_is_sell,
+        })
+    }
+
+    /// Validate that `quote_amount` is consistent with the maker's resting
+    /// price.  Call this on `Fill` values constructed by callers that supply
+    /// `base_amount`/`quote_amount` directly, as an extra defence layer.
+    pub fn validate_price_consistency(
+        &self,
+        lot_size: i128,
+        remaining_before_lots: i128,
+        fill_lots: i128,
+        scaled_price: i128,
+    ) -> Result<(), &'static str> {
+        if fill_lots <= 0 {
+            return Err("fill: fill_lots must be positive");
+        }
+        let expected_base = fill_lots.checked_mul(lot_size).ok_or("fill: base overflow")?;
+        if self.base_amount != expected_base {
+            return Err("fill: base_amount inconsistent with fill_lots × lot_size");
+        }
+        let legs = fill_quote_legs(lot_size, remaining_before_lots, fill_lots, scaled_price)?;
+        if self.quote_amount != legs.debit {
+            return Err("fill: quote_amount inconsistent with resting price");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct SettlementLedger {
     pub base_transfers: Vec<(Address, i128)>,
@@ -1531,6 +1589,69 @@ mod rounding_tests {
                 assert!((c - 1) * d < n, "ceil_div({n},{d})={c}: (c-1)*d >= n");
             }
         }
+    // ---- Fill::new_from_price / validate_price_consistency (#1223) ----
+
+    #[test]
+    fn new_from_price_derives_correct_amounts() {
+        let env = Env::default();
+        let maker = Address::generate(&env);
+        let taker = Address::generate(&env);
+        // 3-lot fill at TICK_3: base = 3, quote debit = 14 (spec example B)
+        let fill = Fill::new_from_price(
+            maker.clone(), taker.clone(), true, 1, 3, 3, TICK_3,
+        ).unwrap();
+        assert_eq!(fill.base_amount, 3);
+        assert_eq!(fill.quote_amount, 14);
+    }
+
+    #[test]
+    fn validate_price_consistency_accepts_correctly_constructed_fill() {
+        let env = Env::default();
+        let maker = Address::generate(&env);
+        let taker = Address::generate(&env);
+        let fill = Fill::new_from_price(
+            maker.clone(), taker.clone(), true, 1, 3, 3, TICK_3,
+        ).unwrap();
+        assert!(fill.validate_price_consistency(1, 3, 3, TICK_3).is_ok());
+    }
+
+    #[test]
+    fn validate_price_consistency_rejects_off_price_quote() {
+        let env = Env::default();
+        let maker = Address::generate(&env);
+        let taker = Address::generate(&env);
+        // Manually construct a Fill with quote_amount that doesn't match the price
+        let fill = Fill {
+            maker,
+            taker,
+            base_amount: 3,
+            quote_amount: 999, // wrong
+            maker_is_sell: true,
+        };
+        assert!(fill.validate_price_consistency(1, 3, 3, TICK_3).is_err());
+    }
+
+    #[test]
+    fn validate_price_consistency_rejects_off_price_base() {
+        let env = Env::default();
+        let maker = Address::generate(&env);
+        let taker = Address::generate(&env);
+        let fill = Fill {
+            maker,
+            taker,
+            base_amount: 99, // wrong
+            quote_amount: 14,
+            maker_is_sell: true,
+        };
+        assert!(fill.validate_price_consistency(1, 3, 3, TICK_3).is_err());
+    }
+
+    #[test]
+    fn new_from_price_rejects_zero_fill_lots() {
+        let env = Env::default();
+        let maker = Address::generate(&env);
+        let taker = Address::generate(&env);
+        assert!(Fill::new_from_price(maker, taker, true, 1, 3, 0, TICK_3).is_err());
     }
 }
 
