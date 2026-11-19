@@ -19,7 +19,11 @@ NON_UPGRADEABLE_CONTRACTS := \
 	deposit_vault \
 	withdrawal_vault \
 	order_vault \
-	adl_handler
+	adl_handler \
+	fee_batch_sweeper \
+	insurance_fund_router \
+	market_util_reader \
+	order_cleanup
 
 UPGRADE_CONTRACTS ?= \
 	oracle \
