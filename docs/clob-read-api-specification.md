@@ -1,5 +1,24 @@
 # CLOB Read API Specification — Phase 7 Implementation Guide
 
+> **Status: spec, not implemented.**
+>
+> This document describes the bounded reader API targeted by CLOB-141 through
+> CLOB-144 (best bid/ask and mid-price helpers, paginated L2 depth, trader
+> balance and open-order summaries). **Nothing in this repository implements
+> it yet:**
+>
+> - `libs/clob_settlement_core` has no reader module.
+> - `contracts/reader` is the legacy perps reader (4 123 lines, 30 tests) with
+>   an entirely different surface; it is unrelated to the CLOB.
+> - `MAX_DEPTH_QUERY_SIZE` (`lib.rs:64`) and `validate_depth_query_size`
+>   (`lib.rs:141–146`) are a constant and a validator that exist without a query
+>   to bound — there is no caller.
+>
+> Until `libs/clob_settlement_core` has a Cargo.toml and compiles (see
+> [clob-status.md](clob-status.md)), none of the APIs below can be built.
+> When implementation begins, each documented query in this file should be
+> accompanied by a test asserting the exact response shape described here.
+
 This document provides comprehensive implementation guidance for Phase 7 Read APIs: indexer ingestion, L2 order book depth, top-of-book helpers, and trader balance exposure.
 
 ---
@@ -706,6 +725,6 @@ class PriceConverter {
 
 ---
 
-**Last Updated:** October 2024  
-**Phase:** 7 — Read APIs, Indexer, SDKs  
-**Status:** Implementation Guide
+**Last Updated:** 2026-11-19
+**Phase:** 7 — Read APIs, Indexer, SDKs
+**Status:** Spec, not implemented (see callout at top of this document)
