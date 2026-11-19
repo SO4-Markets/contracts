@@ -1295,6 +1295,7 @@ SO4.market is being built in the open. All nine implementation phases are comple
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for deployment, upgrade workflow rules, and the PR checklist.
 For the post-issue-campaign cleanup map, see [docs/PROJECT_CLEANUP.md](docs/PROJECT_CLEANUP.md).
+For the current CLOB implementation status (what compiles, what does not, and what must land first), see [docs/clob-status.md](docs/clob-status.md).
 
 ---
 
