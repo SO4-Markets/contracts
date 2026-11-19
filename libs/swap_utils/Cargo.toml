@@ -17,3 +17,5 @@ gmx-pricing-utils = { path = "../pricing_utils" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+gmx-types   = { path = "../types" }
+gmx-keys    = { path = "../keys" }
