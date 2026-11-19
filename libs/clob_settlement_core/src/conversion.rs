@@ -24,7 +24,7 @@
 //! The two directions differ by at most one quote atom. No path uses floating
 //! point, and every operation is checked: any overflow returns `None`.
 
-use crate::units::{BaseAtoms, BaseLots, QuoteAtoms, Tick};
+use crate::{ceil_div, units::{BaseAtoms, BaseLots, QuoteAtoms, Tick}};
 
 /// Fixed-point scale of the price: a scaled price of `PRICE_SCALE` is one quote
 /// atom per base atom.
@@ -74,7 +74,7 @@ pub fn quote_for_base_atoms(
     let product = base.get().checked_mul(scaled_price)?;
     let quote = match rounding {
         Rounding::Down => product / PRICE_SCALE,
-        Rounding::Up => product.checked_add(PRICE_SCALE - 1)? / PRICE_SCALE,
+        Rounding::Up => ceil_div(product, PRICE_SCALE)?,
     };
     QuoteAtoms::new(quote)
 }

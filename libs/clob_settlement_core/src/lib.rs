@@ -473,6 +473,14 @@ impl FeeTier {
     }
 }
 
+/// `ceil(numerator / denominator)` with checked arithmetic.
+/// Returns `None` on overflow of the rounding adjustment or if `denominator` is zero.
+fn ceil_div(numerator: i128, denominator: i128) -> Option<i128> {
+    if denominator == 0 { return None; }
+    // Add (denominator - 1) before dividing to round up, checking for overflow.
+    numerator.checked_add(denominator - 1).map(|n| n / denominator)
+}
+
 fn validate_fee_rate(rate: i128) -> Result<(), &'static str> {
     if rate < 0 || rate > MAX_FEE_RATE {
         return Err("fee: rate out of range");
@@ -509,9 +517,7 @@ fn fee_on_quote(quote_amount: i128, rate: i128) -> Result<i128, &'static str> {
     if quote_amount < 0 { return Err("fee: negative quote amount"); }
     let numerator = quote_amount.checked_mul(rate).ok_or("fee: multiplication overflow")?;
     if numerator == 0 { return Ok(0); }
-    numerator.checked_add(FEE_RATE_SCALE - 1)
-        .ok_or("fee: rounding overflow")
-        .map(|n| n / FEE_RATE_SCALE)
+    ceil_div(numerator, FEE_RATE_SCALE).ok_or("fee: rounding overflow")
 }
 
 // ============ #958: Fee Buckets ============
@@ -589,11 +595,9 @@ pub fn quote_atoms(
         return Err("quote: negative input");
     }
     let numerator = base_atoms.checked_mul(scaled_price).ok_or("quote overflow")?;
-    let quotient = numerator / PRICE_SCALE;
     match rounding {
-        RoundingMode::Down => Ok(quotient),
-        RoundingMode::Up if numerator % PRICE_SCALE == 0 => Ok(quotient),
-        RoundingMode::Up => Ok(quotient + 1),
+        RoundingMode::Down => Ok(numerator / PRICE_SCALE),
+        RoundingMode::Up => ceil_div(numerator, PRICE_SCALE).ok_or("quote: rounding overflow"),
     }
 }
 
@@ -1542,6 +1546,49 @@ mod rounding_tests {
         assert!(fill_quote_legs(0, 3, 1, TICK_3).is_err());
     }
 
+    // ---- ceil_div unit and property tests (#1211) ----
+
+    #[test]
+    fn ceil_div_exact() {
+        assert_eq!(ceil_div(10, 5), Some(2));
+        assert_eq!(ceil_div(0, 5), Some(0));
+    }
+
+    #[test]
+    fn ceil_div_rounds_up() {
+        assert_eq!(ceil_div(11, 5), Some(3));
+        assert_eq!(ceil_div(1, PRICE_SCALE), Some(1));
+    }
+
+    #[test]
+    fn ceil_div_overflow_boundary() {
+        // i128::MAX / 1 == i128::MAX, adjustment overflows
+        assert_eq!(ceil_div(i128::MAX, 1), Some(i128::MAX));
+        // numerator + (denominator - 1) overflows i128
+        assert_eq!(ceil_div(i128::MAX, 2), None);
+    }
+
+    #[test]
+    fn ceil_div_zero_denominator() {
+        assert_eq!(ceil_div(1, 0), None);
+    }
+
+    #[test]
+    fn ceil_div_property_floor_ceiling_sandwich() {
+        // For a range of (n, d) pairs: floor(n/d) <= n/d <= ceil_div(n,d)
+        // and ceil * d >= n, (ceil - 1) * d < n (when ceil > 0)
+        let cases: &[(i128, i128)] = &[
+            (0, 1), (1, 1), (99, 100), (100, 100), (101, 100),
+            (PRICE_SCALE - 1, PRICE_SCALE), (PRICE_SCALE, PRICE_SCALE),
+            (PRICE_SCALE + 1, PRICE_SCALE), (FEE_RATE_SCALE - 1, FEE_RATE_SCALE),
+        ];
+        for &(n, d) in cases {
+            let c = ceil_div(n, d).expect("no overflow in test cases");
+            assert!(c * d >= n, "ceil_div({n},{d})={c}: c*d < n");
+            if c > 0 {
+                assert!((c - 1) * d < n, "ceil_div({n},{d})={c}: (c-1)*d >= n");
+            }
+        }
     // ---- Fill::new_from_price / validate_price_consistency (#1223) ----
 
     #[test]
