@@ -137,7 +137,10 @@ pub fn validate_batch_size(size: u32) -> Result<(), &'static str> {
 }
 
 /// Validates that a depth query size does not exceed MAX_DEPTH_QUERY_SIZE.
-/// Called when returning market data.
+/// This guard exists for the paginated L2 depth query specified in
+/// `docs/clob-read-api-specification.md` (CLOB-143). There is no caller yet:
+/// the reader module has not been built. Move this function next to the query
+/// function when that module is added (#1188).
 pub fn validate_depth_query_size(size: u32) -> Result<(), &'static str> {
     if size > MAX_DEPTH_QUERY_SIZE {
         return Err("depth: exceeds MAX_DEPTH_QUERY_SIZE");
