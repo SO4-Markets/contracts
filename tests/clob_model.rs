@@ -26,12 +26,14 @@
 
 #![cfg(test)]
 
-use std::collections::{BTreeMap, VecDeque};
+// Arithmetic rules are now in libs/clob_model so both test files share one
+// canonical implementation (#1180).
+use clob_model::{
+    maker_fee as _maker_fee, notional as _notional, taker_fee as _taker_fee, ArithError, BPS,
+    MAX_FEE_BPS, MAX_PRICE, MAX_QTY,
+};
 
-const MAX_PRICE: u64 = 1_000_000_000_000;
-const MAX_QTY: u64 = u64::MAX / 2;
-const MAX_FEE_BPS: u32 = 10_000;
-const BPS: u128 = 10_000;
+use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Side {
@@ -108,10 +110,18 @@ impl Ledger {
 // Shared arithmetic and validation
 // ---------------------------------------------------------------------------
 
+// Map clob_model's ArithError back to this file's local Error so the rest of
+// the test file (which uses Error::Overflow etc.) compiles unchanged.
+fn arith_err(e: ArithError) -> Error {
+    match e {
+        ArithError::Overflow => Error::Overflow,
+        ArithError::OutOfRange => Error::Overflow, // treated as overflow here
+        ArithError::InvalidFeeRate => Error::InvalidFeeRate,
+    }
+}
+
 fn notional(price: u64, qty: u64) -> Result<u128, Error> {
-    (price as u128)
-        .checked_mul(qty as u128)
-        .ok_or(Error::Overflow)
+    _notional(price, qty).map_err(arith_err)
 }
 
 fn to_i128(v: u128) -> Result<i128, Error> {
@@ -119,13 +129,11 @@ fn to_i128(v: u128) -> Result<i128, Error> {
 }
 
 fn fee_ceil(n: u128, bps: u32) -> Result<u128, Error> {
-    let p = n.checked_mul(bps as u128).ok_or(Error::Overflow)?;
-    Ok(p / BPS + u128::from(p % BPS != 0))
+    _taker_fee(n, bps).map_err(arith_err)
 }
 
 fn fee_floor(n: u128, bps: u32) -> Result<u128, Error> {
-    let p = n.checked_mul(bps as u128).ok_or(Error::Overflow)?;
-    Ok(p / BPS)
+    _maker_fee(n, bps).map_err(arith_err)
 }
 
 fn check_params(p: &Params) -> Result<(), Error> {

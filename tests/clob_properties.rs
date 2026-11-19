@@ -9,10 +9,14 @@
 
 #![cfg(test)]
 
+// Arithmetic rules are now in libs/clob_model so both test files share one
+// canonical implementation (#1180).
+use clob_model::taker_fee as clob_taker_fee;
+
 use std::collections::{BTreeMap, VecDeque};
 
 const TRADERS: usize = 4;
-const FEE_BPS: u128 = 30;
+const FEE_BPS: u32 = 30; // basis points; u32 to match clob_model::taker_fee
 const NO_EXPIRY: u64 = u64::MAX;
 
 type Balances = [u128; TRADERS];
@@ -387,11 +391,10 @@ impl Engine {
         }
         self.free_base[buyer] += qty;
         let quote = maker.price * qty;
-        let fee = quote * FEE_BPS / 10_000;
-        let dust = fee & 1;
+        // Use the canonical taker_fee (ceil) from clob_model (#1180).
+        let fee = clob_taker_fee(quote, FEE_BPS).expect("fee overflow unreachable");
         self.free_quote[seller] += quote - fee;
-        self.fee_bucket += fee - dust;
-        self.dust_bucket += dust;
+        self.fee_bucket += fee;
     }
 
     fn refund(&mut self, order: &Order, qty: u128) {
