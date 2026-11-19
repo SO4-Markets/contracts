@@ -12,7 +12,11 @@
 //!
 //! - `notional = price * qty`  (price in ticks, qty in lots), computed in `u128`.
 //! - taker fee = `ceil(notional * taker_bps / 10_000)`
-//! - maker fee = `floor(notional * maker_bps / 10_000)`
+//! - maker fee = `ceil(notional * maker_bps / 10_000)`
+//!
+//! Both fees round UP. This matches `libs/clob_settlement_core`'s `fee_on_quote`
+//! and `required_bid_reservation`'s worst-case lock (#1175). An earlier version
+//! of this crate used floor for the maker fee; that version was wrong.
 //! - A fill executes at the resting (maker) price. A buying taker escrows its
 //!   limit price and is refunded `(limit_price - fill_price) * qty`.
 //!
@@ -77,7 +81,11 @@ pub fn taker_fee(n: u128, bps: u32) -> Result<u128, ArithError> {
     Ok(p / BPS + u128::from(p % BPS != 0))
 }
 
-/// Maker fee = `floor(notional × bps / 10_000)`.
+/// Maker fee = `ceil(notional × bps / 10_000)`.
+///
+/// Both taker and maker fees round UP, matching `libs/clob_settlement_core`'s
+/// `fee_on_quote` (#1175). Using floor here would cause a one-atom conservation
+/// error per fill where the division is inexact.
 ///
 /// Returns `Err(InvalidFeeRate)` when `bps > MAX_FEE_BPS`.
 /// Returns `Err(Overflow)` when `notional × bps` overflows `u128`.
@@ -86,7 +94,7 @@ pub fn maker_fee(n: u128, bps: u32) -> Result<u128, ArithError> {
         return Err(ArithError::InvalidFeeRate);
     }
     let p = n.checked_mul(bps as u128).ok_or(ArithError::Overflow)?;
-    Ok(p / BPS)
+    Ok(p / BPS + u128::from(p % BPS != 0))
 }
 
 /// Escrow amount for a resting order.
@@ -144,10 +152,10 @@ mod tests {
     }
 
     #[test]
-    fn maker_fee_is_floor() {
-        // 10_001 * 10 / 10_000 = 10.001 → floor → 10
+    fn maker_fee_is_ceil() {
+        // 10_001 * 10 / 10_000 = 10.001 → ceil → 11  (#1175: maker rounds UP like taker)
         let n = 10_001u128;
-        assert_eq!(maker_fee(n, 10).unwrap(), 10);
+        assert_eq!(maker_fee(n, 10).unwrap(), 11);
     }
 
     #[test]
