@@ -2700,3 +2700,174 @@ mod bounded_work_tests {
         assert!(MAX_ORDER_PAYLOAD_BYTES <= u32::MAX);
     }
 }
+
+// ============ #1136: cumulative_taker_fee_delta anti-fragmentation property tests ============
+//
+// Property: Σ cumulative_taker_fee_delta(tᵢ₋₁, fillᵢ) == taker_fee(total)
+// for any partition of `total` into consecutive fills.
+//
+// Because `#![no_std]` rules out the `rand` crate, we drive the property
+// tests with a small deterministic LCG that produces the same reproducible
+// corpus on every run while still covering a wide range of amounts.
+#[cfg(test)]
+mod cumulative_fee_property_tests {
+    use super::*;
+
+    /// Minimal LCG for deterministic pseudo-random u64 sequences.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            // Knuth multiplicative hash constants.
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0
+        }
+
+        /// Uniform in [1, max] (never zero).
+        fn next_in(&mut self, max: i128) -> i128 {
+            assert!(max >= 1);
+            (self.next() % (max as u64)) as i128 + 1
+        }
+    }
+
+    /// For a given config and total, partition `total` into `n` fills at
+    /// random split-points and assert the deltas sum to taker_fee(total).
+    fn assert_partition_property(config: &MarketFeeConfig, total: i128, n: usize, seed: u64) {
+        assert!(n >= 1);
+        assert!(total >= n as i128);
+        let whole = config.taker_fee(total).unwrap();
+
+        // Build n-1 split points in [1, total-1], then derive fill sizes.
+        let mut lcg = Lcg(seed);
+        let mut splits: Vec<i128> = (0..n - 1)
+            .map(|_| lcg.next_in(total - 1))
+            .collect();
+        splits.sort_unstable();
+        splits.dedup();
+        // If dedup collapsed splits we just get fewer (still valid) fills.
+        let mut boundaries = Vec::new();
+        boundaries.push(0i128);
+        for s in &splits {
+            boundaries.push(*s);
+        }
+        boundaries.push(total);
+
+        let mut cumulative_sum = 0i128;
+        let mut before = 0i128;
+        for w in boundaries.windows(2) {
+            let fill = w[1] - w[0];
+            if fill == 0 { continue; }
+            let delta = config.cumulative_taker_fee_delta(before, fill).unwrap();
+            cumulative_sum += delta;
+            before += fill;
+        }
+        assert_eq!(
+            cumulative_sum, whole,
+            "partition property failed: total={total} n={n} rate={} sum={cumulative_sum} whole={whole}",
+            config.taker_fee_rate
+        );
+    }
+
+    #[test]
+    fn two_way_split_equals_whole_fill_fee() {
+        let rates: &[i128] = &[1, 1_000, 10_000, 100_000, MAX_FEE_RATE];
+        let totals: &[i128] = &[2, 10, 999, 1_000, 1_001, 1_000_000, 100_000_000];
+        for &rate in rates {
+            let config = MarketFeeConfig::new(rate, 0).unwrap();
+            for &total in totals {
+                assert_partition_property(&config, total, 2, rate as u64 ^ total as u64);
+            }
+        }
+    }
+
+    #[test]
+    fn three_way_split_equals_whole_fill_fee() {
+        let rates: &[i128] = &[1, 50_000, 100_000, MAX_FEE_RATE];
+        let totals: &[i128] = &[3, 100, 5_000, 1_000_000];
+        for &rate in rates {
+            let config = MarketFeeConfig::new(rate, 0).unwrap();
+            for &total in totals {
+                assert_partition_property(&config, total, 3, rate as u64 ^ (total as u64).wrapping_add(7));
+            }
+        }
+    }
+
+    #[test]
+    fn n_way_split_stress_various_rates() {
+        let cases: &[(i128, i128, usize)] = &[
+            (100_000, 5_000, 5),
+            (100_000, 5_000, 50),
+            (1,       100_000_000, 10),
+            (MAX_FEE_RATE, 1_000, 10),
+            (50_000, 2_000_000, 7),
+        ];
+        for &(rate, total, n) in cases {
+            if total < n as i128 { continue; }
+            let config = MarketFeeConfig::new(rate, 0).unwrap();
+            assert_partition_property(&config, total, n, rate as u64 ^ total as u64 ^ n as u64);
+        }
+    }
+
+    #[test]
+    fn zero_rate_sum_is_always_zero() {
+        let config = MarketFeeConfig::new(0, 0).unwrap();
+        let totals: &[i128] = &[1, 1_000, 1_000_000, i128::MAX / 2];
+        for &total in totals {
+            let whole = config.taker_fee(total).unwrap();
+            assert_eq!(whole, 0);
+            // Any partition also sums to zero.
+            let delta = config.cumulative_taker_fee_delta(0, total).unwrap();
+            assert_eq!(delta, 0);
+        }
+    }
+
+    #[test]
+    fn max_rate_partition_equals_whole() {
+        let config = MarketFeeConfig::new(MAX_FEE_RATE, 0).unwrap();
+        // At 100% rate, fee == quote.
+        let total = 1_000i128;
+        assert_partition_property(&config, total, 2, 42);
+        assert_partition_property(&config, total, 5, 99);
+    }
+
+    #[test]
+    fn fill_quote_zero_contributes_nothing() {
+        // A zero-size fill must return 0 and not shift the running total.
+        let config = MarketFeeConfig::new(100_000, 0).unwrap();
+        let delta = config.cumulative_taker_fee_delta(500, 0).unwrap();
+        assert_eq!(delta, 0);
+    }
+
+    #[test]
+    fn taker_quote_before_zero_is_a_first_fill() {
+        // Starting from zero is equivalent to taker_fee(fill_quote).
+        let config = MarketFeeConfig::new(100_000, 0).unwrap();
+        let fill = 1_000i128;
+        let delta = config.cumulative_taker_fee_delta(0, fill).unwrap();
+        assert_eq!(delta, config.taker_fee(fill).unwrap());
+    }
+
+    #[test]
+    fn negative_fill_is_rejected() {
+        let config = MarketFeeConfig::new(100_000, 0).unwrap();
+        assert!(config.cumulative_taker_fee_delta(0, -1).is_err());
+        assert!(config.cumulative_taker_fee_delta(500, -1).is_err());
+    }
+
+    #[test]
+    fn deterministic_corpus_broad_coverage() {
+        // Run the partition property over a wider seeded corpus to catch
+        // rounding anomalies at unusual (rate, total, split-point) combinations.
+        let mut lcg = Lcg(0xdeadbeef_cafebabe);
+        let rate_pool: &[i128] = &[1, 2, 100, 10_000, 100_000, 999_999, MAX_FEE_RATE];
+        for _ in 0..200 {
+            let rate = rate_pool[(lcg.next() as usize) % rate_pool.len()];
+            let total = (lcg.next() % 10_000_000) as i128 + 1;
+            let n_splits = (lcg.next() % 8) as usize + 2; // 2..=9
+            if total < n_splits as i128 { continue; }
+            let config = MarketFeeConfig::new(rate, 0).unwrap();
+            let seed = lcg.next();
+            assert_partition_property(&config, total, n_splits, seed);
+        }
+    }
+}
