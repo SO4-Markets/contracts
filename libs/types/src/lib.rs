@@ -13,10 +13,6 @@ pub struct PriceProps {
 }
 
 impl PriceProps {
-    pub fn is_empty(&self) -> bool {
-        self.min == 0 || self.max == 0
-    }
-
     pub fn mid_price(&self) -> i128 {
         (self.max + self.min) / 2
     }
@@ -85,6 +81,7 @@ impl MarketProps {
 ///   long_claim_fnd_per_size  = longTokenClaimableFundingAmountPerSize
 ///   short_claim_fnd_per_size = shortTokenClaimableFundingAmountPerSize
 #[contracttype]
+#[derive(Clone)]
 pub struct PositionProps {
     pub account: Address,
     pub market: Address,
@@ -121,6 +118,7 @@ pub enum OrderType {
 
 /// Mirrors GMX's Order.Props.
 #[contracttype]
+#[derive(Clone, Debug)]
 pub struct OrderProps {
     pub account: Address,
     pub receiver: Address,
@@ -166,6 +164,7 @@ pub struct CreateWithdrawalParams {
 
 /// User-supplied parameters for creating an order. Mirrors GMX BaseOrderUtils.CreateOrderParams.
 #[contracttype]
+#[derive(Clone)]
 pub struct CreateOrderParams {
     pub receiver: Address,
     pub market: Address,
@@ -183,6 +182,11 @@ pub struct CreateOrderParams {
     /// (with full refund) when the keeper calls `execute_order` after sequence `n`.
     /// `None` means the order never expires via this mechanism.
     pub expiry_ledger: Option<u64>,
+    /// Issue #385/#535: when a registered position manager calls on behalf of
+    /// an owner, the owner is named here explicitly. `Some(owner)` requires
+    /// `data_store::get_position_manager(owner, market) == Some(caller)`;
+    /// `None` means the caller is acting for themselves.
+    pub on_behalf_of: Option<Address>,
 }
 
 // ─── Deposits / Withdrawals ───────────────────────────────────────────────────
@@ -238,8 +242,17 @@ pub struct PoolValueInfo {
     pub short_token_amount: i128,
     pub long_token_usd: i128,
     pub short_token_usd: i128,
-    pub total_borrowing_fees: i128,
     pub impact_pool_amount: i128,
+}
+
+/// Pending (not-yet-settled) funding for a single position — issue #275.
+/// Positive = amount the holder would receive; negative = amount the holder
+/// would pay, in each of the position's long_token / short_token units.
+#[contracttype]
+pub struct FundingAmountResult {
+    pub long_token_amount: i128,
+    pub short_token_amount: i128,
+    pub at_ledger: u64,
 }
 
 /// Aggregate funding information for a market (used by Reader).
@@ -291,7 +304,7 @@ pub struct DecreasePositionResult {
 /// `computed_at_ledger`.
 #[contracttype]
 pub struct ProtocolStats {
-    pub total_pool_value_usd: i128,       // sum of get_pool_value across all markets
+    pub total_pool_value_usd: i128, // sum of get_pool_value across all markets
     pub total_long_open_interest_usd: i128,
     pub total_short_open_interest_usd: i128,
     pub total_accumulated_fees_usd: i128, // sum of unclaimed fee balances, in USD
@@ -331,31 +344,34 @@ pub struct PositionInfo {
 /// ADL-eligible position candidate for auto-deleveraging.
 /// Returned by reader::get_adl_eligible_positions.
 #[contracttype]
+#[derive(Clone)]
 pub struct AdlCandidate {
-    pub key: BytesN<32>,                  // position key for order_handler::get_position
-    pub owner: Address,                   // position owner
-    pub size_usd: u128,                   // position size in USD (absolute value)
-    pub unrealised_pnl_usd: u128,         // positive PnL only (loss positions are filtered)
-    pub pnl_to_size_ratio_bps: u32,       // unrealised_pnl / size in basis points (sort key)
+    pub key: BytesN<32>,            // position key for order_handler::get_position
+    pub owner: Address,             // position owner
+    pub size_usd: u128,             // position size in USD (absolute value)
+    pub unrealised_pnl_usd: u128,   // positive PnL only (loss positions are filtered)
+    pub pnl_to_size_ratio_bps: u32, // unrealised_pnl / size in basis points (sort key)
 }
 
 /// Estimated swap output for dry-run queries.
 /// Returned by reader::estimate_swap_output.
 #[contracttype]
 pub struct SwapEstimate {
-    pub token_out: Address,               // output token after full swap path
-    pub amount_out: u128,                 // estimated output amount
-    pub price_impact_usd: i128,           // cumulative impact (negative = cost, positive = rebate)
-    pub execution_price: u128,            // effective rate for the full swap path
-    pub reverts_if_executed: bool,        // true if any market is paused or insufficient liquidity
+    pub token_out: Address,        // output token after full swap path
+    pub amount_out: u128,          // estimated output amount
+    pub price_impact_usd: i128,    // cumulative impact (negative = cost, positive = rebate)
+    pub execution_price: u128,     // effective rate for the full swap path
+    pub reverts_if_executed: bool, // true if any market is paused or insufficient liquidity
 }
 
 /// Position leverage breakdown returned by reader::get_position_leverage.
-/// leverage_bps = size_usd * 100 / net_collateral_usd (e.g. 2000 = 20×).
-/// If net_collateral_usd == 0, effective_leverage_bps == u32::MAX.
+/// effective_leverage_x100 = size_usd * 100 / net_collateral_usd (e.g. 2000 = 20×).
+/// This is NOT basis points (BPS_DIVISOR = 10_000) — genuine bps would represent
+/// 20× as 200_000, not 2000. It's a leverage-times-100 scale.
+/// If net_collateral_usd == 0, effective_leverage_x100 == u32::MAX.
 #[contracttype]
 pub struct PositionLeverage {
-    pub effective_leverage_bps: u32,
+    pub effective_leverage_x100: u32,
     pub net_collateral_usd: u128,
     pub position_size_usd: u128,
     pub is_liquidatable: bool,
@@ -384,11 +400,46 @@ pub struct PendingOrder {
 /// under-collateralised positions appear first.
 #[contracttype]
 pub struct LiquidatablePosition {
-    pub key: BytesN<32>,           // canonical position key for order_handler::get_position
+    pub key: BytesN<32>, // canonical position key for order_handler::get_position
     pub owner: Address,
     pub size_usd: u128,
     pub collateral_usd: u128,
-    pub health_factor_bps: u32,    // collateral_usd * 10000 / size_usd; < 10000 = liquidatable
+    pub health_factor_bps: u32, // collateral_usd * 10000 / size_usd; < 10000 = liquidatable
 }
 
 use soroban_sdk::BytesN;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Issue #589: PriceProps::pick_price had no direct unit test (only indirect
+    // coverage via mid_price/pick_price_for_pnl call sites). It is used by
+    // gmx_market_utils::get_pool_value to select the asset-side price for the
+    // long/short/index tokens based on the `maximize` flag.
+    #[test]
+    fn pick_price_returns_max_when_maximize_true() {
+        let price = PriceProps { min: 100, max: 200 };
+        assert_eq!(price.pick_price(true), 200);
+    }
+
+    #[test]
+    fn pick_price_returns_min_when_maximize_false() {
+        let price = PriceProps { min: 100, max: 200 };
+        assert_eq!(price.pick_price(false), 100);
+    }
+}
+
+// ─── Protocol modules ─────────────────────────────────────────────────────────
+pub mod errors;
+pub mod event_schema;
+pub mod market_state;
+
+pub use errors::ProtocolError;
+pub use event_schema::{
+    DepositCreatedEvent, DepositExecutedEvent, FundingRateUpdatedEvent, MarketStateTransitionEvent,
+    OrderCancelledEvent, OrderCreatedEvent, OrderExecutedEvent, PositionDecreasedEvent,
+    PositionIncreasedEvent, PositionLiquidatedEvent, TransactionRejectedEvent,
+    WithdrawalCreatedEvent, WithdrawalExecutedEvent, EVENT_SCHEMA_VERSION,
+};
+pub use market_state::{validate_state_transition, MarketState, TransitionAuthority};

@@ -12,8 +12,14 @@ members = [
   "libs/increase_position_utils",
   "libs/decrease_position_utils",
   "libs/clob_settlement_core",
+  "libs/clob_model",
+  "libs/settlement_invariants",
+  "libs/rollback_harness",
   "tests",
 ]
+
+[workspace.package]
+license = "MIT"
 
 [workspace.dependencies]
 soroban-sdk = "25.3.1"

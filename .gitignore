@@ -4,6 +4,7 @@ target
 # Local settings
 .soroban
 .stellar
+*test_snapshots/
 
 # Deployed contract addresses (network-specific, not for version control)
 .deployed/
@@ -18,3 +19,7 @@ push_issues.py
 push-github-issues.sh
 issue.md
 pr.md
+fix.md
+
+# Local build/test output artifacts
+*.log

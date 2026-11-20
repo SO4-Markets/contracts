@@ -183,8 +183,12 @@ FEE_HANDLER_HASH=$(upload        "fee_handler"         "fee_handler.wasm")
 REFERRAL_HASH=$(upload           "referral_storage"    "referral_storage.wasm")
 READER_HASH=$(upload             "reader"              "reader.wasm")
 ROUTER_HASH=$(upload             "exchange_router"     "exchange_router.wasm")
+ORDER_CLEANUP_HASH=$(upload      "order_cleanup"       "order_cleanup.wasm")
+FEE_SWEEPER_HASH=$(upload        "fee_batch_sweeper"   "fee_batch_sweeper.wasm")
+INSURANCE_ROUTER_HASH=$(upload   "insurance_fund_router" "insurance_fund_router.wasm")
+MARKET_UTIL_READER_HASH=$(upload "market_util_reader"  "market_util_reader.wasm")
 
-ok "17 blobs uploaded"
+ok "21 blobs uploaded"
 sep
 
 # ── Step 3: Core contracts ─────────────────────────────────────────────────────
@@ -290,7 +294,10 @@ invoke "$FEE_HANDLER" initialize \
   --admin "$ADMIN" \
   --role_store "$ROLE_STORE" \
   --data_store "$DATA_STORE"
-ok "fee_handler          $FEE_HANDLER"
+# Protocol fees are only ever paid to this configured recipient; claim_fees
+# reverts with FeeReceiverNotSet until it is set. Override with FEE_RECEIVER.
+invoke "$FEE_HANDLER" set_fee_receiver --receiver "${FEE_RECEIVER:-$ADMIN}"
+ok "fee_handler          $FEE_HANDLER  (fee receiver ${FEE_RECEIVER:-$ADMIN})"
 
 REFERRAL_STORAGE=$(deploy_contract "referral_storage" "$REFERRAL_HASH")
 invoke "$REFERRAL_STORAGE" initialize --admin "$ADMIN"
@@ -299,6 +306,24 @@ ok "referral_storage     $REFERRAL_STORAGE"
 READER=$(deploy_contract "reader" "$READER_HASH")
 invoke "$READER" initialize --admin "$ADMIN"
 ok "reader               $READER"
+
+# Keeper/periphery helpers. None of these writes to data_store as itself —
+# each forwards the external caller, whose own roles are checked — so none
+# needs CONTROLLER. fee_batch_sweeper, insurance_fund_router and
+# market_util_reader are stateless (addresses are passed per call) and have
+# no initialize.
+ORDER_CLEANUP=$(deploy_contract "order_cleanup" "$ORDER_CLEANUP_HASH")
+invoke "$ORDER_CLEANUP" initialize --admin "$ADMIN" --role_store "$ROLE_STORE"
+ok "order_cleanup        $ORDER_CLEANUP"
+
+FEE_BATCH_SWEEPER=$(deploy_contract "fee_batch_sweeper" "$FEE_SWEEPER_HASH")
+ok "fee_batch_sweeper    $FEE_BATCH_SWEEPER"
+
+INSURANCE_FUND_ROUTER=$(deploy_contract "insurance_fund_router" "$INSURANCE_ROUTER_HASH")
+ok "insurance_fund_router $INSURANCE_FUND_ROUTER"
+
+MARKET_UTIL_READER=$(deploy_contract "market_util_reader" "$MARKET_UTIL_READER_HASH")
+ok "market_util_reader   $MARKET_UTIL_READER"
 sep
 
 # ── Step 7: Exchange router ────────────────────────────────────────────────────
@@ -328,7 +353,8 @@ for CONTRACT in \
   "$LIQUIDATION_HANDLER" \
   "$ADL_HANDLER" \
   "$FEE_HANDLER" \
-  "$EXCHANGE_ROUTER"
+  "$EXCHANGE_ROUTER" \
+  "$ORACLE"
 do
   invoke "$ROLE_STORE" grant_role \
     --caller "$ADMIN" \
@@ -369,6 +395,11 @@ FEE_HANDLER=$FEE_HANDLER
 REFERRAL_STORAGE=$REFERRAL_STORAGE
 READER=$READER
 EXCHANGE_ROUTER=$EXCHANGE_ROUTER
+
+ORDER_CLEANUP=$ORDER_CLEANUP
+FEE_BATCH_SWEEPER=$FEE_BATCH_SWEEPER
+INSURANCE_FUND_ROUTER=$INSURANCE_FUND_ROUTER
+MARKET_UTIL_READER=$MARKET_UTIL_READER
 ENV
 
 # ── Write network manifests ────────────────────────────────────────────────────
@@ -401,7 +432,11 @@ if [[ "$DRY_RUN" != "1" ]]; then
     "fee_handler": "$FEE_HANDLER",
     "referral_storage": "$REFERRAL_STORAGE",
     "reader": "$READER",
-    "exchange_router": "$EXCHANGE_ROUTER"
+    "exchange_router": "$EXCHANGE_ROUTER",
+    "order_cleanup": "$ORDER_CLEANUP",
+    "fee_batch_sweeper": "$FEE_BATCH_SWEEPER",
+    "insurance_fund_router": "$INSURANCE_FUND_ROUTER",
+    "market_util_reader": "$MARKET_UTIL_READER"
   }
 }
 JSON
@@ -430,7 +465,11 @@ JSON
     "fee_handler": "$FEE_HANDLER_HASH",
     "referral_storage": "$REFERRAL_HASH",
     "reader": "$READER_HASH",
-    "exchange_router": "$ROUTER_HASH"
+    "exchange_router": "$ROUTER_HASH",
+    "order_cleanup": "$ORDER_CLEANUP_HASH",
+    "fee_batch_sweeper": "$FEE_SWEEPER_HASH",
+    "insurance_fund_router": "$INSURANCE_ROUTER_HASH",
+    "market_util_reader": "$MARKET_UTIL_READER_HASH"
   }
 }
 JSON
@@ -464,6 +503,10 @@ printf "  ${GREEN}%-22s${NC}  %s\n" "fee_handler"         "$FEE_HANDLER"
 printf "  ${GREEN}%-22s${NC}  %s\n" "referral_storage"    "$REFERRAL_STORAGE"
 printf "  ${GREEN}%-22s${NC}  %s\n" "reader"              "$READER"
 printf "  ${GREEN}%-22s${NC}  %s\n" "exchange_router"     "$EXCHANGE_ROUTER"
+printf "  ${GREEN}%-22s${NC}  %s\n" "order_cleanup"       "$ORDER_CLEANUP"
+printf "  ${GREEN}%-22s${NC}  %s\n" "fee_batch_sweeper"   "$FEE_BATCH_SWEEPER"
+printf "  ${GREEN}%-22s${NC}  %s\n" "insurance_fund_router" "$INSURANCE_FUND_ROUTER"
+printf "  ${GREEN}%-22s${NC}  %s\n" "market_util_reader"  "$MARKET_UTIL_READER"
 echo -e "${BOLD}$DIV${NC}"
 echo -e "  Addresses saved → ${CYAN}$OUT_FILE${NC}"
 echo -e "${BOLD}$DIV${NC}"

@@ -39,7 +39,12 @@ export const Errors = {
   3: {message:"Unauthorized"},
   4: {message:"TokenNotEnabled"},
   5: {message:"InvalidAmount"},
-  6: {message:"ClaimTooSoon"}
+  6: {message:"ClaimTooSoon"},
+  7: {message:"MainnetNotAllowed"},
+  /**
+   * claim_many called with more than MAX_CLAIM_BATCH_SIZE tokens (issue #609).
+   */
+  8: {message:"BatchSizeLimitExceeded"}
 }
 
 export interface Client {
@@ -60,6 +65,12 @@ export interface Client {
 
   /**
    * Construct and simulate a claim_many transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Claim multiple tokens in a single transaction.
+   * 
+   * Authorizes `account` once for the whole call rather than once per token
+   * (issue #399) — looping `Self::claim` per token previously called
+   * `account.require_auth()` once per iteration within the same invocation,
+   * which hit a Soroban auth-reuse bug and failed for real signed transactions.
    */
   claim_many: ({account, tokens}: {account: string, tokens: Array<string>}, options?: MethodOptions) => Promise<AssembledTransaction<Array<i128>>>
 
@@ -111,11 +122,11 @@ export class Client extends ContractClient {
   }
   constructor(public readonly options: ContractClientOptions) {
     super(
-      new ContractSpec([ "AAAABAAAAAAAAAAAAAAABUVycm9yAAAAAAAABgAAAAAAAAASQWxyZWFkeUluaXRpYWxpemVkAAAAAAABAAAAAAAAAA5Ob3RJbml0aWFsaXplZAAAAAAAAgAAAAAAAAAMVW5hdXRob3JpemVkAAAAAwAAAAAAAAAPVG9rZW5Ob3RFbmFibGVkAAAAAAQAAAAAAAAADUludmFsaWRBbW91bnQAAAAAAAAFAAAAAAAAAAxDbGFpbVRvb1Nvb24AAAAG",
+      new ContractSpec([ "AAAABAAAAAAAAAAAAAAABUVycm9yAAAAAAAACAAAAAAAAAASQWxyZWFkeUluaXRpYWxpemVkAAAAAAABAAAAAAAAAA5Ob3RJbml0aWFsaXplZAAAAAAAAgAAAAAAAAAMVW5hdXRob3JpemVkAAAAAwAAAAAAAAAPVG9rZW5Ob3RFbmFibGVkAAAAAAQAAAAAAAAADUludmFsaWRBbW91bnQAAAAAAAAFAAAAAAAAAAxDbGFpbVRvb1Nvb24AAAAGAAAAAAAAABFNYWlubmV0Tm90QWxsb3dlZAAAAAAAAAcAAABKY2xhaW1fbWFueSBjYWxsZWQgd2l0aCBtb3JlIHRoYW4gTUFYX0NMQUlNX0JBVENIX1NJWkUgdG9rZW5zIChpc3N1ZSAjNjA5KS4AAAAAABZCYXRjaFNpemVMaW1pdEV4Y2VlZGVkAAAAAAAI",
         "AAAAAAAAAAAAAAAFYWRtaW4AAAAAAAAAAAAAAQAAABM=",
         "AAAAAAAAAAAAAAAFY2xhaW0AAAAAAAACAAAAAAAAAAdhY2NvdW50AAAAABMAAAAAAAAABXRva2VuAAAAAAAAEwAAAAEAAAAL",
         "AAAAAAAAAAAAAAAJc2V0X3Rva2VuAAAAAAAAAwAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAAAAAAV0b2tlbgAAAAAAABMAAAAAAAAADGNsYWltX2Ftb3VudAAAAAsAAAAA",
-        "AAAAAAAAAAAAAAAKY2xhaW1fbWFueQAAAAAAAgAAAAAAAAAHYWNjb3VudAAAAAATAAAAAAAAAAZ0b2tlbnMAAAAAA+oAAAATAAAAAQAAA+oAAAAL",
+        "AAAAAAAAAU5DbGFpbSBtdWx0aXBsZSB0b2tlbnMgaW4gYSBzaW5nbGUgdHJhbnNhY3Rpb24uCgpBdXRob3JpemVzIGBhY2NvdW50YCBvbmNlIGZvciB0aGUgd2hvbGUgY2FsbCByYXRoZXIgdGhhbiBvbmNlIHBlciB0b2tlbgooaXNzdWUgIzM5OSkg4oCUIGxvb3BpbmcgYFNlbGY6OmNsYWltYCBwZXIgdG9rZW4gcHJldmlvdXNseSBjYWxsZWQKYGFjY291bnQucmVxdWlyZV9hdXRoKClgIG9uY2UgcGVyIGl0ZXJhdGlvbiB3aXRoaW4gdGhlIHNhbWUgaW52b2NhdGlvbiwKd2hpY2ggaGl0IGEgU29yb2JhbiBhdXRoLXJldXNlIGJ1ZyBhbmQgZmFpbGVkIGZvciByZWFsIHNpZ25lZCB0cmFuc2FjdGlvbnMuAAAAAAAKY2xhaW1fbWFueQAAAAAAAgAAAAAAAAAHYWNjb3VudAAAAAATAAAAAAAAAAZ0b2tlbnMAAAAAA+oAAAATAAAAAQAAA+oAAAAL",
         "AAAAAAAAAAAAAAAKaW5pdGlhbGl6ZQAAAAAAAgAAAAAAAAAFYWRtaW4AAAAAAAATAAAAAAAAABBjb29sZG93bl9sZWRnZXJzAAAABAAAAAA=",
         "AAAAAAAAAAAAAAAMY2xhaW1fYW1vdW50AAAAAQAAAAAAAAAFdG9rZW4AAAAAAAATAAAAAQAAAAs=",
         "AAAAAAAAAAAAAAAMcmVtb3ZlX3Rva2VuAAAAAgAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAAAAAAV0b2tlbgAAAAAAABMAAAAA",

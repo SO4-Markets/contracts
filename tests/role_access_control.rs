@@ -39,6 +39,7 @@ use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, B
 const ONE_TOKEN: i128 = 10_000_000;
 const ONE_USD: i128 = FLOAT_PRECISION;
 
+#[allow(dead_code)]
 struct TestWorld {
     env: Env,
     admin: Address,
@@ -77,6 +78,9 @@ fn setup() -> TestWorld {
     let rs_c = RsClient::new(&env, &rs);
     rs_c.initialize(&admin);
     rs_c.grant_role(&admin, &admin, &roles::controller(&env));
+    // Admin publishes oracle prices, which requires ORDER_KEEPER. Admin never
+    // executes orders here, so this doesn't affect the access checks under test.
+    rs_c.grant_role(&admin, &admin, &roles::order_keeper(&env));
 
     // Data store
     let ds = env.register(DataStore, ());
@@ -91,6 +95,12 @@ fn setup() -> TestWorld {
     let ord_vault = env.register(OrderVault, ());
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
+    // Tokens
+    let long_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let index_tk = Address::generate(&env);
+
     // Market token
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
@@ -99,17 +109,16 @@ fn setup() -> TestWorld {
         &7u32,
         &soroban_sdk::String::from_str(&env, "ETH Market"),
         &soroban_sdk::String::from_str(&env, "GM-ETH"),
+        &long_tk,
+        &long_tk,
     );
-
-    // Tokens
-    let long_tk = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
-    let index_tk = Address::generate(&env);
 
     // Order handler
     let ord_handler = env.register(OrderHandler, ());
     OHClient::new(&env, &ord_handler).initialize(&admin, &rs, &ds, &oracle_addr, &ord_vault);
+    // Matches scripts/deploy.sh: order_handler writes to data_store and the
+    // order vault, both of which require CONTROLLER.
+    rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
 
     // Liquidation handler
     let liq_handler = env.register(LiquidationHandler, ());
@@ -121,7 +130,7 @@ fn setup() -> TestWorld {
 
     // Fee handler
     let fee_handler = env.register(FeeHandler, ());
-    FHClient::new(&env, &fee_handler).initialize(&admin, &rs, &ds, &market_tk);
+    FHClient::new(&env, &fee_handler).initialize(&admin, &rs, &ds);
 
     // Setup market
     let ds_c = DsClient::new(&env, &ds);
@@ -161,21 +170,27 @@ fn unauthorized_execute_order_reverts() {
     let oracle_c = OClient::new(&w.env, &w.oracle);
 
     // Setup oracle prices
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.admin,
-        &w.index_tk,
-        &TokenPrice {
-            min: 2000 * ONE_USD,
-            max: 2000 * ONE_USD,
-        },
+        &soroban_sdk::Vec::from_array(
+            &w.env,
+            [TokenPrice {
+                token: w.index_tk.clone(),
+                min: 2000 * ONE_USD,
+                max: 2000 * ONE_USD,
+            }],
+        ),
     );
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.admin,
-        &w.long_tk,
-        &TokenPrice {
-            min: ONE_USD,
-            max: ONE_USD,
-        },
+        &soroban_sdk::Vec::from_array(
+            &w.env,
+            [TokenPrice {
+                token: w.long_tk.clone(),
+                min: ONE_USD,
+                max: ONE_USD,
+            }],
+        ),
     );
 
     // Transfer collateral and create order
@@ -185,21 +200,25 @@ fn unauthorized_execute_order_reverts() {
         &(100 * ONE_TOKEN),
     );
 
-    let order_key = oh_c.create_order(&CreateOrderParams {
-        receiver: w.unauthorized_user.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: 1000 * ONE_USD,
-        collateral_delta_amount: 100 * ONE_TOKEN,
-        trigger_price: 0,
-        acceptable_price: 2100 * ONE_USD,
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::MarketIncrease,
-        is_long: true,
-        expiry_ledger: None,
-    });
+    let order_key = oh_c.create_order(
+        &w.unauthorized_user,
+        &CreateOrderParams {
+            receiver: w.unauthorized_user.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: 1000 * ONE_USD,
+            collateral_delta_amount: 100 * ONE_TOKEN,
+            trigger_price: 0,
+            acceptable_price: 2100 * ONE_USD,
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketIncrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
 
     // Unauthorized user tries to execute - should fail
     let result = oh_c.try_execute_order(&w.unauthorized_user, &order_key);
@@ -215,9 +234,14 @@ fn unauthorized_liquidation_reverts() {
     let lh_c = LHClient::new(&w.env, &w.liq_handler);
 
     // Try to liquidate without LIQUIDATION_KEEPER role
-    let dummy_position_key = BytesN::from_array(&w.env, &[0u8; 32]);
-    let result = lh_c.try_liquidate_position(&w.unauthorized_user, &dummy_position_key);
-    
+    let result = lh_c.try_liquidate_position(
+        &w.unauthorized_user,
+        &w.unauthorized_user,
+        &w.market_tk,
+        &w.long_tk,
+        &true,
+    );
+
     assert!(
         result.is_err(),
         "Liquidate without LIQUIDATION_KEEPER role should fail"
@@ -234,13 +258,19 @@ fn unauthorized_adl_reverts() {
     ds_c.set_u128(
         &w.admin,
         &max_pnl_factor_for_adl_key(&w.env, &w.market_tk, true),
-        &(90_000_000_000_000_000_000_000_000_000 as u128), // 0.9 * 10^30
+        &90_000_000_000_000_000_000_000_000_000_u128, // 0.9 * 10^30
     );
 
     // Try to execute ADL without ADL_KEEPER role
-    let dummy_position_key = BytesN::from_array(&w.env, &[0u8; 32]);
-    let result = ah_c.try_execute_adl(&w.unauthorized_user, &w.market_tk, &true, &dummy_position_key);
-    
+    let result = ah_c.try_execute_adl(
+        &w.unauthorized_user,
+        &w.unauthorized_user,
+        &w.market_tk,
+        &w.long_tk,
+        &true,
+        &(100 * ONE_USD),
+    );
+
     assert!(
         result.is_err(),
         "Execute ADL without ADL_KEEPER role should fail"
@@ -254,7 +284,7 @@ fn unauthorized_claim_fees_reverts() {
 
     // Try to claim fees without FEE_KEEPER role
     let result = fh_c.try_claim_fees(&w.unauthorized_user, &w.market_tk, &w.long_tk);
-    
+
     assert!(
         result.is_err(),
         "Claim fees without FEE_KEEPER role should fail"
@@ -267,9 +297,9 @@ fn unauthorized_data_store_set_reverts() {
     let ds_c = DsClient::new(&w.env, &w.ds);
 
     // Try to set data without CONTROLLER role
-    let dummy_key = soroban_sdk::Bytes::from_slice(&w.env, b"test_key");
+    let dummy_key = BytesN::from_array(&w.env, &[0u8; 32]);
     let result = ds_c.try_set_u128(&w.unauthorized_user, &dummy_key, &12345u128);
-    
+
     assert!(
         result.is_err(),
         "Data store set without CONTROLLER role should fail"
@@ -287,7 +317,7 @@ fn unauthorized_grant_role_reverts() {
         &w.unauthorized_user,
         &roles::order_keeper(&w.env),
     );
-    
+
     assert!(
         result.is_err(),
         "Grant role without admin privileges should fail"
@@ -305,21 +335,27 @@ fn authorized_execute_order_succeeds_after_grant() {
     rs_c.grant_role(&w.admin, &w.keeper, &roles::order_keeper(&w.env));
 
     // Setup oracle prices
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.admin,
-        &w.index_tk,
-        &TokenPrice {
-            min: 2000 * ONE_USD,
-            max: 2000 * ONE_USD,
-        },
+        &soroban_sdk::Vec::from_array(
+            &w.env,
+            [TokenPrice {
+                token: w.index_tk.clone(),
+                min: 2000 * ONE_USD,
+                max: 2000 * ONE_USD,
+            }],
+        ),
     );
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.admin,
-        &w.long_tk,
-        &TokenPrice {
-            min: ONE_USD,
-            max: ONE_USD,
-        },
+        &soroban_sdk::Vec::from_array(
+            &w.env,
+            [TokenPrice {
+                token: w.long_tk.clone(),
+                min: ONE_USD,
+                max: ONE_USD,
+            }],
+        ),
     );
 
     // Transfer collateral and create order
@@ -329,21 +365,25 @@ fn authorized_execute_order_succeeds_after_grant() {
         &(100 * ONE_TOKEN),
     );
 
-    let order_key = oh_c.create_order(&CreateOrderParams {
-        receiver: w.unauthorized_user.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: 1000 * ONE_USD,
-        collateral_delta_amount: 100 * ONE_TOKEN,
-        trigger_price: 0,
-        acceptable_price: 2100 * ONE_USD,
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::MarketIncrease,
-        is_long: true,
-        expiry_ledger: None,
-    });
+    let order_key = oh_c.create_order(
+        &w.unauthorized_user,
+        &CreateOrderParams {
+            receiver: w.unauthorized_user.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: 1000 * ONE_USD,
+            collateral_delta_amount: 100 * ONE_TOKEN,
+            trigger_price: 0,
+            acceptable_price: 2100 * ONE_USD,
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketIncrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
 
     // Keeper with proper role executes - should succeed
     let result = oh_c.try_execute_order(&w.keeper, &order_key);
@@ -364,21 +404,27 @@ fn role_revocation_prevents_access() {
     rs_c.grant_role(&w.admin, &w.keeper, &roles::order_keeper(&w.env));
 
     // Setup oracle prices
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.admin,
-        &w.index_tk,
-        &TokenPrice {
-            min: 2000 * ONE_USD,
-            max: 2000 * ONE_USD,
-        },
+        &soroban_sdk::Vec::from_array(
+            &w.env,
+            [TokenPrice {
+                token: w.index_tk.clone(),
+                min: 2000 * ONE_USD,
+                max: 2000 * ONE_USD,
+            }],
+        ),
     );
-    oracle_c.set_primary_price(
+    oracle_c.set_prices_simple(
         &w.admin,
-        &w.long_tk,
-        &TokenPrice {
-            min: ONE_USD,
-            max: ONE_USD,
-        },
+        &soroban_sdk::Vec::from_array(
+            &w.env,
+            [TokenPrice {
+                token: w.long_tk.clone(),
+                min: ONE_USD,
+                max: ONE_USD,
+            }],
+        ),
     );
 
     // Transfer collateral and create order
@@ -388,21 +434,25 @@ fn role_revocation_prevents_access() {
         &(100 * ONE_TOKEN),
     );
 
-    let order_key = oh_c.create_order(&CreateOrderParams {
-        receiver: w.unauthorized_user.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: 1000 * ONE_USD,
-        collateral_delta_amount: 100 * ONE_TOKEN,
-        trigger_price: 0,
-        acceptable_price: 2100 * ONE_USD,
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::MarketIncrease,
-        is_long: true,
-        expiry_ledger: None,
-    });
+    let order_key = oh_c.create_order(
+        &w.unauthorized_user,
+        &CreateOrderParams {
+            receiver: w.unauthorized_user.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: 1000 * ONE_USD,
+            collateral_delta_amount: 100 * ONE_TOKEN,
+            trigger_price: 0,
+            acceptable_price: 2100 * ONE_USD,
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketIncrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
 
     // Revoke ORDER_KEEPER role
     rs_c.revoke_role(&w.admin, &w.keeper, &roles::order_keeper(&w.env));

@@ -1,0 +1,12 @@
+[package]
+name = "rollback_harness"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+soroban-sdk = { workspace = true }
+gmx-types = { path = "../types" }
+settlement_invariants = { path = "../settlement_invariants" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

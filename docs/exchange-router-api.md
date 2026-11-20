@@ -10,7 +10,7 @@
 
 Users call `multicall` with a `Vec<RouterAction>` to execute one or more actions atomically. A single `caller.require_auth()` covers the entire batch. Any panic inside a sub-action reverts the whole transaction.
 
-Direct single-action helpers (`create_order`, `cancel_order`, …) are also exposed; they are the same functions called by `multicall` internally.
+Direct single-action helpers (`cancel_order`, `create_deposit`, …) are also exposed; they are the same functions called by `multicall` internally. Exceptions: `create_order` and `send_tokens` have no standalone entrypoint — they exist only as `RouterAction` variants dispatched inside `multicall`. (`claim_funding_fees` is also worth calling out: it is standalone, but isn't part of a create/cancel pair like the other helpers.)
 
 ---
 
@@ -21,6 +21,13 @@ Direct single-action helpers (`create_order`, `cancel_order`, …) are also expo
 | 1 | `AlreadyInitialized` | `initialize` called after first-time setup |
 | 2 | `NotInitialized` | Any function called before `initialize` |
 | 3 | `Unauthorized` | `upgrade` or admin function called by non-admin |
+| 4 | `Paused` | A non-cancel action is called while the protocol is paused |
+| 5 | `BatchSizeLimitExceeded` | `multicall` called with more than 20 actions |
+| 6 | `TimelockNotExpired` | `execute_unpause` called before the scheduled unpause ledger |
+| 7 | `UnpauseNotScheduled` | `execute_unpause` called without a prior `schedule_unpause` |
+| 8 | `InvalidWithdrawalHandler` | `update_*_handler` called with the router's own address or a handler already registered to a different slot |
+| 9 | `MismatchedBatchLength` | `claim_funding_fees` (standalone or via `ClaimFundingFees` action) called with `markets.len() != tokens.len()` |
+| 10 | `InvalidAmount` | `SendTokens` action called with `amount <= 0` |
 
 ---
 
@@ -49,6 +56,15 @@ multicall(env: Env, caller: Address, actions: Vec<RouterAction>) -> Vec<BytesN<3
 
 **Errors:** Propagates any error from any sub-action (whole batch reverts).
 
+**Diagnostic events (issue #1163):** Before dispatching each action `i`, `multicall` emits a `mc_begin` event whose data field is the `u32` index `i`. When an action traps, the last `mc_begin` entry in the host error log identifies the failing element. Example output for a three-action batch that fails on action 2:
+
+```
+[event] topic=(mc_begin,) data=0
+[event] topic=(mc_begin,) data=1
+[event] topic=(mc_begin,) data=2   ← last seen before the host error
+HostError: ...
+```
+
 **Example**
 ```bash
 soroban contract invoke \
@@ -68,12 +84,14 @@ soroban contract invoke \
 
 Submit a new trading order (market/limit increase, decrease, swap, or stop-loss).
 
-**Signature**
+**Not a standalone entrypoint.** `create_order` exists only as `RouterAction::CreateOrder(CreateOrderParams)`, dispatched inside `multicall` — there is no top-level `create_order` function on `exchange_router` to invoke directly (see the Overview).
+
+**Signature** (as dispatched inside `multicall`)
 ```
-create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32>
+RouterAction::CreateOrder(CreateOrderParams) -> BytesN<32>
 ```
 
-**Auth:** `caller` (position owner or any address on behalf of the account).
+**Auth:** `caller` (position owner or any address on behalf of the account) — via `multicall`'s single auth covering the whole batch.
 
 **Pre-conditions**
 - Collateral must have been transferred to `order_vault` **before** this call for increase/swap orders (use `send_tokens` in the same multicall).
@@ -100,7 +118,7 @@ create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32>
 
 **Storage written:** `OrderStorageKey::Order(key)` in `order_handler` persistent storage; order key added to global and per-account index sets in `data_store`.
 
-**Events emitted:** `ord_crt` → `(key, caller, market)`
+**Events emitted:** `ord_crt` → `(key, caller, market, size_delta_usd, collateral_delta_amount, order_type)`
 
 **Errors** (from `order_handler`)
 | Code | Condition |
@@ -108,29 +126,31 @@ create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32>
 | `Unauthorized` | Caller lacks required role |
 | `ZeroCollateral` | Increase/swap order with no collateral in vault |
 | `SwapPathTooLong` | `swap_path.len() > max` |
-| `DuplicateMarketInPath` | Repeated market address in path |
+| `CyclicSwapPath` | Repeated market address in path |
 
-**Example**
+**Example** (via `multicall`, not a standalone `create_order` call)
 ```bash
 soroban contract invoke \
   --id $EXCHANGE_ROUTER \
   --source alice \
-  -- create_order \
+  -- multicall \
   --caller alice \
-  --params '{
-    "receiver": "alice",
-    "market": "$MARKET_TOKEN",
-    "initial_collateral_token": "$USDC",
-    "swap_path": [],
-    "size_delta_usd": "100000000000000000000000000000000",
-    "collateral_delta_amount": "0",
-    "trigger_price": "0",
-    "acceptable_price": "0",
-    "execution_fee": "0",
-    "min_output_amount": "0",
-    "order_type": "MarketIncrease",
-    "is_long": true
-  }'
+  --actions '[
+    {"CreateOrder": {
+      "receiver": "alice",
+      "market": "$MARKET_TOKEN",
+      "initial_collateral_token": "$USDC",
+      "swap_path": [],
+      "size_delta_usd": "100000000000000000000000000000000",
+      "collateral_delta_amount": "0",
+      "trigger_price": "0",
+      "acceptable_price": "0",
+      "execution_fee": "0",
+      "min_output_amount": "0",
+      "order_type": "MarketIncrease",
+      "is_long": true
+    }}
+  ]'
 ```
 
 ---
@@ -193,7 +213,7 @@ create_deposit(env: Env, caller: Address, params: CreateDepositParams) -> BytesN
 
 **Returns:** `BytesN<32>` — the new deposit key.
 
-**Events emitted:** `dep_crt` → `(key, caller, market)`
+**Events emitted:** `dep_crt` → `(key, caller, market, long_token_amount, short_token_amount)`
 
 **Errors**
 | Code | Condition |
@@ -253,7 +273,7 @@ create_withdrawal(env: Env, caller: Address, params: CreateWithdrawalParams) -> 
 
 **Returns:** `BytesN<32>` — the new withdrawal key.
 
-**Events emitted:** `wth_crt` → `(key, caller, market)`
+**Events emitted:** `wth_crt` → `(key, caller, market, market_token_amount)`
 
 **Errors**
 | Code | Condition |
@@ -312,7 +332,7 @@ claim_funding_fees(
 
 **Side effects:** For each pair, transfers the claimable funding fee from the market pool to `caller`. Zeroes the claimable balance in `fee_handler`.
 
-**Events emitted:** One `fee_clm` event per market/token pair (emitted by `fee_handler`).
+**Events emitted:** One `fnd_clm` (`FundingFeeClaimed`) event per market/token pair (emitted by `fee_handler`).
 
 **Errors**
 | Code | Condition |
@@ -336,12 +356,14 @@ soroban contract invoke \
 
 Transfer tokens from caller to a receiver (typically a vault).
 
-**Signature**
+**Not a standalone entrypoint.** `send_tokens` exists only as `RouterAction::SendTokens(SendTokensParams)`, dispatched inside `multicall` — there is no top-level `send_tokens` function on `exchange_router` to invoke directly (see the Overview).
+
+**Signature** (as dispatched inside `multicall`)
 ```
-send_tokens(env: Env, caller: Address, token: Address, receiver: Address, amount: i128)
+RouterAction::SendTokens(SendTokensParams { token: Address, receiver: Address, amount: i128 })
 ```
 
-**Auth:** `caller`.
+**Auth:** `caller` — via `multicall`'s single auth covering the whole batch.
 
 **Pre-conditions:** Caller must have approved the exchange router for at least `amount` of `token` via the SEP-41 `approve` function.
 
@@ -349,17 +371,17 @@ send_tokens(env: Env, caller: Address, token: Address, receiver: Address, amount
 
 **Errors:** Any SEP-41 transfer error (insufficient balance, insufficient allowance).
 
-**Example**
+**Example** (via `multicall`, not a standalone `send_tokens` call)
 ```bash
 # Fund the order vault before creating an order
 soroban contract invoke \
   --id $EXCHANGE_ROUTER \
   --source alice \
-  -- send_tokens \
+  -- multicall \
   --caller alice \
-  --token $USDC \
-  --receiver $ORDER_VAULT \
-  --amount 1000000
+  --actions '[
+    {"SendTokens": {"token": "$USDC", "receiver": "$ORDER_VAULT", "amount": "1000000"}}
+  ]'
 ```
 
 ---

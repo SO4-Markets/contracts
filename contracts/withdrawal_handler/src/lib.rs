@@ -6,20 +6,26 @@
 //!   1. User approves LP tokens to withdrawal_handler.
 //!   2. User calls `create_withdrawal` → LP tokens pulled to withdrawal_vault.
 //!   3. Keeper sets oracle prices, then calls `execute_withdrawal`:
-//!      - Computes pro-rata long/short amounts from pool.
+//!      - Splits the withdrawal by the pool's current USD-value weight between
+//!        long/short (issue #255), using prices fresh for this ledger.
 //!      - Burns LP tokens from vault.
 //!      - Transfers pool tokens from market_token contract → receiver.
 //!      - Updates pool amounts.
 //!   4. On cancel: LP tokens refunded from vault.
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    account_withdrawal_list_key, market_index_token_key, market_long_token_key,
-    market_short_token_key, roles, withdrawal_key, withdrawal_list_key,
+    account_withdrawal_list_key, is_market_paused_key, market_index_token_key,
+    market_long_token_key, market_short_token_key, roles, withdrawal_key, withdrawal_list_key,
 };
-use gmx_market_utils::{apply_delta_to_pool_amount, get_pool_amount};
-use gmx_math::mul_div_wide;
+use gmx_market_utils::{apply_delta_to_pool_amount, get_market_token_price, get_pool_amount};
+use gmx_math::{mul_div_wide, TOKEN_PRECISION};
 pub use gmx_types::CreateWithdrawalParams;
 use gmx_types::{MarketProps, WithdrawalProps};
 use soroban_sdk::{
@@ -42,6 +48,17 @@ pub enum Error {
     ZeroWithdrawal = 7,
     InvalidMarket = 8,
     InvalidReceiver = 9,
+    /// Issue #370: execution_fee is below the configured global minimum.
+    InsufficientExecutionFee = 10,
+    /// Issue #366: market is paused due to oracle circuit breaker.
+    MarketPaused = 11,
+    /// Issue #643: update_oracle called with the current oracle address
+    /// (no-op) or with this contract's own address / another of its stored
+    /// instance addresses (withdrawal_vault, data_store, role_store, admin) —
+    /// almost certainly a copy-paste mistake, not an intentional rotation.
+    InvalidOracle = 12,
+    /// Issue #463: cancel_withdrawal refund exceeds vault's recorded balance.
+    InsufficientVaultBalance = 13,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -76,6 +93,7 @@ trait IRoleStore {
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
+    fn get_bool(env: Env, key: BytesN<32>) -> bool;
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
     fn get_i128(env: Env, key: BytesN<32>) -> i128;
@@ -87,18 +105,26 @@ trait IDataStore {
     fn remove_bytes32_from_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
     fn contains_bytes32(env: Env, set_key: BytesN<32>, value: BytesN<32>) -> bool;
     fn increment_nonce(env: Env, caller: Address) -> u64;
+    fn get_min_execution_fee(env: Env) -> u128;
 }
 
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "OracleClient")]
 trait IOracle {
     fn get_primary_price(env: Env, token: Address) -> gmx_types::PriceProps;
+    fn require_price_fresh(
+        env: Env,
+        token: Address,
+        expected_ledger_seq: u32,
+    ) -> gmx_types::PriceProps;
 }
 
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "WithdrawalVaultClient")]
 trait IWithdrawalVault {
     fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128);
+    fn get_recorded_balance(env: Env, token: Address) -> i128;
+    fn record_transfer_in(env: Env, caller: Address, token: Address) -> i128;
 }
 
 #[allow(dead_code)]
@@ -172,7 +198,34 @@ impl WithdrawalHandler {
         if caller != admin {
             panic_with_error!(&env, Error::Unauthorized);
         }
-        env.storage().instance().set(&InstanceKey::Oracle, &new_oracle);
+        // Issue #643: reject a no-op call and the most likely copy-paste
+        // mistakes — pointing the oracle at this contract itself or at one
+        // of its own other stored instance addresses.
+        if new_oracle == env.current_contract_address() {
+            panic_with_error!(&env, Error::InvalidOracle);
+        }
+        for key in [
+            InstanceKey::Oracle,
+            InstanceKey::Admin,
+            InstanceKey::RoleStore,
+            InstanceKey::DataStore,
+            InstanceKey::WithdrawalVault,
+        ] {
+            if let Some(other) = env.storage().instance().get::<_, Address>(&key) {
+                if other == new_oracle {
+                    panic_with_error!(&env, Error::InvalidOracle);
+                }
+            }
+        }
+        let old_oracle: Address = env.storage().instance().get(&InstanceKey::Oracle).unwrap();
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Oracle, &new_oracle);
+        // Issue #605: the oracle address every subsequent price validation
+        // relies on just changed — emit an event so off-chain monitoring has
+        // an audit trail for this admin action.
+        env.events()
+            .publish((symbol_short!("orcl_set"),), (old_oracle, new_oracle));
     }
 
     // ── Create withdrawal ─────────────────────────────────────────────────────
@@ -216,6 +269,23 @@ impl WithdrawalHandler {
             panic_with_error!(&env, Error::InvalidMarket);
         }
 
+        // Issue #366: reject withdrawals when the market is paused (oracle circuit breaker)
+        if ds.get_bool(&is_market_paused_key(&env, &params.market)) {
+            panic_with_error!(&env, Error::MarketPaused);
+        }
+
+        // Issue #370: validate execution_fee against the global minimum before
+        // any tokens move. execution_fee is collected in the market (LP) token; 0
+        // means no fee required.
+        let exec_fee = params.execution_fee;
+        if exec_fee < 0 {
+            panic_with_error!(&env, Error::InsufficientExecutionFee);
+        }
+        let min_fee = ds.get_min_execution_fee();
+        if min_fee > 0 && (exec_fee as u128) < min_fee {
+            panic_with_error!(&env, Error::InsufficientExecutionFee);
+        }
+
         // Pull LP tokens from caller → withdrawal_vault
         let market_addr = params.market.clone();
         token::Client::new(&env, &params.market).transfer(
@@ -223,6 +293,22 @@ impl WithdrawalHandler {
             &withdrawal_vault,
             &params.market_token_amount,
         );
+
+        // Issue #370: collect execution_fee in the market (LP) token.
+        if exec_fee > 0 {
+            token::Client::new(&env, &params.market).transfer(
+                &caller,
+                &withdrawal_vault,
+                &exec_fee,
+            );
+        }
+
+        // Snapshot the vault's balance so cancel_withdrawal's recorded-balance
+        // guard sees the LP tokens just received. Without this the recorded
+        // balance stays 0 and every cancellation reverts with
+        // InsufficientVaultBalance. Mirrors create_deposit.
+        WithdrawalVaultClient::new(&env, &withdrawal_vault)
+            .record_transfer_in(&handler, &params.market);
 
         // Allocate withdrawal key from nonce
         let nonce = ds.increment_nonce(&handler);
@@ -245,9 +331,17 @@ impl WithdrawalHandler {
         ds.add_bytes32_to_set(&handler, &withdrawal_list_key(&env), &key);
         ds.add_bytes32_to_set(&handler, &account_withdrawal_list_key(&env, &caller), &key);
 
+        // Issue #442: include the market-token amount being redeemed so pending
+        // withdrawals can be displayed from the creation event without an extra
+        // RPC round-trip.
         env.events().publish(
             (symbol_short!("wth_crt"),),
-            (key.clone(), caller, market_addr),
+            (
+                key.clone(),
+                caller,
+                market_addr,
+                withdrawal.market_token_amount,
+            ),
         );
         key
     }
@@ -269,6 +363,11 @@ impl WithdrawalHandler {
             .instance()
             .get(&InstanceKey::WithdrawalVault)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let oracle: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Oracle)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
 
         let withdrawal: WithdrawalProps = env
@@ -279,17 +378,82 @@ impl WithdrawalHandler {
 
         let market = load_market_props(&env, &data_store, &withdrawal.market);
 
-        let mt_client = MarketTokenClient::new(&env, &market.market_token);
-        let total_supply = mt_client.total_supply();
+        // Issue #366: reject execution when the market is paused (oracle circuit breaker)
+        let ds = DataStoreClient::new(&env, &data_store);
+        if ds.get_bool(&is_market_paused_key(&env, &withdrawal.market)) {
+            panic_with_error!(&env, Error::MarketPaused);
+        }
 
-        // Pro-rata pool amounts:  out = pool_amount × lp_amount / total_supply
-        let long_pool = get_pool_amount(&env, &data_store, &market, &market.long_token) as i128;
-        let short_pool = get_pool_amount(&env, &data_store, &market, &market.short_token) as i128;
+        let mt_client = MarketTokenClient::new(&env, &market.market_token);
         let lp_amount = withdrawal.market_token_amount;
 
-        let long_out = mul_div_wide(&env, long_pool, lp_amount, total_supply);
-        let short_out = mul_div_wide(&env, short_pool, lp_amount, total_supply);
+        // Issue #255: split the withdrawal by the pool's CURRENT USD-value weight
+        // between long/short, not a fixed 50/50 or amount-only split. Prices must
+        // be fresh for this ledger (mirrors deposit_handler's #253 fix) so the
+        // weight reflects the keeper's just-submitted price.
+        let oracle_client = OracleClient::new(&env, &oracle);
+        let current_seq = env.ledger().sequence();
+        let long_price_props = oracle_client.require_price_fresh(&market.long_token, &current_seq);
+        let short_price_props =
+            oracle_client.require_price_fresh(&market.short_token, &current_seq);
+        let index_price_props =
+            oracle_client.require_price_fresh(&market.index_token, &current_seq);
+        let long_price = long_price_props.mid_price();
+        let short_price = short_price_props.mid_price();
 
+        let long_pool = get_pool_amount(&env, &data_store, &market, &market.long_token) as i128;
+        let short_pool = get_pool_amount(&env, &data_store, &market, &market.short_token) as i128;
+        let long_pool_usd = mul_div_wide(&env, long_pool, long_price, TOKEN_PRECISION);
+        let short_pool_usd = mul_div_wide(&env, short_pool, short_price, TOKEN_PRECISION);
+        let total_pool_usd = long_pool_usd + short_pool_usd;
+
+        let (long_out, short_out) = if total_pool_usd == 0 {
+            (0, 0)
+        } else {
+            // #786: price the LP tokens being burned from PnL-adjusted NAV
+            // (get_market_token_price / get_pool_value), matching
+            // execute_deposit's minting formula, instead of gross pool USD
+            // ÷ supply — the old formula ignored outstanding trader PnL and
+            // the impact pool entirely, letting withdrawing LPs be over- or
+            // under-paid relative to fair value depending on the sign of
+            // aggregate trader PnL. maximize=true is the conservative-for-
+            // the-pool direction (mirrors deposit's deliberate minimize
+            // direction, maximize=false, for minting).
+            let mt_price = get_market_token_price(
+                &env,
+                &data_store,
+                &market,
+                &long_price_props,
+                &short_price_props,
+                &index_price_props,
+                true,
+            );
+            let withdrawal_value_usd = mul_div_wide(&env, lp_amount, mt_price, TOKEN_PRECISION);
+
+            // Split by each side's USD weight (long_pool_usd / total_pool_usd), as a
+            // single fused division rather than normalizing the weight to a separate
+            // FLOAT_PRECISION fraction first and re-applying it: chaining two roundings
+            // can leave 1-unit dust behind even on a full (100%) withdrawal, where this
+            // fused form is exact.
+            let long_out_usd =
+                mul_div_wide(&env, withdrawal_value_usd, long_pool_usd, total_pool_usd);
+            let short_out_usd =
+                mul_div_wide(&env, withdrawal_value_usd, short_pool_usd, total_pool_usd);
+
+            let long_out = if long_price > 0 {
+                mul_div_wide(&env, long_out_usd, TOKEN_PRECISION, long_price)
+            } else {
+                0
+            };
+            let short_out = if short_price > 0 {
+                mul_div_wide(&env, short_out_usd, TOKEN_PRECISION, short_price)
+            } else {
+                0
+            };
+            (long_out, short_out)
+        };
+
+        // Slippage guard checked AFTER the weight-adjusted amounts are computed.
         if long_out < withdrawal.min_long_token_amount {
             panic_with_error!(&env, Error::InsufficientLongOut);
         }
@@ -309,6 +473,23 @@ impl WithdrawalHandler {
         // CEI fix (#295): delete the withdrawal record before any pool transfer so that
         // a re-entrant callback on the receiving contract cannot replay this execution.
         remove_withdrawal(&env, &data_store, &handler, &key, &withdrawal.account);
+
+        // Issue #618: pay keeper incentive from execution_fee, mirroring
+        // deposit_handler::execute_deposit's #370 fix (this half of #370 was
+        // never implemented for withdrawal_handler). Incentive = 10% of
+        // execution_fee. Paid in the market (LP) token from withdrawal_vault,
+        // the same token execution_fee was collected in at create_withdrawal.
+        if withdrawal.execution_fee > 0 {
+            let incentive = withdrawal.execution_fee / 10;
+            if incentive > 0 {
+                WithdrawalVaultClient::new(&env, &withdrawal_vault).transfer_out(
+                    &handler,
+                    &market.market_token,
+                    &keeper,
+                    &incentive,
+                );
+            }
+        }
 
         // Transfer pool tokens from market_token contract → receiver
         if long_out > 0 {
@@ -384,6 +565,17 @@ impl WithdrawalHandler {
             panic_with_error!(&env, Error::Unauthorized);
         }
 
+        // Verify the vault can cover this refund. This mirrors the guard in
+        // execute_deposit (#463) — without it, a cancellation could silently
+        // draw on other users' funds sitting in the pooled vault.
+        {
+            let vault_client = WithdrawalVaultClient::new(&env, &withdrawal_vault);
+            let recorded = vault_client.get_recorded_balance(&withdrawal.market);
+            if recorded < withdrawal.market_token_amount {
+                panic_with_error!(&env, Error::InsufficientVaultBalance);
+            }
+        }
+
         // Refund LP tokens
         WithdrawalVaultClient::new(&env, &withdrawal_vault).transfer_out(
             &handler,
@@ -391,6 +583,18 @@ impl WithdrawalHandler {
             &withdrawal.account,
             &withdrawal.market_token_amount,
         );
+
+        // Issue #370: refund execution_fee to the user on cancellation.
+        // The keeper earns execution_fee only when it actually attempts execution;
+        // a cancelled withdrawal did no keeper work, so the full fee is refunded.
+        if withdrawal.execution_fee > 0 {
+            WithdrawalVaultClient::new(&env, &withdrawal_vault).transfer_out(
+                &handler,
+                &withdrawal.market,
+                &withdrawal.account,
+                &withdrawal.execution_fee,
+            );
+        }
 
         remove_withdrawal(&env, &data_store, &handler, &key, &withdrawal.account);
 
@@ -462,9 +666,14 @@ mod tests {
     use market_token::{MarketToken, MarketTokenClient as MtClient};
     use oracle::{Oracle, OracleClient as OClient};
     use role_store::{RoleStore, RoleStoreClient as RsClient};
-    use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Env, Vec};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        token::StellarAssetClient,
+        Env, Vec,
+    };
     use withdrawal_vault::{WithdrawalVault, WithdrawalVaultClient as WVClient};
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,
@@ -508,6 +717,14 @@ mod tests {
         let wth_vault = env.register(WithdrawalVault, ());
         WVClient::new(&env, &wth_vault).initialize(&admin, &rs);
 
+        let long_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let short_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let index_tk = Address::generate(&env);
+
         let market_tk = env.register(MarketToken, ());
         MtClient::new(&env, &market_tk).initialize(
             &admin,
@@ -515,6 +732,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(&env, "GMX Market Token"),
             &soroban_sdk::String::from_str(&env, "GM"),
+            &long_tk,
+            &short_tk,
         );
 
         let dep_handler = env.register(DepositHandler, ());
@@ -538,14 +757,6 @@ mod tests {
         rs_c.grant_role(&admin, &dep_handler, &roles::controller(&env));
         rs_c.grant_role(&admin, &wth_handler, &roles::controller(&env));
 
-        let long_tk = env
-            .register_stellar_asset_contract_v2(admin.clone())
-            .address();
-        let short_tk = env
-            .register_stellar_asset_contract_v2(admin.clone())
-            .address();
-        let index_tk = Address::generate(&env);
-
         let ds_c = DsClient::new(&env, &ds);
         ds_c.set_address(
             &dep_handler,
@@ -562,7 +773,6 @@ mod tests {
             &gmx_keys::market_short_token_key(&env, &market_tk),
             &short_tk,
         );
-
         World {
             env,
             admin,
@@ -700,9 +910,9 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
-        let lp = do_deposit(&w, &user, 1_000_0000, 0);
+        let lp = do_deposit(&w, &user, 10_000_000, 0);
 
         set_prices(&w);
         let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
@@ -758,9 +968,9 @@ mod tests {
         let user = Address::generate(env);
 
         // Deposit only long tokens → short pool stays empty
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
-        let lp = do_deposit(&w, &user, 1_000_0000, 0);
+        let lp = do_deposit(&w, &user, 10_000_000, 0);
 
         set_prices(&w);
         let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
@@ -784,9 +994,9 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
-        let lp = do_deposit(&w, &user, 1_000_0000, 0);
+        let lp = do_deposit(&w, &user, 10_000_000, 0);
 
         set_prices(&w);
         let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
@@ -817,9 +1027,9 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
-        let lp = do_deposit(&w, &user, 1_000_0000, 0);
+        let lp = do_deposit(&w, &user, 10_000_000, 0);
         assert!(lp > 0);
 
         let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
@@ -867,9 +1077,9 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
-        let lp = do_deposit(&w, &user, 1_000_0000, 0);
+        let lp = do_deposit(&w, &user, 10_000_000, 0);
         assert!(lp > 0);
 
         set_prices(&w);
@@ -918,11 +1128,11 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         StellarAssetClient::new(env, &w.short_tk).mint(&user, &500_0000i128);
         set_prices(&w);
 
-        let lp_balance = do_deposit(&w, &user, 1_000_0000, 500_0000);
+        let lp_balance = do_deposit(&w, &user, 10_000_000, 500_0000);
         assert!(lp_balance > 0);
 
         set_prices(&w);
@@ -964,15 +1174,15 @@ mod tests {
         let user_c = Address::generate(env);
 
         for u in [&user_a, &user_b, &user_c] {
-            StellarAssetClient::new(env, &w.long_tk).mint(u, &1_000_0000i128);
+            StellarAssetClient::new(env, &w.long_tk).mint(u, &10_000_000_i128);
         }
         set_prices(&w);
 
-        let lp_a = do_deposit(&w, &user_a, 1_000_0000, 0);
+        let lp_a = do_deposit(&w, &user_a, 10_000_000, 0);
         set_prices(&w);
-        let lp_b = do_deposit(&w, &user_b, 1_000_0000, 0);
+        let lp_b = do_deposit(&w, &user_b, 10_000_000, 0);
         set_prices(&w);
-        let lp_c = do_deposit(&w, &user_c, 1_000_0000, 0);
+        let lp_c = do_deposit(&w, &user_c, 10_000_000, 0);
 
         assert!(lp_a > 0);
         assert!(lp_b > 0);
@@ -1072,9 +1282,9 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         set_prices(&w);
-        let lp_balance = do_deposit(&w, &user, 1_000_0000, 0);
+        let lp_balance = do_deposit(&w, &user, 10_000_000, 0);
 
         let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
             &user,
@@ -1104,10 +1314,10 @@ mod tests {
     fn execute_withdrawal_by_non_keeper_panics() {
         let w = setup();
         let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &5_000_0000i128);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &2_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &50_000_000_i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &20_000_000_i128);
         set_prices(&w);
-        let lp_balance = do_deposit(&w, &user, 5_000_0000, 2_000_0000);
+        let lp_balance = do_deposit(&w, &user, 50_000_000, 20_000_000);
 
         // Create a withdrawal to get a key.
         let wth_key = WithdrawalHandlerClient::new(&w.env, &w.wth_handler).create_withdrawal(
@@ -1126,5 +1336,462 @@ mod tests {
         // impostor has no ORDER_KEEPER role — must panic with Unauthorized.
         WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
             .execute_withdrawal(&impostor, &wth_key);
+    }
+
+    // ── Issue #786: withdrawal must price from PnL-adjusted NAV, not gross pool USD ──
+    //
+    // These bypass create_deposit/create_withdrawal entirely and seed pool/LP/
+    // open-interest state directly, because both entrypoints currently panic
+    // on an unrelated, pre-existing gap in this fixture (is_market_paused_key
+    // and other config keys added by later issues were never given defaults
+    // in `setup()` — see this PR's description). execute_withdrawal itself is
+    // exercised exactly as the real entrypoint: a real WithdrawalProps record
+    // and a real LP-token transfer into withdrawal_vault.
+
+    /// Seeds a long-only pool directly in storage/real balances (no short
+    /// side), and mints `lp_supply` LP tokens to `user`.
+    fn fund_long_only_pool(w: &World, user: &Address, pool_amount: i128, lp_supply: i128) {
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_bool(
+            &w.admin,
+            &is_market_paused_key(&w.env, &w.market_tk),
+            &false,
+        );
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &pool_amount);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk),
+            &(pool_amount as u128),
+        );
+        // get_pool_amount (unlike get_pool_value's batched read) has no
+        // default — the short side must be explicitly zeroed even though
+        // this pool is long-only.
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.short_tk),
+            &0,
+        );
+        MtClient::new(&w.env, &w.market_tk).mint(&w.dep_handler, user, &lp_supply);
+    }
+
+    /// get_pool_value's batched read (get_u128_batch) calls extend_ttl
+    /// unconditionally after every key, which panics if that key was never
+    /// actually written (a separate pre-existing bug in data_store, outside
+    /// #786's scope) — so every key it reads must exist, even at 0, rather
+    /// than being left absent. Zeroes the impact pool and all 8 open-interest
+    /// combinations (both sides, both collateral tokens) up front.
+    fn zero_get_pool_value_defaults(w: &World) {
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::position_impact_pool_amount_key(&w.env, &w.market_tk),
+            &0,
+        );
+        for token in [&w.long_tk, &w.short_tk] {
+            for is_long in [true, false] {
+                ds_c.set_u128(
+                    &w.admin,
+                    &gmx_keys::open_interest_key(&w.env, &w.market_tk, token, is_long),
+                    &0,
+                );
+                ds_c.set_u128(
+                    &w.admin,
+                    &gmx_keys::open_interest_in_tokens_key(&w.env, &w.market_tk, token, is_long),
+                    &0,
+                );
+            }
+        }
+    }
+
+    /// Records a single position (collateralized in the long token) worth
+    /// `oi_usd` at entry, sized `oi_tokens` index-tokens. Call
+    /// zero_get_pool_value_defaults first.
+    fn set_open_interest(w: &World, is_long: bool, oi_usd: i128, oi_tokens: i128) {
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::open_interest_key(&w.env, &w.market_tk, &w.long_tk, is_long),
+            &(oi_usd as u128),
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::open_interest_in_tokens_key(&w.env, &w.market_tk, &w.long_tk, is_long),
+            &(oi_tokens as u128),
+        );
+    }
+
+    /// Writes a WithdrawalProps record directly (standing in for
+    /// create_withdrawal) and moves the LP tokens into withdrawal_vault, as
+    /// create_withdrawal itself would have done via a real transfer.
+    fn write_withdrawal_and_fund_vault(
+        w: &World,
+        user: &Address,
+        key: &BytesN<32>,
+        lp_amount: i128,
+    ) {
+        w.env.as_contract(&w.wth_handler, || {
+            w.env.storage().persistent().set(
+                &LocalKey::Withdrawal(key.clone()),
+                &WithdrawalProps {
+                    account: user.clone(),
+                    receiver: user.clone(),
+                    market: w.market_tk.clone(),
+                    market_token_amount: lp_amount,
+                    min_long_token_amount: 0,
+                    min_short_token_amount: 0,
+                    execution_fee: 0,
+                    updated_at_time: w.env.ledger().timestamp(),
+                },
+            );
+        });
+        MtClient::new(&w.env, &w.market_tk).transfer(user, &w.wth_vault, &lp_amount);
+    }
+
+    /// Acceptance criterion (positive PnL): a $40M-profitable long position
+    /// must reduce NAV below gross pool assets, so a 1% LP redemption pays
+    /// out LESS than 1% of the gross pool — the old gross-USD formula would
+    /// have paid the full 1% (10,000 tokens), overpaying the withdrawing LP
+    /// at the expense of remaining LPs and the trader still owed that profit.
+    #[test]
+    fn execute_withdrawal_prices_below_gross_when_traders_net_profitable() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        // Note: kept deliberately small — FLOAT_PRECISION is 10^30, so a USD
+        // value needs to stay well under i128::MAX (~1.7 * 10^38) after being
+        // scaled by it; a naively "realistic" multi-billion-dollar pool here
+        // would silently overflow/saturate mul_div_wide's i128 result.
+        let pool_amount = 10_000 * TOKEN_PRECISION; // 10,000 long tokens ($20M pool)
+        let lp_supply = 10_000 * TOKEN_PRECISION; // 10,000 LP tokens
+        fund_long_only_pool(&w, &user, pool_amount, lp_supply);
+
+        // Long position: 1,000 index-tokens opened at $2000 (oi_usd = $2M).
+        let fp = gmx_math::FLOAT_PRECISION;
+        let position_tokens = 1_000 * TOKEN_PRECISION;
+        let entry_oi_usd = mul_div_wide(env, position_tokens, 2000 * fp, TOKEN_PRECISION);
+        zero_get_pool_value_defaults(&w);
+        set_open_interest(&w, true, entry_oi_usd, position_tokens);
+
+        // Long/short pool prices stay at $2000/$1; index price rises to $2400,
+        // so the long position is now $400K in profit ((2400-2000) * 1,000).
+        OClient::new(env, &w.oracle).set_prices_simple(
+            &w.keeper,
+            &Vec::from_array(
+                env,
+                [
+                    TokenPrice {
+                        token: w.long_tk.clone(),
+                        min: 2000 * fp,
+                        max: 2000 * fp,
+                    },
+                    TokenPrice {
+                        token: w.short_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: w.index_tk.clone(),
+                        min: 2400 * fp,
+                        max: 2400 * fp,
+                    },
+                ],
+            ),
+        );
+
+        let withdraw_amount = 100 * TOKEN_PRECISION; // 1% of supply
+        let key = BytesN::from_array(env, &[1u8; 32]);
+        write_withdrawal_and_fund_vault(&w, &user, &key, withdraw_amount);
+
+        WithdrawalHandlerClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &key);
+        let long_out = StellarAssetClient::new(env, &w.long_tk).balance(&user);
+
+        // Gross (buggy) formula would pay exactly 1% of the pool = 100.
+        // NAV formula: pool_value = $20M - $400K = $19.6M (98% of gross) →
+        // 1% of that, in tokens, is 98.
+        let gross_formula_payout = 100 * TOKEN_PRECISION;
+        let expected_nav_payout = 98 * TOKEN_PRECISION;
+        assert!(
+            long_out < gross_formula_payout,
+            "profitable traders must reduce payout below the gross-formula amount: got {long_out}, gross would be {gross_formula_payout}"
+        );
+        assert_eq!(
+            long_out, expected_nav_payout,
+            "payout must match PnL-adjusted NAV exactly"
+        );
+    }
+
+    /// Acceptance criterion (negative PnL): a $40M-unprofitable short position
+    /// must raise NAV above gross pool assets, so a 1% LP redemption pays out
+    /// MORE than 1% of the gross pool — the old gross-USD formula would have
+    /// underpaid the withdrawing LP relative to fair value.
+    #[test]
+    fn execute_withdrawal_prices_above_gross_when_traders_net_unprofitable() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        let pool_amount = 10_000 * TOKEN_PRECISION; // 10,000 long tokens ($20M pool)
+        let lp_supply = 10_000 * TOKEN_PRECISION;
+        fund_long_only_pool(&w, &user, pool_amount, lp_supply);
+
+        // Short position: 1,000 index-tokens opened at $2000 (oi_usd = $2M).
+        let fp = gmx_math::FLOAT_PRECISION;
+        let position_tokens = 1_000 * TOKEN_PRECISION;
+        let entry_oi_usd = mul_div_wide(env, position_tokens, 2000 * fp, TOKEN_PRECISION);
+        zero_get_pool_value_defaults(&w);
+        set_open_interest(&w, false, entry_oi_usd, position_tokens);
+
+        // Index price rises to $2400 — the short is now $400K underwater
+        // ((2400-2000) * 1,000), which traders still owe the pool.
+        OClient::new(env, &w.oracle).set_prices_simple(
+            &w.keeper,
+            &Vec::from_array(
+                env,
+                [
+                    TokenPrice {
+                        token: w.long_tk.clone(),
+                        min: 2000 * fp,
+                        max: 2000 * fp,
+                    },
+                    TokenPrice {
+                        token: w.short_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: w.index_tk.clone(),
+                        min: 2400 * fp,
+                        max: 2400 * fp,
+                    },
+                ],
+            ),
+        );
+
+        let withdraw_amount = 100 * TOKEN_PRECISION; // 1% of supply
+        let key = BytesN::from_array(env, &[2u8; 32]);
+        write_withdrawal_and_fund_vault(&w, &user, &key, withdraw_amount);
+
+        WithdrawalHandlerClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &key);
+        let long_out = StellarAssetClient::new(env, &w.long_tk).balance(&user);
+
+        // Gross (buggy) formula would pay exactly 1% of the pool = 100.
+        // NAV formula: pool_value = $20M + $400K = $20.4M (102% of gross) →
+        // 1% of that, in tokens, is 102.
+        let gross_formula_payout = 100 * TOKEN_PRECISION;
+        let expected_nav_payout = 102 * TOKEN_PRECISION;
+        assert!(
+            long_out > gross_formula_payout,
+            "unprofitable traders must raise payout above the gross-formula amount: got {long_out}, gross would be {gross_formula_payout}"
+        );
+        assert_eq!(
+            long_out, expected_nav_payout,
+            "payout must match PnL-adjusted NAV exactly"
+        );
+    }
+
+    // ── Issue #255: withdrawal output matches current pool weight ────────────
+
+    /// Withdraw from a 70/30 imbalanced pool (USD terms) and assert the output
+    /// ratio matches the pool weight within 1 bps, not a hardcoded 50/50 split.
+    #[test]
+    fn execute_withdrawal_imbalanced_pool_matches_weight_ratio() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        // 70/30 imbalanced pool in USD terms:
+        // long price = 2000, short price = 1 (from set_prices)
+        // long_amount * 2000 = 700_000 (usd)  => long_amount = 350
+        // short_amount * 1   = 300_000 (usd)  => short_amount = 300_000
+        let long_amount = 350 * 10_000_000i128; // 350 tokens @ 7 decimals
+        let short_amount = 300_000 * 10_000_000i128; // 300,000 tokens @ 7 decimals
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &long_amount);
+        StellarAssetClient::new(env, &w.short_tk).mint(&user, &short_amount);
+        set_prices(&w);
+        let lp_balance = do_deposit(&w, &user, long_amount, short_amount);
+        assert!(lp_balance > 0);
+
+        set_prices(&w);
+        let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp_balance,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
+        WithdrawalHandlerClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &wth_key);
+
+        let long_out = StellarAssetClient::new(env, &w.long_tk).balance(&user);
+        let short_out = StellarAssetClient::new(env, &w.short_tk).balance(&user);
+
+        let long_out_usd = long_out * 2000;
+        let short_out_usd = short_out;
+        let total_usd = long_out_usd + short_out_usd;
+
+        // expect ~70% long, 30% short (within 1 bps = 0.01%)
+        let long_bps = long_out_usd * 10_000 / total_usd;
+        assert!(
+            (long_bps - 7000).abs() <= 1,
+            "long_bps={} expected ~7000",
+            long_bps
+        );
+    }
+
+    /// execute_withdrawal must revert once the ledger has advanced past the price
+    /// submission, rather than computing the pool weight from a stale price.
+    #[test]
+    #[should_panic]
+    fn execute_withdrawal_reverts_on_stale_price() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
+        set_prices(&w);
+        let lp = do_deposit(&w, &user, 10_000_000, 0);
+
+        set_prices(&w);
+        let wth_key = WithdrawalHandlerClient::new(env, &w.wth_handler).create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
+
+        // Ledger advances past the oracle's freshness window with no fresh price
+        // submitted — the stored price is now stale (oracle#1205 accepts prices
+        // for PRICE_FRESHNESS_WINDOW ledgers, so a single-ledger step is not enough).
+        let seq = env.ledger().sequence();
+        env.ledger()
+            .set_sequence_number(seq + oracle::PRICE_FRESHNESS_WINDOW + 1);
+
+        WithdrawalHandlerClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &wth_key);
+    }
+
+    /// Persistent withdrawal storage survives an upgrade (Soroban host guarantee).
+    /// Requires a compiled WASM binary to invoke update_current_contract_wasm;
+    /// not runnable in unit-test mode. Auth is covered by upgrade_non_admin_reverts.
+    #[test]
+    #[ignore]
+    fn upgrade_preserves_withdrawal_storage() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &10_000_000_i128);
+        set_prices(&w);
+        let lp = do_deposit(&w, &user, 10_000_000, 0);
+
+        let hc = WithdrawalHandlerClient::new(&w.env, &w.wth_handler);
+        let key = hc.create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
+
+        assert!(
+            hc.get_withdrawal(&key).is_some(),
+            "withdrawal must exist before upgrade"
+        );
+
+        hc.upgrade(&BytesN::from_array(&w.env, &[0u8; 32]));
+
+        assert!(
+            hc.get_withdrawal(&key).is_some(),
+            "withdrawal must survive upgrade"
+        );
+    }
+
+    /// Issue #618 (closed #370 partially unfixed): execute_withdrawal must pay
+    /// the keeper 10% of a nonzero execution_fee, mirroring
+    /// deposit_handler::execute_deposit's #370 fix. execution_fee is collected
+    /// in the market (LP) token at create_withdrawal, separately from
+    /// market_token_amount.
+    #[test]
+    fn execute_withdrawal_pays_keeper_execution_fee_incentive() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &10_000_000_i128);
+        set_prices(&w);
+        let lp = do_deposit(&w, &user, 10_000_000, 0);
+
+        let fee: i128 = 1_000;
+        let market_token_amount = lp - fee;
+
+        let hc = WithdrawalHandlerClient::new(&w.env, &w.wth_handler);
+        let key = hc.create_withdrawal(
+            &user,
+            &CreateWithdrawalParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: fee,
+            },
+        );
+
+        let keeper_balance_before = MtClient::new(&w.env, &w.market_tk).balance(&w.keeper);
+
+        hc.execute_withdrawal(&w.keeper, &key);
+
+        let keeper_balance_after = MtClient::new(&w.env, &w.market_tk).balance(&w.keeper);
+        assert_eq!(
+            keeper_balance_after - keeper_balance_before,
+            fee / 10,
+            "keeper must receive 10% of execution_fee in the market (LP) token"
+        );
+    }
+
+    // ── Issue #643: update_oracle sanity checks ───────────────────────────────
+
+    /// update_oracle must reject pointing the oracle at this contract's own
+    /// address — the most likely copy-paste mistake.
+    #[test]
+    #[should_panic]
+    fn update_oracle_rejects_self_address() {
+        let w = setup();
+        WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
+            .update_oracle(&w.admin, &w.wth_handler);
+    }
+
+    /// update_oracle must reject a no-op call (new_oracle == current oracle).
+    #[test]
+    #[should_panic]
+    fn update_oracle_rejects_noop() {
+        let w = setup();
+        WithdrawalHandlerClient::new(&w.env, &w.wth_handler).update_oracle(&w.admin, &w.oracle);
+    }
+
+    /// update_oracle must reject the withdrawal_vault's address — a plausible
+    /// copy-paste mistake between sibling instance addresses.
+    #[test]
+    #[should_panic]
+    fn update_oracle_rejects_sibling_vault_address() {
+        let w = setup();
+        WithdrawalHandlerClient::new(&w.env, &w.wth_handler).update_oracle(&w.admin, &w.wth_vault);
+    }
+
+    /// A genuinely different oracle address must succeed.
+    #[test]
+    fn update_oracle_accepts_valid_new_address() {
+        let w = setup();
+        let new_oracle = Address::generate(&w.env);
+        WithdrawalHandlerClient::new(&w.env, &w.wth_handler).update_oracle(&w.admin, &new_oracle);
     }
 }

@@ -77,6 +77,7 @@ Before opening a review request, confirm every item below. Reviewers will use th
 - [ ] `cargo check --workspace` produces zero errors.
 - [ ] `cargo clippy --workspace -- -D warnings` produces zero warnings.
 - [ ] `stellar contract build` completes successfully (wasm artefacts are produced, not committed).
+- [ ] If you added a new crate directory, it is listed in the root `Cargo.toml` workspace members **before** opening the PR. `cargo fmt --all` only covers workspace members; an unlisted crate can contain a syntax error that passes the CI fmt gate (issue #1156). The CI workflow runs `rustfmt --check --edition 2021` over every tracked `*.rs` file as a second guard, but adding the crate to the workspace is the correct long-term fix.
 
 ### Documentation
 
@@ -93,7 +94,8 @@ Before opening a review request, confirm every item below. Reviewers will use th
 ### Upgrade Safety (for contracts with an `upgrade` entrypoint)
 
 - [ ] The `upgrade` function follows the admin-gated pattern in [Upgrade Rules](#upgrade-rules).
-- [ ] A test verifies that an unauthorized caller reverts and that storage is intact after a successful upgrade.
+- [ ] A test verifies that an unauthorized caller reverts (this half runs under a plain `cargo test` and is enforced today).
+- [ ] A `#[ignore]`d test verifies storage is intact after a successful upgrade, following the pattern in `deposit_handler`/`fee_handler`/`liquidation_handler`/`order_handler`/`withdrawal_handler`/`referral_storage`/`reader`. **Note:** this half requires a compiled WASM binary and `cargo test -- --ignored` to actually run — it is not exercised by a plain `cargo test` or by any CI workflow today (see issue #646), so treat it as a manual step you must remember to run locally, not an automatically-enforced guarantee.
 
 ## Architectural Guidelines
 
@@ -169,7 +171,7 @@ Prices for the index token must be signed by a registered keeper. See [docs/orac
 
 ```bash
 # Compute the data_store key for keeper index 0
-KEY_HEX=$(python3 scripts/compute_key.py keeper_pubkey_key 0)
+KEY_HEX=$(python3 scripts/compute_key.py keeper_public_key 0)
 
 # Register the 32-byte ed25519 public key (CONTROLLER role required)
 stellar contract invoke \

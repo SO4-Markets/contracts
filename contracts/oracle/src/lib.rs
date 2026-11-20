@@ -3,7 +3,10 @@
 //! Mirrors GMX's Oracle.sol model:
 //!   - Authorized keepers submit signed `(token, min_price, max_price, timestamp)` bundles
 //!     before each execution call.
-//!   - Prices live in **temporary** storage and auto-expire after one ledger.
+//!   - Prices are validated at submission time (300s / 60-ledger window) and kept in temporary
+//!     storage for up to PRICE_TTL_LEDGERS (120 ledgers). `get_primary_price` enforces an
+//!     additional read-time staleness check (PRICE_FRESHNESS_LEDGERS = 60) to match the
+//!     submission window — prices older than that are rejected with `StalePrice` (#379).
 //!   - Consumers call `get_primary_price(token)` to read the current price.
 //!   - Stablecoin prices can be pinned in `data_store` (stable_price_key) and
 //!     returned via `get_stable_price`.
@@ -15,9 +18,14 @@
 //!   Keys are stored as: keeper_public_key_prefix ‖ sha256(pubkey_bytes) → BytesN<32> pubkey prefix.
 //!   We use a simple approach: keepers are registered by index (u32), stored directly.
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use gmx_keys::{keeper_public_key_prefix, stable_price_key, market_list_key, market_index_token_key, market_long_token_key, market_short_token_key};
+use gmx_keys::{keeper_public_key_prefix, stable_price_key};
 use gmx_types::{PriceProps, TokenPrice};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
@@ -36,8 +44,15 @@ pub enum Error {
     InvalidPrice = 4, // min > max or zero
     StalePrice = 5,   // timestamp too old
     PriceNotFound = 6,
-    InvalidSignature = 7,
-    NoKeepers = 8,
+    /// clear_prices called with more than MAX_CLEAR_PRICES_BATCH_SIZE tokens (issue #619).
+    BatchSizeLimitExceeded = 9,
+    /// clear_price/clear_prices called on a price stored less than
+    /// MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR ledgers ago (issue #805).
+    PriceTooFreshToClear = 10,
+    /// set_circuit_breaker_factor called with a factor above
+    /// MAX_CIRCUIT_BREAKER_FACTOR_BPS (issue #760) — an unbounded threshold
+    /// silently disables the price circuit breaker for the market.
+    CircuitBreakerFactorTooHigh = 11,
 }
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
@@ -57,14 +72,39 @@ enum TempKey {
 }
 
 /// Ledgers to keep a submitted price readable in temporary storage.
-///
-/// `set_prices` and `execute_*` run in **separate** transactions, and a keeper
-/// may drain a batch of pending orders one-by-one after a single price set.
-/// Bumping the temp TTL keeps prices readable across that window so later
-/// executions in the batch don't revert with `PriceNotFound`. Kept short so
-/// prices remain ephemeral (≈10 min at ~5s/ledger), in line with the 300s /
-/// 60-ledger freshness window enforced at submission time.
 const PRICE_TTL_LEDGERS: u32 = 120;
+
+/// Maximum age of a stored price at read time. Matches the submission-time
+/// 60-ledger window so `get_primary_price` rejects prices that were valid at
+/// submission but have since drifted past the documented freshness window (#379).
+const PRICE_FRESHNESS_LEDGERS: u32 = 60;
+
+/// Maximum tokens per `clear_prices` call (issue #619), matching the batch-cap
+/// pattern used elsewhere in the workspace (fee_batch_sweeper::MAX_BATCH_CLAIM_SIZE).
+const MAX_CLEAR_PRICES_BATCH_SIZE: u32 = 20;
+
+/// Minimum age (in ledgers) a stored price must have before it can be cleared
+/// (issue #805). `ORDER_KEEPER` is a broad, bot-held role — without this gate,
+/// any single compromised keeper could repeatedly clear prices immediately
+/// after another keeper submits them, DoSing every price-dependent action via
+/// `PriceNotFound` before the price is ever read. This closes that griefing
+/// window while still allowing the intended "keeper clears after execution"
+/// cleanup flow, which happens well after submission.
+const MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR: u32 = 5;
+
+/// Maximum prices per `set_prices`/`set_prices_simple` call (issue #615).
+/// `set_prices` performs an `ed25519_verify` per entry on top of a storage
+/// write, so this stays at the same conservative size as
+/// MAX_CLEAR_PRICES_BATCH_SIZE rather than a larger number.
+const MAX_PRICE_BATCH_SIZE: u32 = 20;
+
+/// Upper bound on the per-market circuit-breaker deviation threshold, in
+/// basis points (issue #760): 5_000 bps = a 50% single-update price move.
+/// Anything larger is effectively "never trips" for a real price feed, so a
+/// fat-fingered (or maliciously set) value can't silently disable the
+/// breaker. Mirrors the cap `data_store::set_liquidation_execution_fee`
+/// enforces for the analogous fee parameter (issue #633).
+pub const MAX_CIRCUIT_BREAKER_FACTOR_BPS: u128 = 5_000;
 
 // ─── Signed price submitted by keeper ────────────────────────────────────────
 
@@ -108,7 +148,11 @@ trait IDataStore {
     fn get_address_set_count(env: Env, set_key: BytesN<32>) -> u32;
     fn get_address_set_at(env: Env, set_key: BytesN<32>, start: u32, end: u32) -> Vec<Address>;
     fn set_bool(env: Env, caller: Address, key: BytesN<32>, value: bool) -> bool;
-    fn set_bytes32(env: Env, caller: Address, key: BytesN<32>, value: BytesN<32>);
+    // Must match data_store's return type: the client decodes the result, and a
+    // `()` declaration traps with ConversionError on every call.
+    fn set_bytes32(env: Env, caller: Address, key: BytesN<32>, value: BytesN<32>) -> BytesN<32>;
+    fn add_address_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: Address);
+    fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
 }
 
 #[contracttype]
@@ -125,6 +169,21 @@ pub struct OracleSignerRotated {
     pub keeper_index: u32,
     pub old_signer: BytesN<32>,
     pub new_signer: BytesN<32>,
+}
+
+#[contracttype]
+pub struct PriceSubmitted {
+    pub keeper: Address,
+    pub token: Address,
+    pub min: i128,
+    pub max: i128,
+    pub ledger_seq: u32,
+}
+
+#[contracttype]
+pub struct PricesSubmittedBatch {
+    pub keeper: Address,
+    pub count: u32,
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -184,6 +243,14 @@ impl Oracle {
         caller.require_auth();
         require_order_keeper(&env, &caller);
 
+        // Issue #615: cap batch size — set_prices performs an ed25519_verify
+        // per entry, so an unbounded Vec can be built large enough to exceed
+        // the ledger's per-transaction CPU budget, failing with an opaque
+        // resource-limit error instead of this typed one.
+        if prices.len() > MAX_PRICE_BATCH_SIZE {
+            panic_with_error!(&env, Error::BatchSizeLimitExceeded);
+        }
+
         let passphrase: Bytes = env
             .storage()
             .instance()
@@ -231,6 +298,10 @@ impl Oracle {
             );
             let pubkey = get_keeper_pubkey(&env, &data_store, sp.keeper_index);
             // ed25519_verify takes (&BytesN<32> pubkey, &Bytes message, &BytesN<64> sig)
+            // and panics with a host-level crypto error on bad signature.
+            // There is no SDK try_ helper (soroban-sdk 25) to convert this into a
+            // contract Error::InvalidSignature, so the dead variant was removed
+            // (#576); callers see the host error instead of a typed contract error.
             env.crypto().ed25519_verify(&pubkey, &msg, &sp.signature);
 
             // Check circuit breaker before overwriting price
@@ -248,36 +319,62 @@ impl Oracle {
             env.storage()
                 .temporary()
                 .extend_ttl(&price_key, PRICE_TTL_LEDGERS, PRICE_TTL_LEDGERS);
+
+            // Emit per-price event for indexers and price-feed dashboards
+            env.events().publish(
+                (symbol_short!("price_sub"),),
+                PriceSubmitted {
+                    keeper: caller.clone(),
+                    token: sp.token.clone(),
+                    min: sp.min_price,
+                    max: sp.max_price,
+                    ledger_seq: sp.ledger_seq,
+                },
+            );
         }
 
+        // Emit batch summary event for backward compatibility
         env.events()
             .publish((symbol_short!("prices"),), (caller, prices.len()));
     }
 
     // ── Price reads ───────────────────────────────────────────────────────────
 
-    /// Returns the current price for a token. Panics if not set this execution.
+    /// Returns the current price for a token. Panics if not set or stale (#379).
     pub fn get_primary_price(env: Env, token: Address) -> PriceProps {
         let stored: StoredPrice = env
             .storage()
             .temporary()
             .get::<TempKey, StoredPrice>(&TempKey::Price(token))
             .unwrap_or_else(|| panic_with_error!(&env, Error::PriceNotFound));
+        if price_is_stale(env.ledger().sequence(), stored.ledger_seq) {
+            panic_with_error!(&env, Error::StalePrice);
+        }
         PriceProps {
             min: stored.min,
             max: stored.max,
         }
     }
 
-    /// Returns the price for a token, or None if not set.
+    /// Returns the price for a token, or None if not set or stale (#379).
     pub fn try_get_price(env: Env, token: Address) -> Option<PriceProps> {
         env.storage()
             .temporary()
             .get::<TempKey, StoredPrice>(&TempKey::Price(token))
-            .map(|s| PriceProps { min: s.min, max: s.max })
+            .and_then(|s| {
+                if price_is_stale(env.ledger().sequence(), s.ledger_seq) {
+                    None
+                } else {
+                    Some(PriceProps {
+                        min: s.min,
+                        max: s.max,
+                    })
+                }
+            })
     }
 
     /// Returns pinned stable price from data_store, or None if not configured.
+    /// Validates that the price is positive and fits in i128 before returning.
     pub fn get_stable_price(env: Env, token: Address) -> Option<i128> {
         let data_store: Address = env
             .storage()
@@ -285,15 +382,19 @@ impl Oracle {
             .get(&InstanceKey::DataStore)
             .unwrap();
         let key = stable_price_key(&env, &token);
-        let price = DataStoreClient::new(&env, &data_store).get_u128(&key) as i128;
-        if price == 0 {
+        let price_u128 = DataStoreClient::new(&env, &data_store).get_u128(&key);
+
+        // Reject if zero or if the value would cast to a negative i128
+        // (i128::MAX = 2^127 - 1 = 9223372036854775807)
+        if price_u128 == 0 || price_u128 > i128::MAX as u128 {
             None
         } else {
-            Some(price)
+            Some(price_u128 as i128)
         }
     }
 
     /// Convenience: returns stable price if available, otherwise primary price.
+    /// Validates that any stable price is positive and fits in i128 before using it.
     pub fn get_price_with_stable_fallback(env: Env, token: Address) -> PriceProps {
         let data_store: Address = env
             .storage()
@@ -301,33 +402,54 @@ impl Oracle {
             .get(&InstanceKey::DataStore)
             .unwrap();
         let key = stable_price_key(&env, &token);
-        let stable = DataStoreClient::new(&env, &data_store).get_u128(&key) as i128;
-        if stable > 0 {
+        let stable_u128 = DataStoreClient::new(&env, &data_store).get_u128(&key);
+
+        // Use stable price only if it's positive and fits in i128
+        // (i128::MAX = 2^127 - 1 = 9223372036854775807)
+        if stable_u128 > 0 && stable_u128 <= i128::MAX as u128 {
+            let stable = stable_u128 as i128;
             return PriceProps {
                 min: stable,
                 max: stable,
             };
         }
+
+        // Fall back to primary price from temporary storage
         let stored: StoredPrice = env
             .storage()
             .temporary()
             .get::<TempKey, StoredPrice>(&TempKey::Price(token))
             .unwrap_or_else(|| panic_with_error!(&env, Error::PriceNotFound));
+        if price_is_stale(env.ledger().sequence(), stored.ledger_seq) {
+            panic_with_error!(&env, Error::StalePrice);
+        }
         PriceProps {
             min: stored.min,
             max: stored.max,
         }
     }
 
-    /// Require that the stored price for `token` was signed for `expected_ledger_seq`.
-    /// Panics with `StalePrice` if the stored ledger sequence differs.
+    /// Require that the stored price for `token` is fresh relative to
+    /// `expected_ledger_seq` (callers pass the current ledger): it must have
+    /// been signed no later than that ledger and at most
+    /// `PRICE_FRESHNESS_WINDOW` ledgers before it.
+    ///
+    /// Exact equality (the previous rule) is unsatisfiable: the keeper signs at
+    /// the last closed ledger L, `set_prices` lands in L+1 or later, and
+    /// `execute_*` runs in a further transaction, so every deposit/withdrawal
+    /// reverted with `StalePrice` (SO4-Markets/so4-oracle#1205).
+    /// Panics with `StalePrice` otherwise.
     pub fn require_price_fresh(env: Env, token: Address, expected_ledger_seq: u32) -> PriceProps {
         let stored: StoredPrice = env
             .storage()
             .temporary()
             .get::<TempKey, StoredPrice>(&TempKey::Price(token))
             .unwrap_or_else(|| panic_with_error!(&env, Error::PriceNotFound));
-        if stored.ledger_seq != expected_ledger_seq {
+        if is_seq_stale(
+            expected_ledger_seq,
+            stored.ledger_seq,
+            PRICE_FRESHNESS_WINDOW,
+        ) {
             panic_with_error!(&env, Error::StalePrice);
         }
         PriceProps {
@@ -339,18 +461,35 @@ impl Oracle {
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
     /// Clear a specific token price from temporary storage.
+    ///
+    /// Rejects with `PriceTooFreshToClear` (#805) if the stored price is less
+    /// than `MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR` ledgers old, so a compromised
+    /// `ORDER_KEEPER` can't grief the protocol by clearing prices the instant
+    /// they're submitted. Clearing a token with no stored price is a no-op,
+    /// matching the previous idempotent-remove behavior.
     pub fn clear_price(env: Env, caller: Address, token: Address) {
         caller.require_auth();
         require_order_keeper(&env, &caller);
+        require_price_clearable(&env, &token);
         env.storage().temporary().remove(&TempKey::Price(token));
     }
 
     /// Clear multiple token prices at once (called by keeper after execution).
+    /// See `clear_price` for the minimum-age gate (#805).
     pub fn clear_prices(env: Env, caller: Address, tokens: Vec<Address>) {
         caller.require_auth();
         require_order_keeper(&env, &caller);
+        // Issue #619: cap batch size, matching every other batch entrypoint in
+        // this workspace (fee_batch_sweeper::MAX_BATCH_CLAIM_SIZE,
+        // order_handler::create_orders's cap of 5) — an unbounded Vec here can
+        // be built large enough to exceed the ledger's per-transaction resource
+        // budget, failing with an opaque resource error instead of this typed one.
+        if tokens.len() > MAX_CLEAR_PRICES_BATCH_SIZE {
+            panic_with_error!(&env, Error::BatchSizeLimitExceeded);
+        }
         for i in 0..tokens.len() {
             let token = tokens.get(i).unwrap();
+            require_price_clearable(&env, &token);
             env.storage().temporary().remove(&TempKey::Price(token));
         }
     }
@@ -375,7 +514,11 @@ impl Oracle {
 
         let key = keeper_pubkey_storage_key(&env, keeper_index);
         let old_pubkey = DataStoreClient::new(&env, &data_store).get_bytes32(&key);
-        DataStoreClient::new(&env, &data_store).set_bytes32(&caller, &key, &new_pubkey);
+        DataStoreClient::new(&env, &data_store).set_bytes32(
+            &env.current_contract_address(),
+            &key,
+            &new_pubkey,
+        );
 
         env.events().publish(
             (symbol_short!("sig_rot"),),
@@ -384,6 +527,62 @@ impl Oracle {
                 old_signer: old_pubkey,
                 new_signer: new_pubkey,
             },
+        );
+    }
+
+    /// Register a market in the circuit-breaker reverse index for a token (#380).
+    ///
+    /// After registration, `check_circuit_breaker` uses this index instead of
+    /// scanning every market. Call this once per (token, market) pair when a
+    /// market is deployed.
+    pub fn register_market_for_breaker(env: Env, caller: Address, token: Address, market: Address) {
+        caller.require_auth();
+        require_admin(&env, &caller);
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let key = token_circuit_markets_key(&env, &token);
+        DataStoreClient::new(&env, &data_store).add_address_to_set(
+            &env.current_contract_address(),
+            &key,
+            &market,
+        );
+    }
+
+    /// Configure the circuit-breaker deviation threshold for a market, in
+    /// basis points (issue #637).
+    ///
+    /// `check_circuit_breaker` reads this via `circuit_breaker_factor_key` to
+    /// decide whether a submitted price trips the breaker for the market.
+    /// Previously the only way to set this was a raw `data_store::set_u128`
+    /// call, which required the caller to hold data_store's own CONTROLLER
+    /// role directly — a broader grant than "manage this one oracle
+    /// parameter." This mirrors rotate_signer/register_market_for_breaker's
+    /// admin-gated pattern, writing through the oracle's own CONTROLLER-held
+    /// reference instead.
+    pub fn set_circuit_breaker_factor(
+        env: Env,
+        caller: Address,
+        market: Address,
+        factor_bps: u128,
+    ) {
+        caller.require_auth();
+        require_admin(&env, &caller);
+        if factor_bps > MAX_CIRCUIT_BREAKER_FACTOR_BPS {
+            panic_with_error!(&env, Error::CircuitBreakerFactorTooHigh);
+        }
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let key = gmx_keys::circuit_breaker_factor_key(&env, &market);
+        DataStoreClient::new(&env, &data_store).set_u128(
+            &env.current_contract_address(),
+            &key,
+            &factor_bps,
         );
     }
 }
@@ -405,6 +604,11 @@ impl Oracle {
     pub fn set_prices_simple(env: Env, caller: Address, prices: Vec<TokenPrice>) {
         caller.require_auth();
         require_order_keeper(&env, &caller);
+
+        // Issue #615: cap batch size, matching set_prices.
+        if prices.len() > MAX_PRICE_BATCH_SIZE {
+            panic_with_error!(&env, Error::BatchSizeLimitExceeded);
+        }
 
         let data_store: Address = env
             .storage()
@@ -430,7 +634,28 @@ impl Oracle {
             env.storage()
                 .temporary()
                 .extend_ttl(&price_key, PRICE_TTL_LEDGERS, PRICE_TTL_LEDGERS);
+
+            // Emit per-price event for indexers and price-feed dashboards
+            env.events().publish(
+                (symbol_short!("price_sub"),),
+                PriceSubmitted {
+                    keeper: caller.clone(),
+                    token: tp.token.clone(),
+                    min: tp.min,
+                    max: tp.max,
+                    ledger_seq: env.ledger().sequence(),
+                },
+            );
         }
+
+        // Emit batch summary event for parity with signed path
+        env.events().publish(
+            (symbol_short!("prices"),),
+            PricesSubmittedBatch {
+                keeper: caller,
+                count: prices.len(),
+            },
+        );
     }
 }
 
@@ -441,6 +666,13 @@ impl Oracle {
 /// Casts both values to u64 so the subtraction is always safe: when `submitted > current`
 /// (which happens after a u32 sequence wrap-around where a pre-wrap sequence numerically
 /// exceeds the post-wrap current) the first branch triggers and we treat it as stale.
+/// Max ledgers between the price's signing ledger and its use in
+/// `require_price_fresh` (~100s at 5s/ledger). Covers sign-at-L, `set_prices`
+/// confirmation, the keeper's post-confirmation delay and a cycle's sequential
+/// executions (50s cycle cap), while staying far tighter than the 60-ledger
+/// `set_prices` acceptance window (SO4-Markets/so4-oracle#1205).
+pub const PRICE_FRESHNESS_WINDOW: u32 = 20;
+
 fn is_seq_stale(current: u32, submitted: u32, window: u32) -> bool {
     let c = current as u64;
     let s = submitted as u64;
@@ -457,6 +689,42 @@ fn require_order_keeper(env: &Env, caller: &Address) {
     if !RoleStoreClient::new(env, &role_store).has_role(caller, &role) {
         panic_with_error!(env, Error::Unauthorized);
     }
+}
+
+/// Returns true if the stored price is too old to act on (#379).
+/// Uses saturating_sub to handle the impossible case where stored_seq > current_seq.
+fn price_is_stale(current_seq: u32, stored_seq: u32) -> bool {
+    current_seq.saturating_sub(stored_seq) > PRICE_FRESHNESS_LEDGERS
+}
+
+/// Panics with `PriceTooFreshToClear` if `token` has a stored price younger
+/// than `MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR` ledgers (#805). A token with no
+/// stored price is always clearable (no-op), preserving the previous
+/// idempotent-remove behavior of `clear_price`/`clear_prices`.
+fn require_price_clearable(env: &Env, token: &Address) {
+    let stored: Option<StoredPrice> = env
+        .storage()
+        .temporary()
+        .get::<TempKey, StoredPrice>(&TempKey::Price(token.clone()));
+    if let Some(stored) = stored {
+        let age = env.ledger().sequence().saturating_sub(stored.ledger_seq);
+        if age < MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR {
+            panic_with_error!(env, Error::PriceTooFreshToClear);
+        }
+    }
+}
+
+/// sha256("CB_TOKEN_MARKETS" ‖ token) — reverse index key for #380.
+fn token_circuit_markets_key(env: &Env, token: &Address) -> BytesN<32> {
+    let mut buf = Bytes::new(env);
+    let prefix = Bytes::from_slice(env, b"CB_TOKEN_MARKETS");
+    buf.append(&prefix);
+    let s: soroban_sdk::String = token.to_string();
+    let str_len = s.len() as usize;
+    let mut raw = [0u8; 64];
+    s.copy_into_slice(&mut raw[..str_len]);
+    buf.append(&Bytes::from_slice(env, &raw[..str_len]));
+    env.crypto().sha256(&buf).into()
 }
 
 fn require_admin(env: &Env, caller: &Address) {
@@ -519,9 +787,18 @@ fn build_price_message(
     buf
 }
 
-fn check_circuit_breaker(env: &Env, data_store: &Address, token: &Address, new_min: i128, new_max: i128) {
+fn check_circuit_breaker(
+    env: &Env,
+    data_store: &Address,
+    token: &Address,
+    new_min: i128,
+    new_max: i128,
+) {
     let price_key = TempKey::Price(token.clone());
-    let prev_price_opt = env.storage().temporary().get::<TempKey, StoredPrice>(&price_key);
+    let prev_price_opt = env
+        .storage()
+        .temporary()
+        .get::<TempKey, StoredPrice>(&price_key);
 
     if let Some(prev_price) = prev_price_opt {
         let last_price = (prev_price.min + prev_price.max) / 2;
@@ -531,38 +808,53 @@ fn check_circuit_breaker(env: &Env, data_store: &Address, token: &Address, new_m
             let deviation_bps = ((deviation_val as u128) * 10000) / (last_price as u128);
 
             let ds = DataStoreClient::new(env, data_store);
-            let market_list_k = gmx_keys::market_list_key(env);
-            let market_count = ds.get_address_set_count(&market_list_k);
-            let markets = ds.get_address_set_at(&market_list_k, &0, &market_count);
+
+            // #380: Use the reverse index (token → markets) when populated to avoid
+            // scanning every registered market on every price submission.
+            let reverse_key = token_circuit_markets_key(env, token);
+            let indexed_count = ds.get_address_set_count(&reverse_key);
+            let markets = if indexed_count > 0 {
+                ds.get_address_set_at(&reverse_key, &0, &indexed_count)
+            } else {
+                // Fallback: full scan for markets not yet registered in the index.
+                let market_list_k = gmx_keys::market_list_key(env);
+                let market_count = ds.get_address_set_count(&market_list_k);
+                let all_markets = ds.get_address_set_at(&market_list_k, &0, &market_count);
+                let mut matched = Vec::new(env);
+                for i in 0..all_markets.len() {
+                    let m = all_markets.get(i).unwrap();
+                    let index_token = ds.get_address(&gmx_keys::market_index_token_key(env, &m));
+                    let long_token = ds.get_address(&gmx_keys::market_long_token_key(env, &m));
+                    let short_token = ds.get_address(&gmx_keys::market_short_token_key(env, &m));
+                    if (index_token.is_some() && index_token.unwrap() == *token)
+                        || (long_token.is_some() && long_token.unwrap() == *token)
+                        || (short_token.is_some() && short_token.unwrap() == *token)
+                    {
+                        matched.push_back(m);
+                    }
+                }
+                matched
+            };
 
             for i in 0..markets.len() {
                 let market = markets.get(i).unwrap();
-                let index_token = ds.get_address(&gmx_keys::market_index_token_key(env, &market));
-                let long_token = ds.get_address(&gmx_keys::market_long_token_key(env, &market));
-                let short_token = ds.get_address(&gmx_keys::market_short_token_key(env, &market));
-
-                let matches_market = (index_token.is_some() && index_token.unwrap() == *token)
-                    || (long_token.is_some() && long_token.unwrap() == *token)
-                    || (short_token.is_some() && short_token.unwrap() == *token);
-
-                if matches_market {
-                    let threshold = ds.get_u128(&gmx_keys::circuit_breaker_factor_key(env, &market));
-                    if threshold > 0 && deviation_bps > threshold {
-                        // Set market pause flag to true
-                        ds.set_bool(&env.current_contract_address(), &gmx_keys::is_market_paused_key(env, &market), &true);
-
-                        // Emit event
-                        env.events().publish(
-                            (soroban_sdk::symbol_short!("cb_trip"),),
-                            CircuitBreakerTripped {
-                                market: market.clone(),
-                                token: token.clone(),
-                                old_price: last_price,
-                                new_price,
-                                deviation_bps,
-                            }
-                        );
-                    }
+                let threshold = ds.get_u128(&gmx_keys::circuit_breaker_factor_key(env, &market));
+                if threshold > 0 && deviation_bps > threshold {
+                    ds.set_bool(
+                        &env.current_contract_address(),
+                        &gmx_keys::is_market_paused_key(env, &market),
+                        &true,
+                    );
+                    env.events().publish(
+                        (soroban_sdk::symbol_short!("cb_trip"),),
+                        CircuitBreakerTripped {
+                            market: market.clone(),
+                            token: token.clone(),
+                            old_price: last_price,
+                            new_price,
+                            deviation_bps,
+                        },
+                    );
                 }
             }
         }
@@ -577,7 +869,10 @@ mod tests {
     use data_store::{DataStore, DataStoreClient as DsClient};
     use gmx_keys::roles;
     use role_store::{RoleStore, RoleStoreClient as RsClient};
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, Events as _, Ledger as _},
+        Env, IntoVal, Val,
+    };
 
     fn setup(env: &Env) -> (Address, Address, Address, Address) {
         let admin = Address::generate(env);
@@ -689,8 +984,191 @@ mod tests {
         client.set_prices_simple(&admin, &prices);
         assert!(client.try_get_price(&token).is_some());
 
+        // #805: clear_price now rejects clearing a price younger than
+        // MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR — advance past that first.
+        env.ledger()
+            .with_mut(|li| li.sequence_number += MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR);
+
         client.clear_price(&admin, &token);
         assert!(client.try_get_price(&token).is_none());
+    }
+
+    /// Issue #805: a price stored fewer than MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR
+    /// ledgers ago must not be clearable — this is the griefing window a
+    /// compromised ORDER_KEEPER could otherwise exploit to DoS the protocol.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn clear_price_rejects_price_stored_too_recently() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        let prices = Vec::from_array(
+            &env,
+            [TokenPrice {
+                token: token.clone(),
+                min: 100,
+                max: 100,
+            }],
+        );
+        client.set_prices_simple(&admin, &prices);
+
+        // No ledger advancement: the price is 0 ledgers old, well under the
+        // MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR = 5 minimum.
+        client.clear_price(&admin, &token);
+    }
+
+    /// The boundary itself: exactly MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR ledgers
+    /// after submission, clearing must succeed (age >= threshold is allowed).
+    #[test]
+    fn clear_price_succeeds_exactly_at_min_age_boundary() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        let prices = Vec::from_array(
+            &env,
+            [TokenPrice {
+                token: token.clone(),
+                min: 100,
+                max: 100,
+            }],
+        );
+        client.set_prices_simple(&admin, &prices);
+
+        env.ledger()
+            .with_mut(|li| li.sequence_number += MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR);
+
+        client.clear_price(&admin, &token);
+        assert!(client.try_get_price(&token).is_none());
+    }
+
+    /// Clearing a token with no stored price at all must remain a no-op
+    /// (preserves the previous idempotent-remove behavior).
+    #[test]
+    fn clear_price_on_nonexistent_price_is_a_no_op() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        client.clear_price(&admin, &token);
+        assert!(client.try_get_price(&token).is_none());
+    }
+
+    /// Issue #805: clear_prices must reject the whole batch if any one of the
+    /// tokens in it has a price that's too fresh to clear.
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn clear_prices_rejects_batch_containing_a_too_fresh_price() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let t1 = Address::generate(&env);
+        let t2 = Address::generate(&env);
+        let mut prices = Vec::new(&env);
+        prices.push_back(TokenPrice {
+            token: t1.clone(),
+            min: 100,
+            max: 100,
+        });
+        client.set_prices_simple(&admin, &prices);
+
+        // Advance past the minimum age for t1, then submit t2 fresh — a
+        // batch clear covering both must still reject on t2's freshness.
+        env.ledger()
+            .with_mut(|li| li.sequence_number += MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR);
+        let mut t2_prices = Vec::new(&env);
+        t2_prices.push_back(TokenPrice {
+            token: t2.clone(),
+            min: 200,
+            max: 200,
+        });
+        client.set_prices_simple(&admin, &t2_prices);
+
+        let mut tokens_to_clear = Vec::new(&env);
+        tokens_to_clear.push_back(t1);
+        tokens_to_clear.push_back(t2);
+        client.clear_prices(&admin, &tokens_to_clear);
+    }
+
+    /// Issue #619: clear_prices must reject a batch larger than
+    /// MAX_CLEAR_PRICES_BATCH_SIZE, matching the cap pattern already applied
+    /// to every other batch entrypoint in the workspace.
+    #[test]
+    #[should_panic]
+    fn clear_prices_over_max_batch_size_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let mut tokens = Vec::new(&env);
+        let mut i = 0u32;
+        while i < MAX_CLEAR_PRICES_BATCH_SIZE + 1 {
+            tokens.push_back(Address::generate(&env));
+            i += 1;
+        }
+
+        client.clear_prices(&admin, &tokens);
+    }
+
+    /// A batch exactly at the cap must still succeed.
+    #[test]
+    fn clear_prices_at_max_batch_size_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let mut tokens = Vec::new(&env);
+        let mut i = 0u32;
+        while i < MAX_CLEAR_PRICES_BATCH_SIZE {
+            tokens.push_back(Address::generate(&env));
+            i += 1;
+        }
+
+        client.clear_prices(&admin, &tokens);
+    }
+
+    // ── so4-oracle#1205: require_price_fresh uses a window, not equality ─────
+
+    /// The keeper signs at closed ledger L; executions land a few ledgers later.
+    #[test]
+    fn price_freshness_window_accepts_keeper_flow_and_rejects_old_or_future() {
+        let signed_at = 1_000;
+        // set_prices lands in L+1, executions follow within the window.
+        for current in [
+            signed_at,
+            signed_at + 1,
+            signed_at + 5,
+            signed_at + PRICE_FRESHNESS_WINDOW,
+        ] {
+            assert!(
+                !is_seq_stale(current, signed_at, PRICE_FRESHNESS_WINDOW),
+                "price signed at {signed_at} must be fresh at {current}"
+            );
+        }
+        assert!(is_seq_stale(
+            signed_at + PRICE_FRESHNESS_WINDOW + 1,
+            signed_at,
+            PRICE_FRESHNESS_WINDOW
+        ));
+        // A price signed for a future ledger is never fresh.
+        assert!(is_seq_stale(
+            signed_at,
+            signed_at + 1,
+            PRICE_FRESHNESS_WINDOW
+        ));
+        // Stays tighter than the set_prices acceptance window.
+        const { assert!(PRICE_FRESHNESS_WINDOW < 60) };
     }
 
     // ── Issue #172: ledger sequence wrap-around staleness ─────────────────────
@@ -701,9 +1179,15 @@ mod tests {
     #[test]
     fn seq_staleness_rejects_pre_wrap_sequence_as_stale() {
         assert!(is_seq_stale(1, u32::MAX, 60), "u32::MAX > 1 must be stale");
-        assert!(is_seq_stale(1, u32::MAX - 1, 60), "u32::MAX-1 > 1 must be stale");
+        assert!(
+            is_seq_stale(1, u32::MAX - 1, 60),
+            "u32::MAX-1 > 1 must be stale"
+        );
         // Edge: submitted exactly equals current — fresh (age = 0)
-        assert!(!is_seq_stale(1, 1, 60), "same-ledger submission must be fresh");
+        assert!(
+            !is_seq_stale(1, 1, 60),
+            "same-ledger submission must be fresh"
+        );
     }
 
     /// Normal (non-wrap) staleness check must still work after the refactor.
@@ -758,9 +1242,62 @@ mod tests {
         assert_eq!(client.get_primary_price(&usdc).min, 10i128.pow(30));
     }
 
+    /// Issue #615: set_prices_simple must reject a batch larger than
+    /// MAX_PRICE_BATCH_SIZE, matching the cap pattern already applied to
+    /// clear_prices (#619) and every other batch entrypoint in the workspace.
+    #[test]
+    #[should_panic]
+    fn set_prices_simple_over_max_batch_size_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let mut prices = Vec::new(&env);
+        let mut i = 0u32;
+        while i < MAX_PRICE_BATCH_SIZE + 1 {
+            prices.push_back(TokenPrice {
+                token: Address::generate(&env),
+                min: 10i128.pow(30),
+                max: 10i128.pow(30),
+            });
+            i += 1;
+        }
+
+        client.set_prices_simple(&admin, &prices);
+    }
+
+    /// A batch exactly at the cap must still succeed.
+    #[test]
+    fn set_prices_simple_at_max_batch_size_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let mut prices = Vec::new(&env);
+        let mut i = 0u32;
+        while i < MAX_PRICE_BATCH_SIZE {
+            prices.push_back(TokenPrice {
+                token: Address::generate(&env),
+                min: 10i128.pow(30),
+                max: 10i128.pow(30),
+            });
+            i += 1;
+        }
+
+        client.set_prices_simple(&admin, &prices);
+    }
+
     // ── Issue #292: signer rotation ───────────────────────────────────────────
 
-    fn register_keeper_pubkey(env: &Env, ds: &Address, admin: &Address, index: u32, pubkey: &BytesN<32>) {
+    fn register_keeper_pubkey(
+        env: &Env,
+        ds: &Address,
+        admin: &Address,
+        index: u32,
+        pubkey: &BytesN<32>,
+    ) {
         let mut buf = Bytes::new(env);
         let prefix = keeper_public_key_prefix(env);
         buf.extend_from_array(&prefix.to_array());
@@ -806,14 +1343,23 @@ mod tests {
         client.rotate_signer(&admin, &1u32, &pubkey_b);
 
         let events = env.events().all();
-        let rotation_event = events
-            .iter()
-            .find(|(_, topics, _)| topics.contains(&soroban_sdk::Val::from(symbol_short!("sig_rot"))))
-            .expect("sig_rot event must be emitted");
-        let payload: OracleSignerRotated = soroban_sdk::FromVal::from_val(&env, &rotation_event.2);
-        assert_eq!(payload.keeper_index, 1);
-        assert_eq!(payload.old_signer, pubkey_a);
-        assert_eq!(payload.new_signer, pubkey_b);
+        let expected_topics: Vec<Val> = (symbol_short!("sig_rot"),).into_val(&env);
+        let expected_payload = OracleSignerRotated {
+            keeper_index: 1,
+            old_signer: pubkey_a.clone(),
+            new_signer: pubkey_b.clone(),
+        };
+        assert_eq!(
+            events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    oracle_id.clone(),
+                    expected_topics,
+                    expected_payload.into_val(&env)
+                )
+            ]
+        );
     }
 
     /// rotate_signer called by a non-admin must panic with Unauthorized.
@@ -831,5 +1377,168 @@ mod tests {
         // Use a different address as caller — must be rejected
         let non_admin = Address::generate(&env);
         client.rotate_signer(&non_admin, &0u32, &BytesN::from_array(&env, &[0xBB; 32]));
+    }
+
+    #[test]
+    fn clear_prices_clears_batch() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let t1 = Address::generate(&env);
+        let t2 = Address::generate(&env);
+        let t3 = Address::generate(&env);
+
+        let mut prices = Vec::new(&env);
+        prices.push_back(TokenPrice {
+            token: t1.clone(),
+            min: 100,
+            max: 100,
+        });
+        prices.push_back(TokenPrice {
+            token: t2.clone(),
+            min: 200,
+            max: 200,
+        });
+        prices.push_back(TokenPrice {
+            token: t3.clone(),
+            min: 300,
+            max: 300,
+        });
+
+        client.set_prices_simple(&admin, &prices);
+
+        assert_eq!(client.get_primary_price(&t1).min, 100);
+        assert_eq!(client.get_primary_price(&t2).min, 200);
+        assert_eq!(client.get_primary_price(&t3).min, 300);
+
+        let mut tokens_to_clear = Vec::new(&env);
+        tokens_to_clear.push_back(t1.clone());
+        tokens_to_clear.push_back(t2.clone());
+
+        // #805: minimum-age gate — advance the ledger before clearing.
+        env.ledger()
+            .with_mut(|li| li.sequence_number += MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR);
+
+        client.clear_prices(&admin, &tokens_to_clear);
+
+        // t3 should still exist
+        assert_eq!(client.get_primary_price(&t3).min, 300);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")] // PriceNotFound
+    fn clear_prices_actually_clears() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let t1 = Address::generate(&env);
+        let mut prices = Vec::new(&env);
+        prices.push_back(TokenPrice {
+            token: t1.clone(),
+            min: 100,
+            max: 100,
+        });
+        client.set_prices_simple(&admin, &prices);
+
+        let mut tokens_to_clear = Vec::new(&env);
+        tokens_to_clear.push_back(t1.clone());
+
+        // #805: minimum-age gate — advance the ledger before clearing.
+        env.ledger()
+            .with_mut(|li| li.sequence_number += MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR);
+
+        client.clear_prices(&admin, &tokens_to_clear);
+
+        // This will panic with PriceNotFound Error code
+        client.get_primary_price(&t1);
+    }
+
+    #[test]
+    fn get_stable_price_returns_none_on_overflow() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, ds_id, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        let ds = DataStoreClient::new(&env, &ds_id);
+
+        // i128::MAX + 1 stored as u128
+        let overflow_val: u128 = (i128::MAX as u128) + 1;
+        ds.set_u128(
+            &admin,
+            &gmx_keys::stable_price_key(&env, &token),
+            &overflow_val,
+        );
+
+        assert_eq!(client.get_stable_price(&token), None);
+    }
+
+    #[test]
+    fn get_price_with_stable_fallback_uses_primary_on_stable_overflow() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, ds_id, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        let ds = DataStoreClient::new(&env, &ds_id);
+
+        let overflow_val: u128 = (i128::MAX as u128) + 1;
+        ds.set_u128(
+            &admin,
+            &gmx_keys::stable_price_key(&env, &token),
+            &overflow_val,
+        );
+
+        let mut prices = Vec::new(&env);
+        prices.push_back(TokenPrice {
+            token: token.clone(),
+            min: 1234,
+            max: 1234,
+        });
+        client.set_prices_simple(&admin, &prices);
+
+        let price = client.get_price_with_stable_fallback(&token);
+        assert_eq!(price.min, 1234);
+    }
+
+    #[test]
+    fn test_clear_prices() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _rs, _ds, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        client.clear_prices(&admin, &soroban_sdk::vec![&env, token]);
+    }
+
+    #[test]
+    fn test_get_stable_price() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, _rs, _ds, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        let price = client.get_stable_price(&token);
+        assert!(price.is_none());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_price_with_stable_fallback() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_admin, _rs, _ds, oracle_id) = setup(&env);
+        let client = OracleClient::new(&env, &oracle_id);
+
+        let token = Address::generate(&env);
+        client.get_price_with_stable_fallback(&token);
     }
 }

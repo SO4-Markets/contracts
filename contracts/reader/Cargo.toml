@@ -2,6 +2,7 @@
 name = "reader"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 publish = false
 
 [lib]
@@ -23,3 +24,4 @@ data-store    = { path = "../data_store" }
 oracle        = { path = "../oracle", features = ["testutils"] }
 order-handler = { path = "../order_handler" }
 order-vault   = { path = "../order_vault" }
+market-token  = { path = "../market_token" }

@@ -663,6 +663,7 @@ dependencies = [
  "gmx-keys",
  "role-store",
  "soroban-sdk",
+ "test-token",
 ]
 
 [[package]]
@@ -843,6 +844,7 @@ dependencies = [
  "data-store",
  "deposit-handler",
  "deposit-vault",
+ "fee-handler",
  "gmx-keys",
  "gmx-math",
  "gmx-types",
@@ -867,7 +869,11 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 name = "fee-batch-sweeper"
 version = "0.1.0"
 dependencies = [
+ "data-store",
  "fee-handler",
+ "gmx-keys",
+ "market-token",
+ "role-store",
  "soroban-sdk",
 ]
 
@@ -1027,18 +1033,23 @@ dependencies = [
  "data-store",
  "deposit-handler",
  "deposit-vault",
+ "exchange-router",
+ "fee-batch-sweeper",
  "fee-handler",
  "gmx-keys",
  "gmx-market-utils",
  "gmx-math",
  "gmx-types",
+ "insurance-fund-router",
  "liquidation-handler",
+ "market-factory",
  "market-token",
  "oracle",
  "order-cleanup",
  "order-handler",
  "order-vault",
  "reader",
+ "referral-storage",
  "role-store",
  "soroban-sdk",
  "withdrawal-handler",
@@ -1279,6 +1290,10 @@ checksum = "8e04e2fd2b8188ea827b32ef11de88377086d690286ab35747ef7f9bf3ccb590"
 name = "insurance-fund-router"
 version = "0.1.0"
 dependencies = [
+ "data-store",
+ "gmx-keys",
+ "gmx-math",
+ "role-store",
  "soroban-sdk",
 ]
 
@@ -1423,9 +1438,16 @@ dependencies = [
 name = "market-util-reader"
 version = "0.1.0"
 dependencies = [
+ "data-store",
+ "deposit-handler",
+ "deposit-vault",
  "gmx-keys",
  "gmx-market-utils",
+ "gmx-math",
  "gmx-types",
+ "market-token",
+ "oracle",
+ "role-store",
  "soroban-sdk",
 ]
 
@@ -1509,7 +1531,9 @@ dependencies = [
 name = "order-cleanup"
 version = "0.1.0"
 dependencies = [
+ "gmx-keys",
  "gmx-types",
+ "role-store",
  "soroban-sdk",
 ]
 
@@ -1536,6 +1560,8 @@ dependencies = [
  "order-vault",
  "referral-storage",
  "role-store",
+ "rollback_harness",
+ "settlement_invariants",
  "soroban-sdk",
 ]
 
@@ -1546,6 +1572,7 @@ dependencies = [
  "gmx-keys",
  "role-store",
  "soroban-sdk",
+ "test-token",
 ]
 
 [[package]]
@@ -1798,6 +1825,7 @@ dependencies = [
  "gmx-position-utils",
  "gmx-pricing-utils",
  "gmx-types",
+ "market-token",
  "oracle",
  "order-handler",
  "order-vault",
@@ -1830,6 +1858,7 @@ name = "referral-storage"
 version = "0.1.0"
 dependencies = [
  "gmx-keys",
+ "gmx-math",
  "soroban-sdk",
 ]
 
@@ -1879,6 +1908,15 @@ dependencies = [
  "gmx-keys",
  "gmx-math",
  "gmx-types",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "rollback_harness"
+version = "0.1.0"
+dependencies = [
+ "gmx-types",
+ "settlement_invariants",
  "soroban-sdk",
 ]
 
@@ -2059,6 +2097,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "settlement_invariants"
+version = "0.1.0"
+dependencies = [
+ "gmx-math",
+ "gmx-types",
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -2431,6 +2478,7 @@ dependencies = [
 name = "test-faucet"
 version = "0.1.0"
 dependencies = [
+ "gmx-keys",
  "soroban-sdk",
  "test-token",
 ]
@@ -2439,6 +2487,7 @@ dependencies = [
 name = "test-token"
 version = "0.1.0"
 dependencies = [
+ "gmx-keys",
  "soroban-sdk",
 ]
 
@@ -2787,6 +2836,7 @@ dependencies = [
  "gmx-keys",
  "role-store",
  "soroban-sdk",
+ "test-token",
 ]
 
 [[package]]

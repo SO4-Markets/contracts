@@ -41,7 +41,14 @@ export const Errors = {
   5: {message:"InsufficientAllowance"},
   6: {message:"NegativeAmount"},
   7: {message:"AllowanceExpired"},
-  8: {message:"Paused"}
+  8: {message:"Paused"},
+  9: {message:"MainnetNotAllowed"},
+  /**
+   * approve() called with amount > 0 and an expiration_ledger already in
+   * the past (issue #616) — matches the standard SEP-41 token contract's
+   * validation, which panics on this input rather than silently accepting it.
+   */
+  10: {message:"InvalidExpirationLedger"}
 }
 
 export interface Client {
@@ -153,7 +160,7 @@ export class Client extends ContractClient {
   }
   constructor(public readonly options: ContractClientOptions) {
     super(
-      new ContractSpec([ "AAAABAAAAAAAAAAAAAAABUVycm9yAAAAAAAACAAAAAAAAAASQWxyZWFkeUluaXRpYWxpemVkAAAAAAABAAAAAAAAAA5Ob3RJbml0aWFsaXplZAAAAAAAAgAAAAAAAAAMVW5hdXRob3JpemVkAAAAAwAAAAAAAAATSW5zdWZmaWNpZW50QmFsYW5jZQAAAAAEAAAAAAAAABVJbnN1ZmZpY2llbnRBbGxvd2FuY2UAAAAAAAAFAAAAAAAAAA5OZWdhdGl2ZUFtb3VudAAAAAAABgAAAAAAAAAQQWxsb3dhbmNlRXhwaXJlZAAAAAcAAAAAAAAABlBhdXNlZAAAAAAACA==",
+      new ContractSpec([ "AAAABAAAAAAAAAAAAAAABUVycm9yAAAAAAAACgAAAAAAAAASQWxyZWFkeUluaXRpYWxpemVkAAAAAAABAAAAAAAAAA5Ob3RJbml0aWFsaXplZAAAAAAAAgAAAAAAAAAMVW5hdXRob3JpemVkAAAAAwAAAAAAAAATSW5zdWZmaWNpZW50QmFsYW5jZQAAAAAEAAAAAAAAABVJbnN1ZmZpY2llbnRBbGxvd2FuY2UAAAAAAAAFAAAAAAAAAA5OZWdhdGl2ZUFtb3VudAAAAAAABgAAAAAAAAAQQWxsb3dhbmNlRXhwaXJlZAAAAAcAAAAAAAAABlBhdXNlZAAAAAAACAAAAAAAAAARTWFpbm5ldE5vdEFsbG93ZWQAAAAAAAAJAAAA1WFwcHJvdmUoKSBjYWxsZWQgd2l0aCBhbW91bnQgPiAwIGFuZCBhbiBleHBpcmF0aW9uX2xlZGdlciBhbHJlYWR5IGluCnRoZSBwYXN0IChpc3N1ZSAjNjE2KSDigJQgbWF0Y2hlcyB0aGUgc3RhbmRhcmQgU0VQLTQxIHRva2VuIGNvbnRyYWN0J3MKdmFsaWRhdGlvbiwgd2hpY2ggcGFuaWNzIG9uIHRoaXMgaW5wdXQgcmF0aGVyIHRoYW4gc2lsZW50bHkgYWNjZXB0aW5nIGl0LgAAAAAAABdJbnZhbGlkRXhwaXJhdGlvbkxlZGdlcgAAAAAK",
         "AAAAAAAAAAAAAAAEYnVybgAAAAIAAAAAAAAABGZyb20AAAATAAAAAAAAAAZhbW91bnQAAAAAAAsAAAAA",
         "AAAAAAAAAAAAAAAEbWludAAAAAMAAAAAAAAABmNhbGxlcgAAAAAAEwAAAAAAAAAHYWNjb3VudAAAAAATAAAAAAAAAAZhbW91bnQAAAAAAAsAAAAA",
         "AAAAAAAAAAAAAAAEbmFtZQAAAAAAAAABAAAAEA==",

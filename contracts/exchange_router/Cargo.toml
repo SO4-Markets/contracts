@@ -2,6 +2,7 @@
 name = "exchange-router"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 publish = false
 
 [lib]
@@ -27,3 +28,4 @@ withdrawal-handler  = { path = "../withdrawal_handler" }
 order-handler       = { path = "../order_handler" }
 liquidation-handler = { path = "../liquidation_handler" }
 market-token        = { path = "../market_token" }
+fee-handler         = { path = "../fee_handler" }

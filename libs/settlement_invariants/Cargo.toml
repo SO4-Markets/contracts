@@ -1,0 +1,12 @@
+[package]
+name = "settlement_invariants"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+soroban-sdk = { workspace = true }
+gmx-types = { path = "../types" }
+gmx-math = { path = "../math" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

@@ -14,23 +14,26 @@
 //!   update_order  → modify trigger_price / acceptable_price / size before execution
 //!   freeze_order  → mark order as frozen (keeper-side circuit breaker)
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_decrease_position_utils::{decrease_position, DecreasePositionParams};
 use gmx_increase_position_utils::{increase_position, IncreasePositionParams};
 use gmx_keys::{
-    account_order_list_key, keeper_heartbeat_timeout_key, last_keeper_activity_key,
-    liquidation_execution_fee_key, min_execution_fee_key,
-    market_index_token_key, market_long_token_key, market_short_token_key,
-    max_leverage_key, max_swap_path_length_key, order_key, order_list_key,
-    position_fee_factor_key, position_key,
-    open_interest_key,
-    saved_funding_factor_per_second_key,
-    fee_tier_position_fee_factor_key, fee_tier_volume_threshold_key,
-    trader_volume_key, trader_volume_window_start_key,
-    roles, DEFAULT_KEEPER_HEARTBEAT_TIMEOUT, is_market_paused_key,
+    account_order_list_key, fee_tier_position_fee_factor_key, fee_tier_volume_threshold_key,
+    is_market_paused_key, keeper_heartbeat_timeout_key, last_keeper_activity_key,
+    liquidation_execution_fee_key, market_index_token_key, market_long_token_key,
+    market_short_token_key, max_leverage_key, open_interest_key, order_key, order_list_key,
+    position_fee_factor_key, position_key, roles, saved_funding_factor_per_second_key,
+    trader_volume_key, trader_volume_window_start_key, DEFAULT_KEEPER_HEARTBEAT_TIMEOUT,
+    MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET,
 };
-use gmx_math::{mul_div_wide, FLOAT_PRECISION};
+use gmx_math::mul_div_wide;
+use gmx_position_utils::validate_position;
 use gmx_swap_utils::{swap_with_path, MAX_SWAP_PATH_LENGTH};
 pub use gmx_types::CreateOrderParams;
 use gmx_types::PositionProps;
@@ -39,6 +42,9 @@ use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
     symbol_short, Address, BytesN, Env,
 };
+
+/// Maximum number of orders allowed in a single `create_orders` batch.
+pub const MAX_ORDER_BATCH_SIZE: u32 = 5;
 
 // ─── TTL constants (#297) ─────────────────────────────────────────────────────
 //
@@ -49,8 +55,7 @@ use soroban_sdk::{
 //
 // Only extend when current TTL < MIN_BUMP_THRESHOLD; target PERSISTENT_BUMP_TARGET.
 // This halves unnecessary rent payments on busy markets (issue #297).
-const PERSISTENT_BUMP_TARGET: u32 = 518_400;
-const MIN_BUMP_THRESHOLD: u32 = 259_200;
+// Values shared via gmx_keys (issue #659).
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
@@ -77,13 +82,15 @@ pub enum Error {
     OrderNotFound = 4,
     InvalidOrderType = 5,
     UnsatisfiedTrigger = 6,
-    PriceTooHigh = 7,
     PriceTooLow = 8,
     OrderFrozen = 9,
     /// Increase/swap orders require collateral to have been transferred to
     /// order_vault (via exchange_router SendTokens) before calling create_order.
     /// record_transfer_in returned zero, meaning no collateral arrived.
     ZeroCollateral = 10,
+    /// A position order named `on_behalf_of`, but that owner has not
+    /// registered the caller as their position manager for the market
+    /// (issue #385/#535). Raised by both `create_order` and `create_orders`.
     UnauthorizedPositionManager = 11,
     /// `flag_stale_keeper` was called but the role's last activity is still
     /// within the configured heartbeat timeout (issue #249).
@@ -105,8 +112,54 @@ pub enum Error {
     /// execute_order called after the order's user-set expiry_ledger (issue #272).
     /// The order is auto-cancelled and any collateral refunded to the user.
     OrderExpired = 20,
+    /// create_orders batch contains more than one increase/swap leg funded in the
+    /// same collateral token (issue #454) — record_transfer_in's shared per-token
+    /// balance delta can only unambiguously attribute one leg per token per batch.
+    DuplicateCollateralTokenInBatch = 21,
+    /// execute_adl called while the market/side's PnL-to-pool-value ratio does
+    /// not exceed the configured ADL threshold (issue #417). Re-validated here,
+    /// not just in the adl_handler wrapper, so the real mutating entry point
+    /// can't be forced by a caller who bypasses adl_handler entirely.
+    AdlRequirementNotMet = 22,
+    /// execute_adl called against a position that is not currently profitable
+    /// (issue #417) — ADL may only partially close profitable positions.
+    AdlPositionNotProfitable = 23,
+    /// Position increase would push the market/side's open interest above the
+    /// configured `max_open_interest` cap (issue #450).
+    MaxOpenInterestExceeded = 24,
+    /// set_keeper_heartbeat_timeout called with timeout_ledgers = 0 (issue #634)
+    /// — would make every keeper on the role appear stale after a single ledger.
+    InvalidHeartbeatTimeout = 25,
+    /// liquidate_position or execute_adl referenced a position_key with no
+    /// stored PositionProps (issue #642) — distinct from OrderNotFound, which
+    /// means no such *order* id, not no such position.
+    PositionNotFound = 26,
+    /// Issue #643: update_oracle called with the current oracle address
+    /// (no-op) or with this contract's own address / another of its stored
+    /// instance addresses (order_vault, data_store, role_store, admin,
+    /// referral_storage) — almost certainly a copy-paste mistake, not an
+    /// intentional rotation.
+    InvalidOracle = 27,
+    /// The supplied market address is not registered in data_store —
+    /// one or more of its token addresses (index/long/short) returned None.
+    /// Mirrors the InvalidMarket pattern in deposit_handler/withdrawal_handler
+    /// (issue #371) so callers can match this condition as a typed error
+    /// instead of a generic execution failure.
+    InvalidMarket = 28,
+    /// partial_liquidate_position referenced a position that is not currently
+    /// liquidatable (issue #533) — re-validated here, not just in the
+    /// liquidation_handler wrapper, so the real mutating entry point can't be
+    /// forced by a caller who bypasses liquidation_handler entirely (mirrors
+    /// AdlRequirementNotMet's rationale for execute_adl).
+    NotLiquidatable = 29,
+    /// flag_stale_keeper's keeper parameter does not actually hold role
+    /// (issue #794) — without this check, the emitted KeeperHeartbeatMissed
+    /// audit-trail event could name an arbitrary or unrelated address.
+    KeeperDoesNotHoldRole = 30,
+    /// The executing keeper's accumulated slash penalty has reached the
+    /// configured keeper_slash_threshold (issue #587).
+    KeeperSuspended = 31,
 }
-
 
 // ─── Position events (issue #205) ────────────────────────────────────────────
 
@@ -158,6 +211,36 @@ pub struct PositionLiquidatedEvent {
     pub market: Address,
     pub execution_price: i128,
     pub remaining_collateral: i128,
+    /// Collateral paid to the liquidation keeper as its execution fee (issue #437).
+    pub keeper_execution_fee: i128,
+    /// Realised PnL of the closed position (issue #437).
+    pub pnl_usd: i128,
+}
+
+/// Result of `liquidate_position` returned to `liquidation_handler` (issue #437).
+/// A named struct (ScMap-encoded, keyed by field name) rather than a positional
+/// tuple, so a future reorder of the fields on either side fails to decode
+/// instead of silently swapping values across the two independently-deployed
+/// contracts.
+#[contracttype]
+pub struct LiquidatePositionResult {
+    pub execution_price: i128,
+    pub keeper_execution_fee: i128,
+    pub pnl_usd: i128,
+}
+
+/// Result of `partial_liquidate_position` returned to `liquidation_handler`
+/// (issue #533). `liquidated_size_usd` / `remaining_size_usd` reflect the
+/// position's actual post-close state, computed from the same clamp
+/// `decrease_position` itself applies, rather than a value liquidation_handler
+/// derives independently and never confirms was actually applied.
+#[contracttype]
+pub struct PartialLiquidatePositionResult {
+    pub execution_price: i128,
+    pub keeper_execution_fee: i128,
+    pub pnl_usd: i128,
+    pub liquidated_size_usd: i128,
+    pub remaining_size_usd: i128,
 }
 
 // ─── Funding rate snapshot event (issue #286) ─────────────────────────────────
@@ -202,6 +285,14 @@ trait IDataStore {
     fn set_address(env: Env, caller: Address, key: BytesN<32>, value: Address) -> Address;
     fn get_bool(env: Env, key: BytesN<32>) -> bool;
     fn get_min_execution_fee(env: Env) -> u128;
+    fn record_keeper_execution(
+        env: Env,
+        caller: Address,
+        keeper: Address,
+        executed_price: u128,
+        expected_price: u128,
+    );
+    fn is_keeper_suspended(env: Env, keeper: Address) -> bool;
 }
 
 #[allow(dead_code)]
@@ -213,8 +304,20 @@ trait IOracle {
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "OrderVaultClient")]
 trait IOrderVault {
-    fn record_transfer_in(env: Env, token: Address) -> i128;
+    fn record_transfer_in(env: Env, caller: Address, token: Address) -> i128;
     fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128);
+}
+
+#[allow(dead_code)]
+#[soroban_sdk::contractclient(name = "MarketTokenClient")]
+trait IMarketToken {
+    fn withdraw_from_pool(
+        env: Env,
+        caller: Address,
+        pool_token: Address,
+        receiver: Address,
+        amount: i128,
+    );
 }
 
 #[allow(dead_code)]
@@ -223,7 +326,6 @@ trait IReferralStorage {
     fn get_trader_referrer(env: Env, trader: Address) -> Option<Address>;
     fn increment_referrer_volume(env: Env, caller: Address, referrer: Address, volume_usd: u128);
 }
-
 
 // ─── Position storage key (must match increase/decrease position utils) ───────
 
@@ -323,7 +425,35 @@ impl OrderHandler {
         if caller != admin {
             panic_with_error!(&env, Error::Unauthorized);
         }
-        env.storage().instance().set(&InstanceKey::Oracle, &new_oracle);
+        // Issue #643: reject a no-op call and the most likely copy-paste
+        // mistakes — pointing the oracle at this contract itself or at one
+        // of its own other stored instance addresses.
+        if new_oracle == env.current_contract_address() {
+            panic_with_error!(&env, Error::InvalidOracle);
+        }
+        for key in [
+            InstanceKey::Oracle,
+            InstanceKey::Admin,
+            InstanceKey::RoleStore,
+            InstanceKey::DataStore,
+            InstanceKey::OrderVault,
+            InstanceKey::ReferralStorage,
+        ] {
+            if let Some(other) = env.storage().instance().get::<_, Address>(&key) {
+                if other == new_oracle {
+                    panic_with_error!(&env, Error::InvalidOracle);
+                }
+            }
+        }
+        let old_oracle: Address = env.storage().instance().get(&InstanceKey::Oracle).unwrap();
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Oracle, &new_oracle);
+        // Issue #605: the oracle address every subsequent price validation
+        // relies on just changed — emit an event so off-chain monitoring has
+        // an audit trail for this admin action.
+        env.events()
+            .publish((symbol_short!("orcl_set"),), (old_oracle, new_oracle));
     }
 
     /// Admin-configurable heartbeat timeout for a keeper `role`, in ledgers
@@ -344,6 +474,9 @@ impl OrderHandler {
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         if caller != admin {
             panic_with_error!(&env, Error::Unauthorized);
+        }
+        if timeout_ledgers == 0 {
+            panic_with_error!(&env, Error::InvalidHeartbeatTimeout);
         }
         let data_store: Address = env
             .storage()
@@ -405,6 +538,17 @@ impl OrderHandler {
             .instance()
             .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let role_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::RoleStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+
+        // #794: keeper must actually hold role, so the emitted audit-trail
+        // event can only ever name a real, current holder of the stale role.
+        if !RoleStoreClient::new(&env, &role_store).has_role(&keeper, &role) {
+            panic_with_error!(&env, Error::KeeperDoesNotHoldRole);
+        }
 
         let status = Self::check_keeper_heartbeat(env.clone(), data_store.clone(), role.clone());
         if !status.is_stale {
@@ -441,7 +585,11 @@ impl OrderHandler {
     pub fn bump_position_ttl(env: Env, caller: Address, key: BytesN<32>) -> bool {
         caller.require_auth();
         let pos_key = PositionStorageKey::Position(key.clone());
-        match env.storage().persistent().get::<PositionStorageKey, PositionProps>(&pos_key) {
+        match env
+            .storage()
+            .persistent()
+            .get::<PositionStorageKey, PositionProps>(&pos_key)
+        {
             Some(p) => {
                 env.storage().persistent().set(&pos_key, &p);
                 true
@@ -456,6 +604,13 @@ impl OrderHandler {
     /// the caller must pre-fund the order_vault via SendTokens before calling this.
     /// `record_transfer_in` is called per increase/swap order to snapshot the delta.
     ///
+    /// At most one increase/swap leg per distinct `initial_collateral_token` is
+    /// supported per batch (issue #454): `record_transfer_in`'s balance delta is a
+    /// single running counter per token, so two legs sharing a token cannot be
+    /// unambiguously attributed. A batch violating this reverts up front with
+    /// `DuplicateCollateralTokenInBatch` instead of a confusing `ZeroCollateral`
+    /// panic partway through processing.
+    ///
     /// Returns the list of created order keys in the same order as `requests`.
     pub fn create_orders(
         env: Env,
@@ -464,7 +619,7 @@ impl OrderHandler {
     ) -> soroban_sdk::Vec<BytesN<32>> {
         caller.require_auth();
 
-        if requests.len() > 5 {
+        if requests.len() > MAX_ORDER_BATCH_SIZE {
             panic_with_error!(&env, Error::BatchSizeLimitExceeded);
         }
 
@@ -485,17 +640,90 @@ impl OrderHandler {
         let mut keys: soroban_sdk::Vec<BytesN<32>> = soroban_sdk::Vec::new(&env);
 
         let len = requests.len();
+
+        // Issue #454: at most one increase/swap leg per distinct collateral token is
+        // supported per batch — record_transfer_in's shared per-token balance delta
+        // cannot unambiguously attribute funds across two legs using the same token,
+        // and the second such leg would otherwise see a non-positive delta and panic
+        // with a confusing ZeroCollateral rather than a clear, dedicated error.
+        {
+            let mut seen_tokens: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+            let mut j = 0u32;
+            while j < len {
+                let p = requests.get_unchecked(j);
+                let is_incr_or_swap = matches!(
+                    p.order_type,
+                    OrderType::MarketIncrease
+                        | OrderType::LimitIncrease
+                        | OrderType::StopIncrease
+                        | OrderType::MarketSwap
+                        | OrderType::LimitSwap
+                );
+                if is_incr_or_swap {
+                    if seen_tokens.contains(&p.initial_collateral_token) {
+                        panic_with_error!(&env, Error::DuplicateCollateralTokenInBatch);
+                    }
+                    seen_tokens.push_back(p.initial_collateral_token.clone());
+                }
+                j += 1;
+            }
+        }
         // Issue #300: read max path length once for the entire batch.
         let raw_max = ds.get_u128(&gmx_keys::max_swap_path_length_key(&env)) as usize;
-        let max_swap_len = if raw_max == 0 { MAX_SWAP_PATH_LENGTH } else { raw_max };
+        let max_swap_len = if raw_max == 0 {
+            MAX_SWAP_PATH_LENGTH
+        } else {
+            raw_max
+        };
+        // Issue #294: read min execution fee once for the entire batch.
+        let min_fee = ds.get_min_execution_fee();
 
         let mut i = 0u32;
         while i < len {
             let params = requests.get_unchecked(i);
 
-            // Issue #300: enforce max path length at creation time.
-            if params.swap_path.len() as usize > max_swap_len {
-                panic_with_error!(&env, Error::SwapPathTooLong);
+            // Mirrors create_order's four per-request guards (issues #203, #232, #294, #269).
+            if ds.get_bool(&is_market_paused_key(&env, &params.market)) {
+                panic_with_error!(&env, Error::MarketPaused);
+            }
+
+            // Issue #232 + #300: cyclic check and max path length (per-request).
+            {
+                let path = &params.swap_path;
+                let path_len = path.len();
+                if path_len as usize > max_swap_len {
+                    panic_with_error!(&env, Error::SwapPathTooLong);
+                }
+                let mut a = 0u32;
+                while a < path_len {
+                    let mut b = a + 1;
+                    while b < path_len {
+                        if path.get(a).unwrap() == path.get(b).unwrap() {
+                            panic_with_error!(&env, Error::CyclicSwapPath);
+                        }
+                        b += 1;
+                    }
+                    a += 1;
+                }
+            }
+
+            // Issue #294: execution fee must cover the configured minimum (no negative fees).
+            if params.execution_fee < 0 || (params.execution_fee as u128) < min_fee {
+                panic_with_error!(&env, Error::InsufficientExecutionFee);
+            }
+
+            // Issue #269: position orders must carry a non-zero size.
+            let is_position_order = matches!(
+                params.order_type,
+                OrderType::MarketIncrease
+                    | OrderType::LimitIncrease
+                    | OrderType::StopIncrease
+                    | OrderType::MarketDecrease
+                    | OrderType::LimitDecrease
+                    | OrderType::StopLossDecrease
+            );
+            if is_position_order && params.size_delta_usd == 0 {
+                panic_with_error!(&env, Error::ZeroSizeDelta);
             }
 
             let is_increase_or_swap = matches!(
@@ -508,21 +736,46 @@ impl OrderHandler {
             );
 
             let collateral_delta_amount = if is_increase_or_swap {
-                let received = vault_client.record_transfer_in(&params.initial_collateral_token);
+                let received =
+                    vault_client.record_transfer_in(&handler, &params.initial_collateral_token);
                 if received <= 0 {
                     panic_with_error!(&env, Error::ZeroCollateral);
                 }
-                received
+                // Issue #630/#631: see create_order's identical fix — received
+                // includes execution_fee from the same combined deposit.
+                let net = received - params.execution_fee;
+                if net <= 0 {
+                    panic_with_error!(&env, Error::ZeroCollateral);
+                }
+                net
             } else {
                 params.collateral_delta_amount
+            };
+
+            // Issue #620/#385/#535: apply the same position-manager
+            // owner/receiver resolution create_order applies, so the two
+            // order-creation entrypoints agree on who owns an order created
+            // on someone else's behalf.
+            let (actual_owner, actual_receiver) = if is_position_order {
+                match &params.on_behalf_of {
+                    Some(owner) => {
+                        if ds.get_position_manager(owner, &params.market) != Some(caller.clone()) {
+                            panic_with_error!(&env, Error::UnauthorizedPositionManager);
+                        }
+                        (owner.clone(), owner.clone())
+                    }
+                    None => (caller.clone(), params.receiver.clone()),
+                }
+            } else {
+                (caller.clone(), params.receiver.clone())
             };
 
             let nonce = ds.increment_nonce(&handler);
             let key = order_key(&env, nonce);
 
             let order = OrderProps {
-                account: caller.clone(),
-                receiver: params.receiver.clone(),
+                account: actual_owner.clone(),
+                receiver: actual_receiver,
                 market: params.market.clone(),
                 initial_collateral_token: params.initial_collateral_token.clone(),
                 swap_path: params.swap_path.clone(),
@@ -532,7 +785,7 @@ impl OrderHandler {
                 acceptable_price: params.acceptable_price,
                 execution_fee: params.execution_fee,
                 min_output_amount: params.min_output_amount,
-                order_type: params.order_type.clone(),
+                order_type: params.order_type,
                 is_long: params.is_long,
                 updated_at_time: env.ledger().timestamp(),
             };
@@ -541,11 +794,20 @@ impl OrderHandler {
                 .persistent()
                 .set(&OrderStorageKey::Order(key.clone()), &order);
             ds.add_bytes32_to_set(&handler, &order_list_key(&env), &key);
-            ds.add_bytes32_to_set(&handler, &account_order_list_key(&env, &caller), &key);
+            ds.add_bytes32_to_set(&handler, &account_order_list_key(&env, &actual_owner), &key);
 
+            // Issue #442: include size/collateral/order_type so pending orders can
+            // be displayed from the creation event without an extra RPC round-trip.
             env.events().publish(
                 (symbol_short!("ord_crt"),),
-                (key.clone(), caller.clone(), params.market.clone()),
+                (
+                    key.clone(),
+                    actual_owner,
+                    params.market.clone(),
+                    params.size_delta_usd,
+                    collateral_delta_amount,
+                    params.order_type,
+                ),
             );
             keys.push_back(key);
 
@@ -613,7 +875,11 @@ impl OrderHandler {
 
             // Issue #300: enforce max path length at creation time.
             let raw_max = ds.get_u128(&gmx_keys::max_swap_path_length_key(&env)) as usize;
-            let max_len = if raw_max == 0 { MAX_SWAP_PATH_LENGTH } else { raw_max };
+            let max_len = if raw_max == 0 {
+                MAX_SWAP_PATH_LENGTH
+            } else {
+                raw_max
+            };
             if path_len as usize > max_len {
                 panic_with_error!(&env, Error::SwapPathTooLong);
             }
@@ -651,12 +917,16 @@ impl OrderHandler {
                 | OrderType::MarketSwap
                 | OrderType::LimitSwap
         );
-        
+
         // Determine if this is a position order (increase/decrease)
         let is_position_order = matches!(
             params.order_type,
-            OrderType::MarketIncrease | OrderType::LimitIncrease | OrderType::StopIncrease |
-            OrderType::MarketDecrease | OrderType::LimitDecrease | OrderType::StopLossDecrease
+            OrderType::MarketIncrease
+                | OrderType::LimitIncrease
+                | OrderType::StopIncrease
+                | OrderType::MarketDecrease
+                | OrderType::LimitDecrease
+                | OrderType::StopLossDecrease
         );
 
         // Issue #269: position orders must carry a non-zero size.
@@ -664,21 +934,23 @@ impl OrderHandler {
             panic_with_error!(&env, Error::ZeroSizeDelta);
         }
 
-        // Position manager authorization: 
-        // For position orders, verify caller is either the owner OR an authorized manager for this market.
-        // If caller is a manager, receiver must be the owner (cannot redirect funds).
+        // Position manager authorization (issue #385/#535):
+        // For position orders, the caller either acts for themselves
+        // (params.on_behalf_of == None) or names the owner they're acting
+        // for; in the latter case the named owner must have registered the
+        // caller as their manager via get_position_manager(owner, market).
+        // A caller with their own registered manager is never redirected by
+        // that fact alone — only an explicit on_behalf_of triggers delegation.
         let (actual_owner, actual_receiver) = if is_position_order {
-            // Check if caller is an authorized manager for this market
-            match ds.get_position_manager(&caller, &params.market) {
+            match &params.on_behalf_of {
                 Some(owner) => {
-                    // Caller is a manager; position owner is stored in data_store
-                    // Receiver must be the owner (cannot redirect)
-                    (owner.clone(), owner)
+                    if ds.get_position_manager(owner, &params.market) != Some(caller.clone()) {
+                        panic_with_error!(&env, Error::UnauthorizedPositionManager);
+                    }
+                    // Receiver must be the owner (cannot redirect funds).
+                    (owner.clone(), owner.clone())
                 }
-                None => {
-                    // Caller is not a manager; must be the owner
-                    (caller.clone(), params.receiver)
-                }
+                None => (caller.clone(), params.receiver),
             }
         } else {
             // For swap orders, no position manager check needed
@@ -689,11 +961,23 @@ impl OrderHandler {
         // Reverts with ZeroCollateral if caller skipped the SendTokens pre-step.
         let collateral_delta_amount = if is_increase_or_swap {
             let received = OrderVaultClient::new(&env, &order_vault)
-                .record_transfer_in(&params.initial_collateral_token);
+                .record_transfer_in(&handler, &params.initial_collateral_token);
             if received <= 0 {
                 panic_with_error!(&env, Error::ZeroCollateral);
             }
-            received
+            // Issue #630/#631: `received` is the entire router-pushed deposit for
+            // this order (one record_transfer_in snapshot covers both collateral
+            // and execution_fee pushed together). Subtract the fee out here so
+            // collateral_delta_amount and execution_fee are mutually exclusive
+            // portions of that single deposit — otherwise cancel_order's separate
+            // collateral + fee refund double-refunds the fee, and execute_order
+            // would fold the fee into position collateral / swap input instead
+            // of paying it to the keeper.
+            let net = received - params.execution_fee;
+            if net <= 0 {
+                panic_with_error!(&env, Error::ZeroCollateral);
+            }
+            net
         } else {
             // Decrease/liquidation orders: no collateral deposit required.
             params.collateral_delta_amount
@@ -704,9 +988,9 @@ impl OrderHandler {
         let key = order_key(&env, nonce);
 
         let order = OrderProps {
-            account:                  actual_owner.clone(),
-            receiver:                 actual_receiver,
-            market:                   params.market.clone(),
+            account: actual_owner.clone(),
+            receiver: actual_receiver,
+            market: params.market.clone(),
             initial_collateral_token: params.initial_collateral_token,
             swap_path: params.swap_path,
             size_delta_usd: params.size_delta_usd,
@@ -720,15 +1004,14 @@ impl OrderHandler {
             updated_at_time: env.ledger().timestamp(),
         };
 
-        env.storage().persistent().set(&OrderStorageKey::Order(key.clone()), &order);
+        env.storage()
+            .persistent()
+            .set(&OrderStorageKey::Order(key.clone()), &order);
         env.storage().persistent().extend_ttl(
             &OrderStorageKey::Order(key.clone()),
             MIN_BUMP_THRESHOLD,
             PERSISTENT_BUMP_TARGET,
         );
-        env.storage()
-            .persistent()
-            .set(&OrderStorageKey::Order(key.clone()), &order);
 
         ds.add_bytes32_to_set(&handler, &order_list_key(&env), &key);
         ds.add_bytes32_to_set(&handler, &account_order_list_key(&env, &actual_owner), &key);
@@ -745,7 +1028,19 @@ impl OrderHandler {
             );
         }
 
-        env.events().publish((symbol_short!("ord_crt"),), (key.clone(), actual_owner, params.market));
+        // Issue #442: include size/collateral/order_type so pending orders can
+        // be displayed from the creation event without an extra RPC round-trip.
+        env.events().publish(
+            (symbol_short!("ord_crt"),),
+            (
+                key.clone(),
+                actual_owner,
+                order.market.clone(),
+                order.size_delta_usd,
+                order.collateral_delta_amount,
+                order.order_type,
+            ),
+        );
         key
     }
 
@@ -816,19 +1111,18 @@ impl OrderHandler {
                     .remove(&OrderStorageKey::OrderExpiry(key.clone()));
                 let handler2 = env.current_contract_address();
                 let ds2 = DataStoreClient::new(&env, &data_store);
-                ds2.remove_bytes32_from_set(
-                    &handler2,
-                    &order_list_key(&env),
-                    &key,
-                );
+                ds2.remove_bytes32_from_set(&handler2, &order_list_key(&env), &key);
                 ds2.remove_bytes32_from_set(
                     &handler2,
                     &account_order_list_key(&env, &order.account),
                     &key,
                 );
+                // Match the 4-field payload published by cleanup_expired_order so
+                // subscribers to this topic can rely on one stable schema; there is
+                // no permissionless caller or incentive on this auto-cancel path.
                 env.events().publish(
                     (symbol_short!("ord_exp"),),
-                    (key.clone(), order.account.clone()),
+                    (key.clone(), order.account.clone(), keeper.clone(), 0i128),
                 );
                 panic_with_error!(&env, Error::OrderExpired);
             }
@@ -847,6 +1141,12 @@ impl OrderHandler {
         let ds = DataStoreClient::new(&env, &data_store);
         if ds.get_bool(&is_market_paused_key(&env, &order.market)) {
             panic_with_error!(&env, Error::MarketPaused);
+        }
+
+        // Issue #587: a keeper whose accumulated slash penalty has reached the
+        // configured threshold may no longer execute orders.
+        if ds.is_keeper_suspended(&keeper) {
+            panic_with_error!(&env, Error::KeeperSuspended);
         }
 
         // Load market props
@@ -898,6 +1198,20 @@ impl OrderHandler {
             _ => {}
         }
 
+        // Issue #587: record execution quality for trigger orders so the #514
+        // reputation/slashing mechanism is fed by real keeper executions.
+        // The variance between the trigger the user set and the oracle price
+        // the keeper executed at measures how late the keeper was; >5% slashes.
+        let executed_price = index_price.mid_price();
+        if order.trigger_price > 0 && executed_price > 0 {
+            ds.record_keeper_execution(
+                &handler,
+                &keeper,
+                &(executed_price as u128),
+                &(order.trigger_price as u128),
+            );
+        }
+
         // Dispatch by order type
         match order.order_type {
             OrderType::MarketSwap | OrderType::LimitSwap => {
@@ -912,7 +1226,7 @@ impl OrderHandler {
                     &first_market,
                     &order.collateral_delta_amount,
                 );
-                let (_token_out, amount_out) = swap_with_path(
+                let (token_out, amount_out) = swap_with_path(
                     &env,
                     &data_store,
                     &handler,
@@ -925,6 +1239,20 @@ impl OrderHandler {
                 if amount_out < order.min_output_amount {
                     panic_with_error!(&env, Error::PriceTooLow);
                 }
+                // Issue #440: dedicated swap-execution event carrying the actual
+                // output token/amount, instead of discarding them and falling
+                // back to the generic key+account-only execution event below.
+                env.events().publish(
+                    (symbol_short!("ord_swp"),),
+                    (
+                        key.clone(),
+                        order.account.clone(),
+                        order.initial_collateral_token.clone(),
+                        token_out,
+                        order.collateral_delta_amount,
+                        amount_out,
+                    ),
+                );
             }
 
             OrderType::MarketIncrease | OrderType::LimitIncrease | OrderType::StopIncrease => {
@@ -936,20 +1264,41 @@ impl OrderHandler {
                     &order.collateral_delta_amount,
                 );
 
-                // Issue #204: apply fee tier based on 30-day rolling volume
-                let effective_fee_factor =
-                    resolve_fee_tier(&env, &data_store, &handler, &order.account, &market.market_token, order.size_delta_usd);
+                // Issue #204: apply fee tier based on 30-day rolling volume.
+                // Only override the market's base fee when a tier actually
+                // applies — overriding with 0 when none qualifies zeroed the
+                // opening fee for every trader on markets without tiers.
+                let tier_fee_factor = resolve_fee_tier(
+                    &env,
+                    &data_store,
+                    &handler,
+                    &order.account,
+                    &market.market_token,
+                    order.size_delta_usd,
+                );
                 let fee_key_pos = position_fee_factor_key(&env, &market.market_token, true);
                 let fee_key_neg = position_fee_factor_key(&env, &market.market_token, false);
                 let ds_client = DataStoreClient::new(&env, &data_store);
-                let original_fee_pos = ds_client.get_u128(&fee_key_pos);
-                let original_fee_neg = ds_client.get_u128(&fee_key_neg);
-                ds_client.set_u128(&handler, &fee_key_pos, &effective_fee_factor);
-                ds_client.set_u128(&handler, &fee_key_neg, &effective_fee_factor);
+                let original_fees = tier_fee_factor.map(|effective_fee_factor| {
+                    let original_fee_pos = ds_client.get_u128(&fee_key_pos);
+                    let original_fee_neg = ds_client.get_u128(&fee_key_neg);
+                    ds_client.set_u128(&handler, &fee_key_pos, &effective_fee_factor);
+                    ds_client.set_u128(&handler, &fee_key_neg, &effective_fee_factor);
+                    (original_fee_pos, original_fee_neg)
+                });
 
                 // Issue #205: snapshot pre-increase state for event
-                let pos_key = position_key(&env, &order.account, &market.market_token, &order.initial_collateral_token, order.is_long);
-                let pre_position: Option<PositionProps> = env.storage().persistent().get(&PositionStorageKey::Position(pos_key.clone()));
+                let pos_key = position_key(
+                    &env,
+                    &order.account,
+                    &market.market_token,
+                    &order.initial_collateral_token,
+                    order.is_long,
+                );
+                let pre_position: Option<PositionProps> = env
+                    .storage()
+                    .persistent()
+                    .get(&PositionStorageKey::Position(pos_key.clone()));
                 let is_new_position = pre_position.is_none();
 
                 let updated = increase_position(
@@ -973,22 +1322,81 @@ impl OrderHandler {
                 );
 
                 // Restore original fee factors
-                ds_client.set_u128(&handler, &fee_key_pos, &original_fee_pos);
-                ds_client.set_u128(&handler, &fee_key_neg, &original_fee_neg);
+                if let Some((original_fee_pos, original_fee_neg)) = original_fees {
+                    ds_client.set_u128(&handler, &fee_key_pos, &original_fee_pos);
+                    ds_client.set_u128(&handler, &fee_key_neg, &original_fee_neg);
+                }
 
-                // Issue #206: enforce max leverage
+                // Issue #206: enforce max leverage. max_leverage_key is stored
+                // FLOAT_PRECISION-scaled (issue #625) — every configuration
+                // site in the repo (exchange_router, liquidation_handler,
+                // benches, and every integration test suite) sets it to
+                // `N * FLOAT_PRECISION` for an intended Nx cap, matching
+                // position_utils::validate_position's own comparison, which
+                // also values collateral in USD (not raw token units) before
+                // dividing.
                 let max_lev_key = max_leverage_key(&env, &market.market_token);
-                let max_leverage_bps = ds_client.get_u128(&max_lev_key);
-                if max_leverage_bps > 0 && updated.collateral_amount > 0 {
-                    let effective_bps = (updated.size_in_usd * 100 / updated.collateral_amount) as u128;
-                    if effective_bps > max_leverage_bps {
-                        panic_with_error!(&env, Error::MaxLeverageExceeded);
+                let max_leverage = ds_client.get_u128(&max_lev_key) as i128;
+                if max_leverage > 0 && updated.collateral_amount > 0 {
+                    let collateral_usd = mul_div_wide(
+                        &env,
+                        updated.collateral_amount,
+                        collateral_price,
+                        gmx_math::TOKEN_PRECISION,
+                    );
+                    if collateral_usd > 0 {
+                        let effective_leverage = mul_div_wide(
+                            &env,
+                            updated.size_in_usd,
+                            gmx_math::FLOAT_PRECISION,
+                            collateral_usd,
+                        );
+                        if effective_leverage > max_leverage {
+                            panic_with_error!(&env, Error::MaxLeverageExceeded);
+                        }
                     }
                 }
 
+                // Issue #450: enforce the market/side open-interest cap. increase_position
+                // itself only applies the OI delta — it never validates against the
+                // configured cap — so the real mutating entry point must check it here,
+                // after the delta has been applied, using the same aggregation
+                // (open_interest_for_side sums both collateral-token buckets) the cap
+                // is defined against.
+                if gmx_market_utils::validate_open_interest(
+                    &env,
+                    &data_store,
+                    &market,
+                    order.is_long,
+                )
+                .is_err()
+                {
+                    panic_with_error!(&env, Error::MaxOpenInterestExceeded);
+                }
+
+                // Issue: min_collateral_factor was previously only ever evaluated on
+                // the decrease path (decrease_position_utils::validate_position), so a
+                // brand-new or increased position could sit below the configured
+                // collateral floor until its next decrease. Validate the resulting
+                // position here — the same place the OI cap is enforced — mirroring
+                // how decrease_position_utils validates before persisting.
+                validate_position(
+                    &env,
+                    &data_store,
+                    &updated,
+                    &market,
+                    collateral_price,
+                    &index_price,
+                );
+
                 // Issue #205: emit position event
                 let avg_price = if updated.size_in_tokens > 0 {
-                    mul_div_wide(&env, updated.size_in_usd, 1, updated.size_in_tokens)
+                    mul_div_wide(
+                        &env,
+                        updated.size_in_usd,
+                        gmx_math::TOKEN_PRECISION,
+                        updated.size_in_tokens,
+                    )
                 } else {
                     0
                 };
@@ -1025,7 +1433,26 @@ impl OrderHandler {
             | OrderType::LimitDecrease
             | OrderType::StopLossDecrease
             | OrderType::Liquidation => {
-                let pos_key = position_key(&env, &order.account, &market.market_token, &order.initial_collateral_token, order.is_long);
+                let pos_key = position_key(
+                    &env,
+                    &order.account,
+                    &market.market_token,
+                    &order.initial_collateral_token,
+                    order.is_long,
+                );
+                // Issue #601: decrease_position's own storage lookup panics with
+                // a raw string on a missing position. Check existence here so a
+                // decrease-type order for a position that never existed (or was
+                // already fully closed) reverts with a typed, matchable error
+                // instead, mirroring liquidate_position/execute_adl's own
+                // PositionNotFound checks above.
+                if !env
+                    .storage()
+                    .persistent()
+                    .has(&PositionStorageKey::Position(pos_key.clone()))
+                {
+                    panic_with_error!(&env, Error::PositionNotFound);
+                }
                 let result = decrease_position(
                     &env,
                     &DecreasePositionParams {
@@ -1043,6 +1470,7 @@ impl OrderHandler {
                         current_time: env.ledger().timestamp(),
                         swap_path: order.swap_path.clone(),
                         oracle: &oracle,
+                        retain_collateral: false,
                     },
                 );
 
@@ -1074,6 +1502,22 @@ impl OrderHandler {
             }
         }
 
+        // Issue #631: pay the keeper's execution_fee now that dispatch succeeded.
+        // Previously nothing referenced order.execution_fee here — it was either
+        // silently folded into position collateral / swap input (via the
+        // now-fixed collateral_delta_amount, see create_order/create_orders) or,
+        // for decrease/liquidation orders, never paid out at all. order_vault
+        // holds the fee regardless of order type, same as cancel_order and
+        // cleanup_expired_order's existing execution_fee handling.
+        if order.execution_fee > 0 {
+            OrderVaultClient::new(&env, &order_vault).transfer_out(
+                &handler,
+                &order.initial_collateral_token,
+                &keeper,
+                &order.execution_fee,
+            );
+        }
+
         // Issue #286: emit funding rate snapshot after position order execution.
         // Swap orders do not update funding state, so they are excluded.
         let is_position_order = matches!(
@@ -1087,13 +1531,32 @@ impl OrderHandler {
                 | OrderType::Liquidation
         );
         if is_position_order {
-            let funding_factor = ds.get_i128(
-                &saved_funding_factor_per_second_key(&env, &market.market_token)
-            );
-            let oi_long = ds.get_u128(&open_interest_key(&env, &market.market_token, &market.long_token, true))
-                + ds.get_u128(&open_interest_key(&env, &market.market_token, &market.short_token, true));
-            let oi_short = ds.get_u128(&open_interest_key(&env, &market.market_token, &market.long_token, false))
-                + ds.get_u128(&open_interest_key(&env, &market.market_token, &market.short_token, false));
+            let funding_factor = ds.get_i128(&saved_funding_factor_per_second_key(
+                &env,
+                &market.market_token,
+            ));
+            let oi_long = ds.get_u128(&open_interest_key(
+                &env,
+                &market.market_token,
+                &market.long_token,
+                true,
+            )) + ds.get_u128(&open_interest_key(
+                &env,
+                &market.market_token,
+                &market.short_token,
+                true,
+            ));
+            let oi_short = ds.get_u128(&open_interest_key(
+                &env,
+                &market.market_token,
+                &market.long_token,
+                false,
+            )) + ds.get_u128(&open_interest_key(
+                &env,
+                &market.market_token,
+                &market.short_token,
+                false,
+            ));
             env.events().publish(
                 (symbol_short!("fund_snap"),),
                 FundingRateSnapshot {
@@ -1306,23 +1769,34 @@ impl OrderHandler {
         order.min_output_amount = min_output_amount;
         order.updated_at_time = env.ledger().timestamp();
 
-        env.storage().persistent().set(&OrderStorageKey::Order(key.clone()), &order);
+        env.storage()
+            .persistent()
+            .set(&OrderStorageKey::Order(key.clone()), &order);
         env.storage().persistent().extend_ttl(
             &OrderStorageKey::Order(key.clone()),
             MIN_BUMP_THRESHOLD,
             PERSISTENT_BUMP_TARGET,
         );
-        env.storage()
-            .persistent()
-            .set(&OrderStorageKey::Order(key.clone()), &order);
 
         // Clear frozen flag if set (order is being updated = re-enabled)
         env.storage()
             .persistent()
             .remove(&OrderStorageKey::OrderFrozen(key.clone()));
 
-        env.events()
-            .publish((symbol_short!("ord_upd"),), (key, caller));
+        // Issue #441: include the account and the new field values so an
+        // indexer/UI can see what changed without re-fetching the order.
+        env.events().publish(
+            (symbol_short!("ord_upd"),),
+            (
+                key,
+                caller,
+                order.account,
+                size_delta_usd,
+                acceptable_price,
+                trigger_price,
+                min_output_amount,
+            ),
+        );
     }
 
     /// Freeze an order that cannot currently be executed.
@@ -1330,23 +1804,24 @@ impl OrderHandler {
         keeper.require_auth();
         require_order_keeper(&env, &keeper);
 
-        let _order: OrderProps = env
+        let order: OrderProps = env
             .storage()
             .persistent()
             .get(&OrderStorageKey::Order(key.clone()))
             .unwrap_or_else(|| panic_with_error!(&env, Error::OrderNotFound));
 
-        env.storage().persistent().set(&OrderStorageKey::OrderFrozen(key.clone()), &true);
+        env.storage()
+            .persistent()
+            .set(&OrderStorageKey::OrderFrozen(key.clone()), &true);
         env.storage().persistent().extend_ttl(
             &OrderStorageKey::OrderFrozen(key.clone()),
             MIN_BUMP_THRESHOLD,
             PERSISTENT_BUMP_TARGET,
         );
-        env.storage()
-            .persistent()
-            .set(&OrderStorageKey::OrderFrozen(key.clone()), &true);
 
-        env.events().publish((symbol_short!("ord_frz"),), key);
+        // Issue #441: include the affected account and the freezing keeper.
+        env.events()
+            .publish((symbol_short!("ord_frz"),), (key, order.account, keeper));
     }
 
     /// Return a stored order by key, or None if not found.
@@ -1365,6 +1840,10 @@ impl OrderHandler {
     /// Force-liquidate a position. Called by the liquidation_handler after role/health checks.
     ///
     /// Positions live in order_handler storage, so liquidation must run here.
+    ///
+    /// Returns a `LiquidatePositionResult` so liquidation_handler can include the
+    /// price, fee, and PnL in its own confirmation event (issue #437) without
+    /// re-deriving them or correlating a separate transfer event.
     pub fn liquidate_position(
         env: Env,
         keeper: Address, // must have LIQUIDATION_KEEPER role
@@ -1372,7 +1851,7 @@ impl OrderHandler {
         market: Address,
         collateral_token: Address,
         is_long: bool,
-    ) {
+    ) -> LiquidatePositionResult {
         keeper.require_auth();
         require_liquidation_keeper(&env, &keeper);
 
@@ -1385,8 +1864,6 @@ impl OrderHandler {
             .storage()
             .instance()
             .get(&InstanceKey::Oracle)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        let order_vault: Address = env.storage().instance().get(&InstanceKey::OrderVault)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
 
@@ -1404,7 +1881,7 @@ impl OrderHandler {
             .storage()
             .persistent()
             .get(&PositionStorageKey::Position(pk.clone()))
-            .unwrap_or_else(|| panic_with_error!(&env, Error::OrderNotFound));
+            .unwrap_or_else(|| panic_with_error!(&env, Error::PositionNotFound));
 
         // Validate liquidatability
         if !gmx_position_utils::is_liquidatable(
@@ -1423,20 +1900,51 @@ impl OrderHandler {
         let keeper_fee_key = liquidation_execution_fee_key(&env, &market);
         let keeper_execution_fee = ds.get_u128(&keeper_fee_key);
 
+        let mut fee_to_transfer: i128 = 0;
         if keeper_execution_fee > 0 {
             let keeper_fee_i128 = keeper_execution_fee as i128;
-            let fee_to_transfer = if keeper_fee_i128 <= position.collateral_amount {
+            fee_to_transfer = if keeper_fee_i128 <= position.collateral_amount {
                 keeper_fee_i128
             } else {
                 position.collateral_amount
             };
 
             if fee_to_transfer > 0 {
-                OrderVaultClient::new(&env, &order_vault).transfer_out(
+                // Issue #411: by liquidation time the position's collateral lives in the
+                // market pool, not order_vault (which only holds collateral in flight
+                // during order creation/execution) — pay the keeper via the same
+                // custodian withdrawal path decrease_position uses for its output.
+                MarketTokenClient::new(&env, &market_props.market_token).withdraw_from_pool(
                     &handler,
                     &collateral_token,
                     &keeper,
                     &fee_to_transfer,
+                );
+                // Issue #629: withdraw_from_pool only moves real tokens — it has no
+                // knowledge of data_store's pool_amount ledger. Every other real
+                // withdrawal out of the pool in this codebase pairs the transfer
+                // with a matching apply_delta_to_pool_amount; this one didn't,
+                // permanently drifting pool_amount above the pool's real balance.
+                gmx_market_utils::apply_delta_to_pool_amount(
+                    &env,
+                    &data_store,
+                    &handler,
+                    &market_props,
+                    &collateral_token,
+                    -fee_to_transfer,
+                );
+
+                // Reflect the fee already paid out of pool custody in the
+                // position's own stored collateral before decrease_position
+                // re-reads it fresh from storage — otherwise decrease_position
+                // computes the account's payout off the pre-fee collateral,
+                // double-paying this same fee out of the pool a second time.
+                let mut position_after_fee = position.clone();
+                position_after_fee.collateral_amount =
+                    position.collateral_amount.saturating_sub(fee_to_transfer);
+                env.storage().persistent().set(
+                    &PositionStorageKey::Position(pk.clone()),
+                    &position_after_fee,
                 );
             }
         }
@@ -1459,10 +1967,13 @@ impl OrderHandler {
                 current_time: env.ledger().timestamp(),
                 swap_path: soroban_sdk::Vec::new(&env),
                 oracle: &oracle,
+                retain_collateral: false,
             },
         );
 
-        // Issue #205: structured liquidation event
+        // Issue #205 / #437: structured liquidation event, including the keeper's
+        // execution fee and the realised PnL so indexers don't need to replay
+        // storage state or correlate a separate transfer event.
         env.events().publish(
             (symbol_short!("pos_liq"),),
             PositionLiquidatedEvent {
@@ -1471,11 +1982,185 @@ impl OrderHandler {
                 market: market.clone(),
                 execution_price: result.execution_price,
                 remaining_collateral: result.remaining_collateral,
+                keeper_execution_fee: fee_to_transfer,
+                pnl_usd: result.pnl_usd,
             },
         );
+
+        LiquidatePositionResult {
+            execution_price: result.execution_price,
+            keeper_execution_fee: fee_to_transfer,
+            pnl_usd: result.pnl_usd,
+        }
+    }
+
+    /// Partially close a liquidatable position (issue #533). Called by
+    /// liquidation_handler after role/health checks, mirroring `liquidate_position`
+    /// and `execute_adl`'s delegation pattern: positions live in order_handler
+    /// storage, so the actual size reduction — and the keeper execution fee, paid
+    /// the same way `liquidate_position` pays it — must happen here, not in the
+    /// wrapper. Unlike a full liquidation, the position is left open at its
+    /// reduced size rather than removed.
+    pub fn partial_liquidate_position(
+        env: Env,
+        keeper: Address, // must have LIQUIDATION_KEEPER role
+        account: Address,
+        market: Address,
+        collateral_token: Address,
+        is_long: bool,
+        liquidation_factor_bps: u128,
+    ) -> PartialLiquidatePositionResult {
+        keeper.require_auth();
+        require_liquidation_keeper(&env, &keeper);
+
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let oracle: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Oracle)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let handler = env.current_contract_address();
+
+        let market_props = load_market_props(&env, &data_store, &market);
+        let oracle_client = OracleClient::new(&env, &oracle);
+        let index_price = oracle_client.get_primary_price(&market_props.index_token);
+        let collateral_price = oracle_client
+            .get_primary_price(&collateral_token)
+            .mid_price();
+
+        let pk = position_key(&env, &account, &market, &collateral_token, is_long);
+        let position: PositionProps = env
+            .storage()
+            .persistent()
+            .get(&PositionStorageKey::Position(pk.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, Error::PositionNotFound));
+
+        // Re-validate liquidatability — a caller that bypasses liquidation_handler
+        // and calls this entry point directly must not be able to partially close
+        // a healthy position.
+        if !gmx_position_utils::is_liquidatable(
+            &env,
+            &data_store,
+            &position,
+            &market_props,
+            collateral_price,
+            &index_price,
+        ) {
+            panic_with_error!(&env, Error::NotLiquidatable);
+        }
+
+        let factor = (liquidation_factor_bps.min(10_000)) as i128;
+        // size_in_usd is FLOAT_PRECISION-scaled (10^30) — a naive `size * factor`
+        // overflows i128 well before the division by 10_000 brings it back down,
+        // so this must go through the same wide-multiply helper every other
+        // FLOAT_PRECISION-scaled computation in this codebase uses.
+        let liquidated_size_usd = mul_div_wide(&env, position.size_in_usd, factor, 10_000);
+        let remaining_size_usd = position.size_in_usd.saturating_sub(liquidated_size_usd);
+
+        // Handle keeper execution fee (mirrors liquidate_position's #208 handling):
+        // deduct from position collateral first, capped at what the position holds.
+        let ds = DataStoreClient::new(&env, &data_store);
+        let keeper_fee_key = liquidation_execution_fee_key(&env, &market);
+        let keeper_execution_fee = ds.get_u128(&keeper_fee_key);
+
+        let mut fee_to_transfer: i128 = 0;
+        if keeper_execution_fee > 0 {
+            let keeper_fee_i128 = keeper_execution_fee as i128;
+            fee_to_transfer = if keeper_fee_i128 <= position.collateral_amount {
+                keeper_fee_i128
+            } else {
+                position.collateral_amount
+            };
+
+            if fee_to_transfer > 0 {
+                MarketTokenClient::new(&env, &market_props.market_token).withdraw_from_pool(
+                    &handler,
+                    &collateral_token,
+                    &keeper,
+                    &fee_to_transfer,
+                );
+                gmx_market_utils::apply_delta_to_pool_amount(
+                    &env,
+                    &data_store,
+                    &handler,
+                    &market_props,
+                    &collateral_token,
+                    -fee_to_transfer,
+                );
+
+                // Reflect the fee already paid out of pool custody in the
+                // position's own stored collateral before decrease_position
+                // re-reads it fresh from storage. Without this, retain_collateral
+                // (below) would keep the *pre-fee* collateral figure with the
+                // position forever — silently overstating what actually backs
+                // it and letting the same fee be harvested again on a later
+                // partial liquidation of the same position — and a 100%-factor
+                // close would double-pay the fee out of the pool exactly as a
+                // full `liquidate_position` close would without this fix.
+                let mut position_after_fee = position.clone();
+                position_after_fee.collateral_amount =
+                    position.collateral_amount.saturating_sub(fee_to_transfer);
+                env.storage().persistent().set(
+                    &PositionStorageKey::Position(pk.clone()),
+                    &position_after_fee,
+                );
+            }
+        }
+
+        let result = decrease_position(
+            &env,
+            &DecreasePositionParams {
+                data_store: &data_store,
+                caller: &handler,
+                account: &account,
+                receiver: &account,
+                market: &market_props,
+                collateral_token: &collateral_token,
+                size_delta_usd: liquidated_size_usd,
+                acceptable_price: 0,
+                is_long,
+                index_token_price: &index_price,
+                collateral_price,
+                current_time: env.ledger().timestamp(),
+                swap_path: soroban_sdk::Vec::new(&env),
+                oracle: &oracle,
+                retain_collateral: true,
+            },
+        );
+
+        env.events().publish(
+            (symbol_short!("prt_liq"),),
+            (
+                pk,
+                account,
+                liquidated_size_usd,
+                remaining_size_usd,
+                result.execution_price,
+                fee_to_transfer,
+                result.pnl_usd,
+            ),
+        );
+
+        PartialLiquidatePositionResult {
+            execution_price: result.execution_price,
+            keeper_execution_fee: fee_to_transfer,
+            pnl_usd: result.pnl_usd,
+            liquidated_size_usd,
+            remaining_size_usd,
+        }
     }
 
     /// Partially close a profitable position for ADL. Called by adl_handler after checks.
+    ///
+    /// Issue #417: adl_handler performs these same checks before calling here, but
+    /// this contract grants the ADL_KEEPER role check directly and is independently
+    /// callable — so the real mutating entry point must re-validate its own
+    /// preconditions rather than trust the wrapper, exactly as `liquidate_position`
+    /// re-checks `is_liquidatable` instead of trusting `liquidation_handler`.
     pub fn execute_adl(
         env: Env,
         keeper: Address, // must have ADL_KEEPER role
@@ -1507,6 +2192,36 @@ impl OrderHandler {
             .get_primary_price(&collateral_token)
             .mid_price();
 
+        // Issue #417: ADL is only required when the pool's PnL ratio for this
+        // market/side exceeds the configured threshold.
+        let long_price = oracle_client.get_primary_price(&market_props.long_token);
+        let short_price = oracle_client.get_primary_price(&market_props.short_token);
+        if !gmx_market_utils::is_adl_required(
+            &env,
+            &data_store,
+            &market_props,
+            &long_price,
+            &short_price,
+            &index_price,
+            is_long,
+        ) {
+            panic_with_error!(&env, Error::AdlRequirementNotMet);
+        }
+
+        // Issue #417: ADL may only partially close a position that is currently
+        // profitable.
+        let adl_pos_key = position_key(&env, &account, &market, &collateral_token, is_long);
+        let position: PositionProps = env
+            .storage()
+            .persistent()
+            .get(&PositionStorageKey::Position(adl_pos_key))
+            .unwrap_or_else(|| panic_with_error!(&env, Error::PositionNotFound));
+        let (adl_pnl_usd, _) =
+            gmx_position_utils::get_position_pnl_usd(&env, &position, &index_price, size_delta_usd);
+        if adl_pnl_usd <= 0 {
+            panic_with_error!(&env, Error::AdlPositionNotProfitable);
+        }
+
         let result = decrease_position(
             &env,
             &DecreasePositionParams {
@@ -1524,6 +2239,7 @@ impl OrderHandler {
                 current_time: env.ledger().timestamp(),
                 swap_path: soroban_sdk::Vec::new(&env),
                 oracle: &oracle,
+                retain_collateral: false,
             },
         );
 
@@ -1533,7 +2249,6 @@ impl OrderHandler {
         );
     }
 }
-
 
 // ─── Fee tier resolution (issue #204) ────────────────────────────────────────
 
@@ -1546,7 +2261,7 @@ fn resolve_fee_tier(
     account: &Address,
     market: &Address,
     size_delta_usd: i128,
-) -> u128 {
+) -> Option<u128> {
     const WINDOW_LEDGERS: u32 = 518_400; // 30 days × 24h × 720 ledgers/h
     let ds = DataStoreClient::new(env, data_store);
 
@@ -1565,8 +2280,9 @@ fn resolve_fee_tier(
         ds.apply_delta_to_u128(caller, &vol_key, &size_delta_usd)
     };
 
-    // Walk tiers 0-4, return best qualifying fee
-    let mut best_fee: u128 = 0;
+    // Walk tiers 0-4, return best qualifying fee (None if no tier qualifies,
+    // so the caller keeps the market's base position fee).
+    let mut best_fee: Option<u128> = None;
     for tier in 0u32..5u32 {
         let thresh_key = fee_tier_volume_threshold_key(env, market, tier);
         let threshold = ds.get_u128(&thresh_key);
@@ -1577,7 +2293,7 @@ fn resolve_fee_tier(
             let factor_key = fee_tier_position_fee_factor_key(env, market, tier);
             let fee_factor = ds.get_u128(&factor_key);
             if fee_factor > 0 {
-                best_fee = fee_factor;
+                best_fee = Some(fee_factor);
             }
         }
     }
@@ -1623,13 +2339,13 @@ fn load_market_props(env: &Env, data_store: &Address, market_token: &Address) ->
     let ds = DataStoreClient::new(env, data_store);
     let index_token = ds
         .get_address(&market_index_token_key(env, market_token))
-        .expect("market index token not found");
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket));
     let long_token = ds
         .get_address(&market_long_token_key(env, market_token))
-        .expect("market long token not found");
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket));
     let short_token = ds
         .get_address(&market_short_token_key(env, market_token))
-        .expect("market short token not found");
+        .unwrap_or_else(|| panic_with_error!(env, Error::InvalidMarket));
     MarketProps {
         market_token: market_token.clone(),
         index_token,
@@ -1691,7 +2407,6 @@ mod tests {
     use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
     use gmx_keys::{position_key, roles};
     use gmx_types::TokenPrice;
-    use soroban_sdk::testutils::Ledger as _;
     use market_token::{MarketToken, MarketTokenClient as MtClient};
     use oracle::{Oracle, OracleClient as OClient};
     use order_vault::{OrderVault, OrderVaultClient as OVClient};
@@ -1702,8 +2417,9 @@ mod tests {
         BytesN, Env, Vec,
     };
 
-    const COLLATERAL: i128 = 1_000_0000;
+    const COLLATERAL: i128 = 10_000_000;
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,
@@ -1725,7 +2441,7 @@ mod tests {
     fn setup() -> World {
         let env = Env::default();
         env.mock_all_auths();
-        env.budget().reset_unlimited();
+        env.cost_estimate().budget().reset_unlimited();
 
         let admin = Address::generate(&env);
         let keeper = Address::generate(&env);
@@ -1745,6 +2461,13 @@ mod tests {
         let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
         OClient::new(&env, &oracle_addr).initialize(&admin, &rs, &ds, &passphrase);
 
+        let long_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let short_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+
         let market_tk = env.register(MarketToken, ());
         MtClient::new(&env, &market_tk).initialize(
             &admin,
@@ -1752,6 +2475,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(&env, "GMX Market Token"),
             &soroban_sdk::String::from_str(&env, "GM"),
+            &long_tk,
+            &short_tk,
         );
         rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
 
@@ -1780,13 +2505,6 @@ mod tests {
             &ord_vault,
         );
         rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
-
-        let long_tk = env
-            .register_stellar_asset_contract_v2(admin.clone())
-            .address();
-        let short_tk = env
-            .register_stellar_asset_contract_v2(admin.clone())
-            .address();
         let index_tk = Address::generate(&env);
 
         let ds_c = DsClient::new(&env, &ds);
@@ -1854,8 +2572,8 @@ mod tests {
 
     fn seed_pool(w: &World) {
         let lp = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.long_tk).mint(&lp, &10_000_0000i128);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&lp, &5_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&lp, &100_000_000_i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&lp, &50_000_000_i128);
         set_prices(w, 2000 * gmx_math::FLOAT_PRECISION);
         let k = DepositHandlerClient::new(&w.env, &w.dep_handler).create_deposit(
             &lp,
@@ -1864,8 +2582,8 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_long_token: w.long_tk.clone(),
                 initial_short_token: w.short_tk.clone(),
-                long_token_amount: 10_000_0000,
-                short_token_amount: 5_000_0000,
+                long_token_amount: 100_000_000,
+                short_token_amount: 50_000_000,
                 min_market_tokens: 1,
                 execution_fee: 0,
             },
@@ -1896,6 +2614,7 @@ mod tests {
                 order_type,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         (hc, key)
@@ -1929,6 +2648,7 @@ mod tests {
                 order_type: OrderType::StopIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         )
     }
@@ -1940,7 +2660,7 @@ mod tests {
         let w = setup();
         let fp = gmx_math::FLOAT_PRECISION;
         let user = Address::generate(&w.env);
-        let collateral = 1_000_0000i128;
+        let collateral = 10_000_000_i128;
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &collateral);
         let trigger = 2000 * fp;
         set_prices(&w, trigger);
@@ -1981,7 +2701,7 @@ mod tests {
         let w = setup();
         let fp = gmx_math::FLOAT_PRECISION;
         let user = Address::generate(&w.env);
-        let collateral = 1_000_0000i128;
+        let collateral = 10_000_000_i128;
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &collateral);
         let trigger = 2500 * fp;
         set_prices(&w, 2000 * fp);
@@ -2038,6 +2758,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
     }
@@ -2100,6 +2821,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
     }
@@ -2156,6 +2878,144 @@ mod tests {
         );
     }
 
+    // ── Issue #625: max_leverage_key must be read at the same FLOAT_PRECISION
+    //    scale every configuration site in the repo writes it at ─────────────
+
+    /// A position opened within the configured max-leverage cap must succeed.
+    #[test]
+    fn increase_within_max_leverage_cap_succeeds() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        // Cap at 2x, in the same scale every real config site uses.
+        DsClient::new(&w.env, &w.ds).set_u128(
+            &w.admin,
+            &gmx_keys::max_leverage_key(&w.env, &w.market_tk),
+            &((2u128) * fp as u128),
+        );
+        set_prices(&w, 2000 * fp);
+        // create_increase_order: size_delta_usd = 2000*fp against COLLATERAL
+        // (1 token @ $2000) → exactly 1x, within the 2x cap.
+        let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+        let pk = position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true);
+        assert!(
+            hc.get_position(&pk).is_some(),
+            "position must be created when leverage is within the configured cap"
+        );
+    }
+
+    /// A position opened beyond the configured max-leverage cap must revert —
+    /// regression test for the FLOAT_PRECISION scale bug (issue #625): before
+    /// the fix, this cap was silently inert against every real configuration
+    /// in the repo (`N * FLOAT_PRECISION`) because the check compared it
+    /// against a raw `size * 100 / collateral` value many orders of magnitude
+    /// smaller.
+    #[test]
+    #[should_panic]
+    fn increase_beyond_max_leverage_cap_reverts() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        // Cap at 2x, in the same scale every real config site uses.
+        DsClient::new(&w.env, &w.ds).set_u128(
+            &w.admin,
+            &gmx_keys::max_leverage_key(&w.env, &w.market_tk),
+            &((2u128) * fp as u128),
+        );
+        set_prices(&w, 2000 * fp);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let key = hc.create_order(
+            &w.user,
+            &CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                // 1 token ($2000) of collateral backing a $10,000 position = 5x.
+                size_delta_usd: 10_000 * fp,
+                collateral_delta_amount: COLLATERAL,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketIncrease,
+                is_long: true,
+                expiry_ledger: None,
+                on_behalf_of: None,
+            },
+        );
+        hc.execute_order(&w.keeper, &key);
+    }
+
+    // ── min_collateral_factor must be enforced on the increase path ──────────
+    //
+    // Before this fix the factor was only ever evaluated on the decrease path
+    // (decrease_position_utils::validate_position), so a brand-new position
+    // could be opened below the configured collateral floor and only be judged
+    // at its next decrease or liquidation.
+
+    /// Opening a position whose collateral is below the configured
+    /// min_collateral_factor floor for its size must revert.
+    #[test]
+    #[should_panic]
+    fn increase_below_min_collateral_factor_reverts() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        // 50% floor: every position needs collateral_usd >= size_in_usd / 2.
+        DsClient::new(&w.env, &w.ds).set_u128(
+            &w.admin,
+            &gmx_keys::min_collateral_factor_key(&w.env, &w.market_tk),
+            &((fp / 2) as u128),
+        );
+        set_prices(&w, 2000 * fp);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let key = hc.create_order(
+            &w.user,
+            &CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                // 1 token ($2000) backing $10,000 → 20% collateral ratio < 50% floor.
+                size_delta_usd: 10_000 * fp,
+                collateral_delta_amount: COLLATERAL,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketIncrease,
+                is_long: true,
+                expiry_ledger: None,
+                on_behalf_of: None,
+            },
+        );
+        hc.execute_order(&w.keeper, &key);
+    }
+
+    /// A position whose collateral meets the configured min_collateral_factor
+    /// floor must still open — the new check only rejects under-collateralised ones.
+    #[test]
+    fn increase_meeting_min_collateral_factor_succeeds() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        DsClient::new(&w.env, &w.ds).set_u128(
+            &w.admin,
+            &gmx_keys::min_collateral_factor_key(&w.env, &w.market_tk),
+            &((fp / 2) as u128),
+        );
+        set_prices(&w, 2000 * fp);
+        // create_increase_order: $2000 size backed by 1 token ($2000)
+        // → 100% collateral ratio ≥ 50% floor.
+        let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+        let pk = position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true);
+        assert!(
+            hc.get_position(&pk).is_some(),
+            "position meeting the min-collateral floor must be created"
+        );
+    }
+
     // ── Issue #32: order storage cleanup tests ────────────────────────────────
 
     #[test]
@@ -2163,11 +3023,11 @@ mod tests {
         let w = setup();
         let env = &w.env;
         let user = Address::generate(env);
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         soroban_sdk::token::Client::new(env, &w.long_tk).transfer(
             &user,
             &w.ord_vault,
-            &1_000_0000i128,
+            &10_000_000_i128,
         );
         let hc = OrderHandlerClient::new(env, &w.ord_handler);
         let ds_c = DsClient::new(env, &w.ds);
@@ -2178,8 +3038,8 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_collateral_token: w.long_tk.clone(),
                 swap_path: Vec::new(env),
-                size_delta_usd: 500_000_0000i128,
-                collateral_delta_amount: 1_000_0000i128,
+                size_delta_usd: 5_000_000_000_i128,
+                collateral_delta_amount: 10_000_000_i128,
                 trigger_price: 0,
                 acceptable_price: i128::MAX,
                 execution_fee: 0,
@@ -2187,6 +3047,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         assert!(hc.get_order(&key).is_some());
@@ -2214,11 +3075,11 @@ mod tests {
         seed_pool(&w);
         set_prices(&w, 2000 * gmx_math::FLOAT_PRECISION);
         let user = Address::generate(env);
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         soroban_sdk::token::Client::new(env, &w.long_tk).transfer(
             &user,
             &w.ord_vault,
-            &1_000_0000i128,
+            &10_000_000_i128,
         );
         let hc = OrderHandlerClient::new(env, &w.ord_handler);
         let ds_c = DsClient::new(env, &w.ds);
@@ -2229,8 +3090,8 @@ mod tests {
                 market: w.market_tk.clone(),
                 initial_collateral_token: w.long_tk.clone(),
                 swap_path: Vec::new(env),
-                size_delta_usd: 500_000_0000i128,
-                collateral_delta_amount: 1_000_0000i128,
+                size_delta_usd: 5_000_000_000_i128,
+                collateral_delta_amount: 10_000_000_i128,
                 trigger_price: 0,
                 acceptable_price: i128::MAX,
                 execution_fee: 0,
@@ -2238,6 +3099,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         assert!(hc.get_order(&key).is_some());
@@ -2327,6 +3189,42 @@ mod tests {
         let (_hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
         let intruder = Address::generate(&w.env);
         OrderHandlerClient::new(&w.env, &w.ord_handler).freeze_order(&intruder, &key);
+    }
+
+    // ── Issue #643: update_oracle sanity checks ───────────────────────────────
+
+    /// update_oracle must reject pointing the oracle at this contract's own
+    /// address — the most likely copy-paste mistake.
+    #[test]
+    #[should_panic]
+    fn update_oracle_rejects_self_address() {
+        let w = setup();
+        OrderHandlerClient::new(&w.env, &w.ord_handler).update_oracle(&w.admin, &w.ord_handler);
+    }
+
+    /// update_oracle must reject a no-op call (new_oracle == current oracle).
+    #[test]
+    #[should_panic]
+    fn update_oracle_rejects_noop() {
+        let w = setup();
+        OrderHandlerClient::new(&w.env, &w.ord_handler).update_oracle(&w.admin, &w.oracle);
+    }
+
+    /// update_oracle must reject the order_vault's address — a plausible
+    /// copy-paste mistake between sibling instance addresses.
+    #[test]
+    #[should_panic]
+    fn update_oracle_rejects_sibling_vault_address() {
+        let w = setup();
+        OrderHandlerClient::new(&w.env, &w.ord_handler).update_oracle(&w.admin, &w.ord_vault);
+    }
+
+    /// A genuinely different oracle address must succeed.
+    #[test]
+    fn update_oracle_accepts_valid_new_address() {
+        let w = setup();
+        let new_oracle = Address::generate(&w.env);
+        OrderHandlerClient::new(&w.env, &w.ord_handler).update_oracle(&w.admin, &new_oracle);
     }
 
     // ── Issue #10: upgrade entrypoint tests ───────────────────────────────────
@@ -2440,6 +3338,7 @@ mod tests {
                 order_type: OrderType::LimitSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         )
     }
@@ -2453,12 +3352,12 @@ mod tests {
         seed_pool(&w);
 
         let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &10_000_000_i128);
 
         // Current price = 2000; trigger = 1500 → 2000 > 1500 → should revert
         let trigger = 1500 * fp;
         set_prices(&w, 2000 * fp);
-        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, trigger, 0);
+        let key = create_limit_swap_order(&w, &user, 10_000_000, &w.short_tk, trigger, 0);
 
         // Price is still 2000, above the 1500 trigger → UnsatisfiedTrigger
         set_prices(&w, 2000 * fp);
@@ -2473,12 +3372,12 @@ mod tests {
         seed_pool(&w);
 
         let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &10_000_000_i128);
 
         // trigger = 2000; price = 2000 → condition: 2000 <= 2000 → must execute
         let trigger = 2000 * fp;
         set_prices(&w, trigger);
-        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, trigger, 0);
+        let key = create_limit_swap_order(&w, &user, 10_000_000, &w.short_tk, trigger, 0);
 
         set_prices(&w, trigger);
         OrderHandlerClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
@@ -2503,12 +3402,12 @@ mod tests {
         seed_pool(&w);
 
         let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &10_000_000_i128);
 
         // trigger = 2500; current price = 2000 → 2000 <= 2500 → favorable
         let trigger = 2500 * fp;
         set_prices(&w, 2000 * fp);
-        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, trigger, 0);
+        let key = create_limit_swap_order(&w, &user, 10_000_000, &w.short_tk, trigger, 0);
 
         set_prices(&w, 2000 * fp);
         OrderHandlerClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
@@ -2533,10 +3432,10 @@ mod tests {
         seed_pool(&w);
 
         let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &10_000_000_i128);
 
         set_prices(&w, 2000 * fp);
-        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, 0, 0);
+        let key = create_limit_swap_order(&w, &user, 10_000_000, &w.short_tk, 0, 0);
 
         set_prices(&w, 2000 * fp);
         OrderHandlerClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
@@ -2558,11 +3457,11 @@ mod tests {
         seed_pool(&w);
 
         let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &10_000_000_i128);
 
         set_prices(&w, 2000 * fp);
         // min_output_amount = i128::MAX → impossible to satisfy
-        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, 0, i128::MAX);
+        let key = create_limit_swap_order(&w, &user, 10_000_000, &w.short_tk, 0, i128::MAX);
 
         set_prices(&w, 2000 * fp);
         // Must revert with PriceTooLow because output < min_output_amount
@@ -2577,11 +3476,11 @@ mod tests {
         seed_pool(&w);
 
         let user = Address::generate(&w.env);
-        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &10_000_000_i128);
 
         set_prices(&w, 2000 * fp);
         // min_output_amount = 1 → easy to satisfy
-        let key = create_limit_swap_order(&w, &user, 1_000_0000, &w.short_tk, 0, 1);
+        let key = create_limit_swap_order(&w, &user, 10_000_000, &w.short_tk, 0, 1);
 
         set_prices(&w, 2000 * fp);
         OrderHandlerClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
@@ -2597,6 +3496,31 @@ mod tests {
                 .is_none(),
             "order must be consumed after successful limit swap"
         );
+    }
+
+    /// Issue #375: a swap hop whose amount_out rounds to zero must revert
+    /// instead of silently succeeding — otherwise the input tokens, already
+    /// physically transferred into the market, would be stranded with no
+    /// pool_amount credit and no way to sweep them back out.
+    #[test]
+    #[should_panic]
+    fn limit_swap_zero_output_hop_reverts_instead_of_stranding_funds() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        seed_pool(&w);
+
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.short_tk).mint(&user, &10_000_000_i128);
+
+        set_prices(&w, 2000 * fp);
+        // A single smallest-unit of short_tk (worth $1) converted at a
+        // long_tk price of $2000 rounds down to 0 long_tk out, before fees
+        // even apply. min_output_amount=0 ("no slippage floor") must not
+        // let this silently succeed with amount_out == 0.
+        let key = create_limit_swap_order(&w, &user, 1i128, &w.short_tk, 0, 0);
+
+        set_prices(&w, 2000 * fp);
+        OrderHandlerClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &key);
     }
 
     // ── Issue #59/#60: configured max swap path length enforced ───────────────
@@ -2616,11 +3540,11 @@ mod tests {
         );
 
         let user = Address::generate(env);
-        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &10_000_000_i128);
         soroban_sdk::token::Client::new(env, &w.long_tk).transfer(
             &user,
             &w.ord_vault,
-            &1_000_0000i128,
+            &10_000_000_i128,
         );
 
         let fake_market = Address::generate(env);
@@ -2633,7 +3557,7 @@ mod tests {
                 initial_collateral_token: w.long_tk.clone(),
                 swap_path: Vec::from_array(env, [w.market_tk.clone(), fake_market]),
                 size_delta_usd: 0,
-                collateral_delta_amount: 1_000_0000i128,
+                collateral_delta_amount: 10_000_000_i128,
                 trigger_price: 0,
                 acceptable_price: 0,
                 execution_fee: 0,
@@ -2641,6 +3565,7 @@ mod tests {
                 order_type: OrderType::MarketSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -2660,11 +3585,11 @@ mod tests {
         );
 
         let user = Address::generate(env);
-        StellarAssetClient::new(env, &w.short_tk).mint(&user, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.short_tk).mint(&user, &10_000_000_i128);
         soroban_sdk::token::Client::new(env, &w.short_tk).transfer(
             &user,
             &w.ord_vault,
-            &1_000_0000i128,
+            &10_000_000_i128,
         );
 
         let hc = OrderHandlerClient::new(env, &w.ord_handler);
@@ -2676,7 +3601,7 @@ mod tests {
                 initial_collateral_token: w.short_tk.clone(),
                 swap_path: Vec::from_array(env, [w.market_tk.clone()]),
                 size_delta_usd: 0,
-                collateral_delta_amount: 1_000_0000i128,
+                collateral_delta_amount: 10_000_000_i128,
                 trigger_price: 0,
                 acceptable_price: 0,
                 execution_fee: 0,
@@ -2684,6 +3609,7 @@ mod tests {
                 order_type: OrderType::MarketSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -2715,6 +3641,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market1"),
             &soroban_sdk::String::from_str(env, "M1"),
+            &w.long_tk,
+            &mid_tk,
         );
         let market_tk2 = env.register(MarketToken, ());
         MtClient::new(env, &market_tk2).initialize(
@@ -2723,6 +3651,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market2"),
             &soroban_sdk::String::from_str(env, "M2"),
+            &mid_tk,
+            &w.short_tk,
         );
 
         let ds_c = DsClient::new(env, &w.ds);
@@ -2787,10 +3717,10 @@ mod tests {
             ),
         );
 
-        let pool1_long: u128 = 10_000_0000;
-        let pool1_mid: u128 = 5_000_0000;
-        let pool2_mid: u128 = 10_000_0000;
-        let pool2_short: u128 = 5_000_0000;
+        let pool1_long: u128 = 100_000_000;
+        let pool1_mid: u128 = 50_000_000;
+        let pool2_mid: u128 = 100_000_000;
+        let pool2_short: u128 = 50_000_000;
 
         StellarAssetClient::new(env, &w.long_tk).mint(&market_tk1, &(pool1_long as i128));
         StellarAssetClient::new(env, &mid_tk).mint(&market_tk1, &(pool1_mid as i128));
@@ -2840,6 +3770,7 @@ mod tests {
                 order_type: OrderType::MarketSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -2895,6 +3826,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market1"),
             &soroban_sdk::String::from_str(env, "M1"),
+            &w.long_tk,
+            &mid_tk,
         );
         let market_tk2 = env.register(MarketToken, ());
         MtClient::new(env, &market_tk2).initialize(
@@ -2903,6 +3836,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market2"),
             &soroban_sdk::String::from_str(env, "M2"),
+            &mid_tk,
+            &w.short_tk,
         );
 
         let ds_c = DsClient::new(env, &w.ds);
@@ -2967,30 +3902,30 @@ mod tests {
             ),
         );
 
-        StellarAssetClient::new(env, &w.long_tk).mint(&market_tk1, &10_000_0000i128);
-        StellarAssetClient::new(env, &mid_tk).mint(&market_tk1, &5_000_0000i128);
-        StellarAssetClient::new(env, &mid_tk).mint(&market_tk2, &10_000_0000i128);
-        StellarAssetClient::new(env, &w.short_tk).mint(&market_tk2, &5_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&market_tk1, &100_000_000_i128);
+        StellarAssetClient::new(env, &mid_tk).mint(&market_tk1, &50_000_000_i128);
+        StellarAssetClient::new(env, &mid_tk).mint(&market_tk2, &100_000_000_i128);
+        StellarAssetClient::new(env, &w.short_tk).mint(&market_tk2, &50_000_000_i128);
 
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::pool_amount_key(env, &market_tk1, &w.long_tk),
-            &10_000_0000u128,
+            &100_000_000_u128,
         );
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::pool_amount_key(env, &market_tk1, &mid_tk),
-            &5_000_0000u128,
+            &50_000_000_u128,
         );
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::pool_amount_key(env, &market_tk2, &mid_tk),
-            &10_000_0000u128,
+            &100_000_000_u128,
         );
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::pool_amount_key(env, &market_tk2, &w.short_tk),
-            &5_000_0000u128,
+            &50_000_000_u128,
         );
 
         let amount_in: i128 = 1_000;
@@ -3015,6 +3950,7 @@ mod tests {
                 order_type: OrderType::MarketSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -3076,6 +4012,155 @@ mod tests {
         );
     }
 
+    /// Issue #411: with a nonzero liquidation execution fee configured, the keeper
+    /// fee must be paid out of the market pool (via market_token's custodian
+    /// withdrawal), not out of order_vault, which holds ~0 of an open position's
+    /// collateral by the time it's liquidated.
+    #[test]
+    fn liquidate_position_pays_keeper_fee_from_market_pool() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+
+        let keeper_fee = 1_000i128;
+        DsClient::new(&w.env, &w.ds).set_u128(
+            &w.admin,
+            &gmx_keys::liquidation_execution_fee_key(&w.env, &w.market_tk),
+            &(keeper_fee as u128),
+        );
+
+        // Crash price so the position is liquidatable.
+        set_prices(&w, 100 * fp);
+
+        let keeper_balance_before =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.keeper);
+
+        hc.liquidate_position(&w.keeper, &w.user, &w.market_tk, &w.long_tk, &true);
+
+        let keeper_balance_after =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.keeper);
+        assert_eq!(keeper_balance_after - keeper_balance_before, keeper_fee);
+    }
+
+    /// Issue #629: withdraw_from_pool moves the keeper's liquidation_execution_fee
+    /// out of the market's real token balance, but that alone never touches
+    /// data_store's pool_amount ledger. Confirm liquidation with a nonzero keeper
+    /// fee leaves pool_amount exactly `keeper_fee` lower than an otherwise
+    /// identical liquidation with no keeper fee configured — i.e. the fee
+    /// withdrawal is now paired with a matching apply_delta_to_pool_amount call.
+    #[test]
+    fn liquidate_position_keeper_fee_decrements_pool_amount() {
+        let fp = gmx_math::FLOAT_PRECISION;
+        let keeper_fee = 1_000i128;
+
+        let pool_amount_after = |configure_fee: bool| -> u128 {
+            let w = setup();
+            set_prices(&w, 2_000 * fp);
+            seed_pool(&w);
+            set_prices(&w, 2_000 * fp);
+
+            let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+            hc.execute_order(&w.keeper, &key);
+
+            if configure_fee {
+                DsClient::new(&w.env, &w.ds).set_u128(
+                    &w.admin,
+                    &gmx_keys::liquidation_execution_fee_key(&w.env, &w.market_tk),
+                    &(keeper_fee as u128),
+                );
+            }
+
+            // Crash price so the position is liquidatable.
+            set_prices(&w, 100 * fp);
+
+            hc.liquidate_position(&w.keeper, &w.user, &w.market_tk, &w.long_tk, &true);
+
+            DsClient::new(&w.env, &w.ds).get_u128(&gmx_keys::pool_amount_key(
+                &w.env,
+                &w.market_tk,
+                &w.long_tk,
+            ))
+        };
+
+        let pool_amount_without_fee = pool_amount_after(false);
+        let pool_amount_with_fee = pool_amount_after(true);
+
+        assert_eq!(
+            pool_amount_with_fee,
+            pool_amount_without_fee - keeper_fee as u128,
+            "pool_amount must drop by exactly the keeper's liquidation_execution_fee"
+        );
+    }
+
+    /// A configured keeper execution fee must be deducted from what the account
+    /// receives, not paid out of the pool *in addition to* the position's full
+    /// collateral value. Before this fix, `liquidate_position` withdrew the
+    /// keeper's fee from the pool and then separately called `decrease_position`,
+    /// which re-read the position's *pre-fee* collateral from storage and paid
+    /// that full amount to the account — double-paying the fee out of the pool.
+    /// Forces liquidatability via a steep `min_collateral_factor` instead of a
+    /// price crash so realised PnL stays ~0, making the fee's effect on the
+    /// account's payout directly observable instead of masked by a clamp-to-zero
+    /// loss.
+    #[test]
+    fn liquidate_position_with_keeper_fee_does_not_double_pay_account() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+
+        let keeper_fee = 1_000_000i128; // 0.1 long_tk
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::liquidation_execution_fee_key(&w.env, &w.market_tk),
+            &(keeper_fee as u128),
+        );
+        // 150% of size required as collateral — the position (opened at 1x
+        // leverage) is now liquidatable purely by configuration, with the price
+        // unchanged since entry, so realised PnL on close is ~0.
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::min_collateral_factor_key(&w.env, &w.market_tk),
+            &((fp * 3 / 2) as u128),
+        );
+
+        let account_balance_before =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.user);
+
+        hc.liquidate_position(&w.keeper, &w.user, &w.market_tk, &w.long_tk, &true);
+
+        let account_balance_after =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.user);
+        let account_payout = account_balance_after - account_balance_before;
+
+        assert!(
+            account_payout <= COLLATERAL - keeper_fee,
+            "account payout ({account_payout}) must not exceed the position's collateral \
+             minus the keeper fee already paid out of the pool — got more than \
+             collateral - fee ({}), meaning the fee was paid twice",
+            COLLATERAL - keeper_fee
+        );
+        // With ~0 realised PnL and no other fees configured, the payout should
+        // land at (or just under, for any residual rounding/borrowing fee)
+        // exactly collateral - fee, not merely somewhere under it.
+        assert!(
+            account_payout >= COLLATERAL - keeper_fee - 10,
+            "account payout ({account_payout}) is unexpectedly far below collateral - fee \
+             ({}); expected ~= collateral - fee with ~0 realised PnL",
+            COLLATERAL - keeper_fee
+        );
+    }
+
     /// execute_adl must reject a caller that does not hold ADL_KEEPER.
     #[test]
     #[should_panic]
@@ -3115,13 +4200,19 @@ mod tests {
         set_prices(&w, 2_000 * fp);
 
         w.env.ledger().set_sequence_number(500);
+        // Oracle prices live in temporary storage; re-publish after the jump
+        // or they expire and execute_order reverts with PriceNotFound.
+        set_prices(&w, 2_000 * fp);
         let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
         hc.execute_order(&w.keeper, &key);
 
         let status = hc.check_keeper_heartbeat(&w.ds, &roles::order_keeper(&w.env));
         assert_eq!(status.last_active_ledger, 500);
         assert_eq!(status.ledgers_since_last_activity, 0);
-        assert!(!status.is_stale, "keeper must be live right after executing");
+        assert!(
+            !status.is_stale,
+            "keeper must be live right after executing"
+        );
     }
 
     /// Full lifecycle: keeper executes, time advances past the timeout, the
@@ -3140,11 +4231,15 @@ mod tests {
 
         // Keeper executes at ledger 1000 → activity recorded.
         w.env.ledger().set_sequence_number(1000);
+        // Oracle prices live in temporary storage; re-publish after the jump
+        // or they expire and execute_order reverts with PriceNotFound.
+        set_prices(&w, 2_000 * fp);
         let (_, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
         hc.execute_order(&w.keeper, &key);
-        assert!(!hc
-            .check_keeper_heartbeat(&w.ds, &order_keeper_role)
-            .is_stale);
+        assert!(
+            !hc.check_keeper_heartbeat(&w.ds, &order_keeper_role)
+                .is_stale
+        );
 
         // Advance past the default 2880-ledger timeout.
         w.env.ledger().set_sequence_number(1000 + 2880 + 1);
@@ -3182,20 +4277,25 @@ mod tests {
         hc.set_keeper_heartbeat_timeout(&w.admin, &order_keeper_role, &100u64);
 
         w.env.ledger().set_sequence_number(2000);
+        // Oracle prices live in temporary storage; re-publish after the jump
+        // or they expire and execute_order reverts with PriceNotFound.
+        set_prices(&w, 2_000 * fp);
         let (_, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
         hc.execute_order(&w.keeper, &key);
 
         // 50 ledgers later — within the window.
         w.env.ledger().set_sequence_number(2050);
-        assert!(!hc
-            .check_keeper_heartbeat(&w.ds, &order_keeper_role)
-            .is_stale);
+        assert!(
+            !hc.check_keeper_heartbeat(&w.ds, &order_keeper_role)
+                .is_stale
+        );
 
         // 101 ledgers later — past the window.
         w.env.ledger().set_sequence_number(2101);
-        assert!(hc
-            .check_keeper_heartbeat(&w.ds, &order_keeper_role)
-            .is_stale);
+        assert!(
+            hc.check_keeper_heartbeat(&w.ds, &order_keeper_role)
+                .is_stale
+        );
     }
 
     /// `flag_stale_keeper` must revert if the keeper is still within its window.
@@ -3232,6 +4332,37 @@ mod tests {
         hc.flag_stale_keeper(&impostor, &w.keeper, &order_keeper_role);
     }
 
+    /// Issue #794: `keeper` must actually hold `role`, so the emitted
+    /// audit-trail event can never name an arbitrary or unrelated address —
+    /// even when the role as a whole has genuinely gone stale.
+    #[test]
+    #[should_panic]
+    fn flag_stale_keeper_rejects_keeper_that_never_held_role() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        let order_keeper_role = roles::order_keeper(&w.env);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+
+        // The role as a whole genuinely goes stale.
+        w.env.ledger().set_sequence_number(1000);
+        let (_, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+        w.env.ledger().set_sequence_number(1000 + 2880 + 1);
+        assert!(
+            hc.check_keeper_heartbeat(&w.ds, &order_keeper_role)
+                .is_stale
+        );
+
+        // `bystander` never held order_keeper_role — flagging it must panic
+        // with KeeperDoesNotHoldRole rather than naming it in the event.
+        let bystander = Address::generate(&w.env);
+        hc.flag_stale_keeper(&w.admin, &bystander, &order_keeper_role);
+    }
+
     // ── Issue #219: create_orders (batch) ────────────────────────────────────
 
     /// Batch with more than 5 orders must revert.
@@ -3241,8 +4372,8 @@ mod tests {
         let w = setup();
         let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
         let mut requests = Vec::new(&w.env);
-        // Build 6 decrease orders (no collateral deposit needed)
-        for _ in 0..6 {
+        // Build MAX_ORDER_BATCH_SIZE + 1 decrease orders (no collateral deposit needed)
+        for _ in 0..=MAX_ORDER_BATCH_SIZE {
             requests.push_back(CreateOrderParams {
                 receiver: w.user.clone(),
                 market: w.market_tk.clone(),
@@ -3257,6 +4388,7 @@ mod tests {
                 order_type: OrderType::MarketDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             });
         }
         hc.create_orders(&w.user, &requests);
@@ -3293,6 +4425,7 @@ mod tests {
                     order_type: OrderType::MarketIncrease,
                     is_long: true,
                     expiry_ledger: None,
+                    on_behalf_of: None,
                 },
                 // Stop-loss: StopLossDecrease
                 CreateOrderParams {
@@ -3309,6 +4442,7 @@ mod tests {
                     order_type: OrderType::StopLossDecrease,
                     is_long: true,
                     expiry_ledger: None,
+                    on_behalf_of: None,
                 },
                 // Take-profit: LimitDecrease
                 CreateOrderParams {
@@ -3325,6 +4459,7 @@ mod tests {
                     order_type: OrderType::LimitDecrease,
                     is_long: true,
                     expiry_ledger: None,
+                    on_behalf_of: None,
                 },
             ],
         );
@@ -3354,6 +4489,171 @@ mod tests {
         assert_eq!(tp.trigger_price, 2500 * fp);
     }
 
+    /// Issue #385/#535/#620: a trader who has registered a manager for
+    /// themselves (i.e. delegated to a bot) must still be able to create
+    /// orders for themselves directly — registering a manager must never
+    /// silently hijack the trader's own direct order-creation calls, in
+    /// either create_order or the create_orders batch entrypoint.
+    #[test]
+    fn trader_with_registered_manager_can_still_create_orders_for_self() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        let ds_c = DsClient::new(&w.env, &w.ds);
+
+        let bot = Address::generate(&w.env);
+        // w.user delegates to `bot` as their manager...
+        ds_c.set_position_manager(&w.user, &w.market_tk, &bot);
+
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &(COLLATERAL * 2));
+
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let base_params = CreateOrderParams {
+            receiver: w.user.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: Vec::new(&w.env),
+            size_delta_usd: 2000 * fp,
+            collateral_delta_amount: COLLATERAL,
+            trigger_price: 0,
+            acceptable_price: 0,
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketIncrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        };
+
+        // ...but calling create_order directly (no on_behalf_of) must still
+        // open the position for w.user themselves, not `bot`.
+        let key = hc.create_order(&w.user, &base_params);
+        let order = hc.get_order(&key).unwrap();
+        assert_eq!(order.account, w.user);
+        assert_eq!(order.receiver, w.user);
+
+        // Same for the batch entrypoint (fresh collateral: record_transfer_in
+        // already consumed the first mint's delta above).
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+        let keys = hc.create_orders(&w.user, &Vec::from_array(&w.env, [base_params]));
+        let batch_order = hc.get_order(&keys.get_unchecked(0)).unwrap();
+        assert_eq!(batch_order.account, w.user);
+        assert_eq!(batch_order.receiver, w.user);
+    }
+
+    /// Issue #385/#535/#620: a registered manager can create an order
+    /// on_behalf_of the owner who registered them — the order opens a
+    /// position for the owner (not the manager), and the manager must name
+    /// the correct owner to succeed.
+    #[test]
+    fn registered_manager_can_create_order_on_behalf_of_owner() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        let ds_c = DsClient::new(&w.env, &w.ds);
+
+        let bot = Address::generate(&w.env);
+        ds_c.set_position_manager(&w.user, &w.market_tk, &bot);
+
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let key = hc.create_order(
+            &bot,
+            &CreateOrderParams {
+                receiver: bot.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                size_delta_usd: 2000 * fp,
+                collateral_delta_amount: COLLATERAL,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketIncrease,
+                is_long: true,
+                expiry_ledger: None,
+                on_behalf_of: Some(w.user.clone()),
+            },
+        );
+
+        let order = hc.get_order(&key).unwrap();
+        assert_eq!(
+            order.account, w.user,
+            "position must open for the owner, not the delegate manager"
+        );
+        assert_eq!(
+            order.receiver, w.user,
+            "receiver cannot be redirected to the manager"
+        );
+    }
+
+    /// Issue #385/#535: naming an owner in on_behalf_of who never registered
+    /// the caller as their manager must revert, not silently succeed or fall
+    /// back to treating the caller as the owner.
+    #[test]
+    #[should_panic]
+    fn create_order_on_behalf_of_unregistered_owner_panics() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
+
+        let stranger = Address::generate(&w.env);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        hc.create_order(
+            &w.user,
+            &CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                size_delta_usd: 2000 * fp,
+                collateral_delta_amount: COLLATERAL,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketIncrease,
+                is_long: true,
+                expiry_ledger: None,
+                on_behalf_of: Some(stranger),
+            },
+        );
+    }
+
+    /// Issue #454: two MarketIncrease legs sharing the same collateral token in one
+    /// batch must revert up front with DuplicateCollateralTokenInBatch, instead of
+    /// the first leg silently consuming the whole pre-funded balance and the second
+    /// leg panicking with a confusing ZeroCollateral.
+    #[test]
+    #[should_panic]
+    fn create_orders_two_increase_legs_same_collateral_token_reverts() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &(COLLATERAL * 2));
+
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let leg = CreateOrderParams {
+            receiver: w.user.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: Vec::new(&w.env),
+            size_delta_usd: 2000 * fp,
+            collateral_delta_amount: COLLATERAL,
+            trigger_price: 0,
+            acceptable_price: 0,
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketIncrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        };
+        let requests = Vec::from_array(&w.env, [leg.clone(), leg]);
+        hc.create_orders(&w.user, &requests);
+    }
+
     // ── Issue #232: cyclic swap_path rejected at create_order time ────────────
 
     /// [A, A] — immediate repeat must revert with CyclicSwapPath at creation.
@@ -3378,6 +4678,7 @@ mod tests {
                 order_type: OrderType::MarketDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
     }
@@ -3395,6 +4696,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market2"),
             &soroban_sdk::String::from_str(env, "M2"),
+            &w.long_tk,
+            &w.short_tk,
         );
         let hc = OrderHandlerClient::new(env, &w.ord_handler);
         hc.create_order(
@@ -3416,6 +4719,7 @@ mod tests {
                 order_type: OrderType::MarketDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
     }
@@ -3432,6 +4736,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market2"),
             &soroban_sdk::String::from_str(env, "M2"),
+            &w.long_tk,
+            &w.short_tk,
         );
         let market_tk3 = env.register(MarketToken, ());
         MtClient::new(env, &market_tk3).initialize(
@@ -3440,6 +4746,8 @@ mod tests {
             &7u32,
             &soroban_sdk::String::from_str(env, "Market3"),
             &soroban_sdk::String::from_str(env, "M3"),
+            &w.long_tk,
+            &w.short_tk,
         );
         // MarketSwap requires vault collateral (is_increase_or_swap = true)
         StellarAssetClient::new(env, &w.long_tk).mint(&w.ord_vault, &COLLATERAL);
@@ -3460,6 +4768,7 @@ mod tests {
                 order_type: OrderType::MarketSwap,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         assert!(
@@ -3501,17 +4810,19 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         set_prices(&w, 2000 * gmx_math::FLOAT_PRECISION);
         hc.execute_order(&w.keeper, &a_key);
 
-        let attacker_pos_key =
-            position_key(&w.env, &attacker, &w.market_tk, &w.long_tk, true);
-        let victim_pos_key =
-            position_key(&w.env, &victim, &w.market_tk, &w.long_tk, true);
+        let attacker_pos_key = position_key(&w.env, &attacker, &w.market_tk, &w.long_tk, true);
+        let victim_pos_key = position_key(&w.env, &victim, &w.market_tk, &w.long_tk, true);
 
-        assert_ne!(attacker_pos_key, victim_pos_key, "position keys must differ");
+        assert_ne!(
+            attacker_pos_key, victim_pos_key,
+            "position keys must differ"
+        );
         assert!(
             hc.get_position(&attacker_pos_key).is_some(),
             "attacker has their own position"
@@ -3550,6 +4861,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
     }
@@ -3579,6 +4891,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         assert!(
@@ -3616,6 +4929,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         set_prices(&w, 2000 * fp);
@@ -3637,7 +4951,7 @@ mod tests {
     fn cancel_order_refunds_execution_fee_to_user() {
         let w = setup();
         const FEE: i128 = 500_0000; // 0.05 tokens as execution fee
-        // Mint collateral + fee into vault so the snapshot delta covers both.
+                                    // Mint collateral + fee into vault so the snapshot delta covers both.
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.ord_vault, &(COLLATERAL + FEE));
         let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
         let key = hc.create_order(
@@ -3656,6 +4970,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         let before = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.user);
@@ -3696,6 +5011,40 @@ mod tests {
         );
     }
 
+    // ── Issue #601: decrease-type orders for a nonexistent position ───────────
+
+    /// Executing a MarketDecrease for an account/market/collateral/side with no
+    /// existing position must revert with the typed PositionNotFound error
+    /// (previously this reached decrease_position's raw `.expect()` panic).
+    #[test]
+    #[should_panic]
+    fn market_decrease_for_nonexistent_position_reverts() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2000 * fp);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        let key = hc.create_order(
+            &w.user,
+            &CreateOrderParams {
+                receiver: w.user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: Vec::new(&w.env),
+                size_delta_usd: 100 * fp,
+                collateral_delta_amount: 0,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketDecrease,
+                is_long: true,
+                expiry_ledger: None,
+                on_behalf_of: None,
+            },
+        );
+        hc.execute_order(&w.keeper, &key);
+    }
+
     /// LimitDecrease (long take-profit) must execute when oracle price equals
     /// trigger_price exactly (inclusive upper bound for long exit).
     #[test]
@@ -3731,6 +5080,7 @@ mod tests {
                 order_type: OrderType::LimitDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         set_prices(&w, trigger); // price == trigger → must execute
@@ -3769,6 +5119,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &inc_key);
@@ -3791,6 +5142,7 @@ mod tests {
                 order_type: OrderType::LimitDecrease,
                 is_long: false,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         set_prices(&w, trigger); // price == trigger → must execute
@@ -3830,6 +5182,7 @@ mod tests {
                 order_type: OrderType::StopLossDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         set_prices(&w, trigger); // price == trigger → must execute
@@ -3870,7 +5223,11 @@ mod tests {
         // Expected: (2000 + 2200) / 2 = 2100 (in FLOAT_PRECISION units)
         // Allow 1% tolerance for integer-division rounding.
         let expected = 2100 * fp;
-        let diff = if avg > expected { avg - expected } else { expected - avg };
+        let diff = if avg > expected {
+            avg - expected
+        } else {
+            expected - avg
+        };
         assert!(
             diff * 100 / expected < 2,
             "avg_entry_price {} must be within 2% of expected weighted average {}",
@@ -3878,7 +5235,10 @@ mod tests {
             expected
         );
         // The computed avg must lie between the two entry prices.
-        assert!(avg > price1 && avg < price2, "avg must be between price1 and price2");
+        assert!(
+            avg > price1 && avg < price2,
+            "avg must be between price1 and price2"
+        );
     }
 
     // ── Issue #261: sequential write ordering in a multicall ─────────────────
@@ -3890,7 +5250,7 @@ mod tests {
     #[test]
     fn sequential_pool_amount_writes_both_accumulate() {
         let w = setup();
-        let fp = gmx_math::FLOAT_PRECISION;
+        let _fp = gmx_math::FLOAT_PRECISION;
         let tp = gmx_math::TOKEN_PRECISION;
         let ds_c = DsClient::new(&w.env, &w.ds);
         let pool_key = gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk);

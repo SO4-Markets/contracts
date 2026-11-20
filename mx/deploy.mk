@@ -14,6 +14,10 @@ deploy-force: preflight
 
 deploy-contract: preflight build
 	@test -n "$(CONTRACT)" || { printf '%s\n' 'Usage: make deploy-contract CONTRACT=reader NETWORK=testnet SOURCE=deployer'; exit 1; }
+	@case "$(CONTRACT)" in \
+		test_token|test_faucet) [ "$(NETWORK)" != "mainnet" ] || \
+			{ printf 'ERROR: %s must not be deployed to mainnet. Use real SAC IDs instead.\n' "$(CONTRACT)" >&2; exit 1; } ;; \
+	esac
 	@test -f "$(WASM_DIR)/$(CONTRACT).wasm" || { printf 'Missing wasm: %s/%s.wasm\n' "$(WASM_DIR)" "$(CONTRACT)"; exit 1; }
 	wasm_hash="$$(stellar contract upload --wasm "$(WASM_DIR)/$(CONTRACT).wasm" --source "$(SOURCE)" --network "$(NETWORK)")"
 	contract_id="$$(stellar contract deploy --wasm-hash "$$wasm_hash" --source "$(SOURCE)" --network "$(NETWORK)")"

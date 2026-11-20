@@ -42,6 +42,7 @@ use withdrawal_vault::{WithdrawalVault, WithdrawalVaultClient as WVClient};
 const ONE_TOKEN: i128 = 10_000_000; // 7-decimal Stellar precision
 const ONE_USD: i128 = FLOAT_PRECISION;
 
+#[allow(dead_code)]
 struct World {
     env: Env,
     admin: Address,
@@ -95,16 +96,6 @@ fn setup() -> World {
     let ord_vault = env.register(OrderVault, ());
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
-    // Market token (GM)
-    let market_tk = env.register(MarketToken, ());
-    MtClient::new(&env, &market_tk).initialize(
-        &admin,
-        &rs,
-        &7u32,
-        &soroban_sdk::String::from_str(&env, "GMX ETH/USD Market"),
-        &soroban_sdk::String::from_str(&env, "GM"),
-    );
-
     // Underlying tokens
     let long_tk = env
         .register_stellar_asset_contract_v2(admin.clone())
@@ -113,6 +104,18 @@ fn setup() -> World {
         .register_stellar_asset_contract_v2(admin.clone())
         .address();
     let index_tk = Address::generate(&env);
+
+    // Market token (GM)
+    let market_tk = env.register(MarketToken, ());
+    MtClient::new(&env, &market_tk).initialize(
+        &admin,
+        &rs,
+        &7u32,
+        &soroban_sdk::String::from_str(&env, "GMX ETH/USD Market"),
+        &soroban_sdk::String::from_str(&env, "GM"),
+        &long_tk,
+        &short_tk,
+    );
 
     // Handlers
     let dep_handler = env.register(DepositHandler, ());
@@ -216,8 +219,14 @@ fn short_position_lifecycle_winning_short_pays_pnl_from_pool() {
 
     let long_pool_before_open = ds_c.get_u128(&pool_amount_key(env, &w.market_tk, &w.long_tk));
     let short_pool_after_deposit = ds_c.get_u128(&pool_amount_key(env, &w.market_tk, &w.short_tk));
-    assert_eq!(long_pool_before_open, 0, "no long-side liquidity was ever deposited");
-    assert!(short_pool_after_deposit > 0, "short pool must reflect Alice's USDC deposit");
+    assert_eq!(
+        long_pool_before_open, 0,
+        "no long-side liquidity was ever deposited"
+    );
+    assert!(
+        short_pool_after_deposit > 0,
+        "short pool must reflect Alice's USDC deposit"
+    );
 
     // ── Step 2: Bob opens a 5 ETH short (10,000 USD notional) with 1,000 USDC collateral
     StellarAssetClient::new(env, &w.short_tk).mint(&bob, &(1_000 * ONE_TOKEN));
@@ -241,6 +250,7 @@ fn short_position_lifecycle_winning_short_pays_pnl_from_pool() {
             order_type: OrderType::MarketIncrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &open_key);
@@ -255,10 +265,16 @@ fn short_position_lifecycle_winning_short_pays_pnl_from_pool() {
 
     let short_oi_key = open_interest_key(env, &w.market_tk, &w.short_tk, false);
     let short_oi_after_open = ds_c.get_u128(&short_oi_key);
-    assert!(short_oi_after_open > 0, "short OI must reflect the newly opened position");
+    assert!(
+        short_oi_after_open > 0,
+        "short OI must reflect the newly opened position"
+    );
 
     let long_pool_after_open = ds_c.get_u128(&pool_amount_key(env, &w.market_tk, &w.long_tk));
-    assert_eq!(long_pool_after_open, 0, "opening a short must never touch the ETH pool");
+    assert_eq!(
+        long_pool_after_open, 0,
+        "opening a short must never touch the ETH pool"
+    );
 
     // ── Step 3: Price falls to $1,800 — the short is $1,000 in unrealised profit
     set_prices(&w, 1800);
@@ -283,6 +299,7 @@ fn short_position_lifecycle_winning_short_pays_pnl_from_pool() {
             order_type: OrderType::MarketDecrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &close_key);
@@ -291,11 +308,17 @@ fn short_position_lifecycle_winning_short_pays_pnl_from_pool() {
 
     // Position removed from storage.
     let pos_after = OHClient::new(env, &w.ord_handler).get_position(&pos_key);
-    assert!(pos_after.is_none(), "Bob's position must be cleared after full close");
+    assert!(
+        pos_after.is_none(),
+        "Bob's position must be cleared after full close"
+    );
 
     // Short OI decreases to 0.
     let short_oi_after_close = ds_c.get_u128(&short_oi_key);
-    assert_eq!(short_oi_after_close, 0, "short OI must return to 0 after full close");
+    assert_eq!(
+        short_oi_after_close, 0,
+        "short OI must return to 0 after full close"
+    );
 
     // USDC pool decreases by exactly 1,000 (the PnL paid out).
     let short_pool_after_close = ds_c.get_u128(&pool_amount_key(env, &w.market_tk, &w.short_tk));
@@ -308,7 +331,10 @@ fn short_position_lifecycle_winning_short_pays_pnl_from_pool() {
 
     // No ETH pool balance changes — a short uses only USDC.
     let long_pool_after_close = ds_c.get_u128(&pool_amount_key(env, &w.market_tk, &w.long_tk));
-    assert_eq!(long_pool_after_close, 0, "closing a short must never touch the ETH pool");
+    assert_eq!(
+        long_pool_after_close, 0,
+        "closing a short must never touch the ETH pool"
+    );
 
     // Bob receives 1,000 USDC collateral + 1,000 USDC PnL = 2,000 USDC.
     let bob_usdc_after_close = StellarAssetClient::new(env, &w.short_tk).balance(&bob);
@@ -356,6 +382,7 @@ fn short_position_lifecycle_close_pays_delegated_recipient_not_owner() {
             order_type: OrderType::MarketIncrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &open_key);
@@ -368,7 +395,8 @@ fn short_position_lifecycle_close_pays_delegated_recipient_not_owner() {
     set_prices(&w, 1800);
 
     let bob_usdc_before_close = StellarAssetClient::new(env, &w.short_tk).balance(&bob);
-    let cold_wallet_usdc_before_close = StellarAssetClient::new(env, &w.short_tk).balance(&cold_wallet);
+    let cold_wallet_usdc_before_close =
+        StellarAssetClient::new(env, &w.short_tk).balance(&cold_wallet);
 
     // Bob (the position owner) closes, but names cold_wallet as receiver.
     let close_key = OHClient::new(env, &w.ord_handler).create_order(
@@ -387,12 +415,14 @@ fn short_position_lifecycle_close_pays_delegated_recipient_not_owner() {
             order_type: OrderType::MarketDecrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &close_key);
 
     let bob_usdc_after_close = StellarAssetClient::new(env, &w.short_tk).balance(&bob);
-    let cold_wallet_usdc_after_close = StellarAssetClient::new(env, &w.short_tk).balance(&cold_wallet);
+    let cold_wallet_usdc_after_close =
+        StellarAssetClient::new(env, &w.short_tk).balance(&cold_wallet);
 
     assert_eq!(
         bob_usdc_after_close, bob_usdc_before_close,
@@ -441,6 +471,7 @@ fn short_position_lifecycle_losing_short_forfeits_collateral_to_pool() {
             order_type: OrderType::MarketIncrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &open_key);
@@ -451,7 +482,10 @@ fn short_position_lifecycle_losing_short_forfeits_collateral_to_pool() {
         .expect("Bob must have an open short position after MarketIncrease");
 
     let short_oi_key = open_interest_key(env, &w.market_tk, &w.short_tk, false);
-    assert!(ds_c.get_u128(&short_oi_key) > 0, "short OI must reflect the newly opened position");
+    assert!(
+        ds_c.get_u128(&short_oi_key) > 0,
+        "short OI must reflect the newly opened position"
+    );
 
     // ── Step 3: Price RISES to $2,200 — the short is now $1,000 in unrealised loss
     set_prices(&w, 2200);
@@ -478,6 +512,7 @@ fn short_position_lifecycle_losing_short_forfeits_collateral_to_pool() {
             order_type: OrderType::MarketDecrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &close_key);
@@ -486,10 +521,17 @@ fn short_position_lifecycle_losing_short_forfeits_collateral_to_pool() {
 
     // Position removed from storage.
     let pos_after = OHClient::new(env, &w.ord_handler).get_position(&pos_key);
-    assert!(pos_after.is_none(), "Bob's position must be cleared after full close");
+    assert!(
+        pos_after.is_none(),
+        "Bob's position must be cleared after full close"
+    );
 
     // Short OI decreases to 0.
-    assert_eq!(ds_c.get_u128(&short_oi_key), 0, "short OI must return to 0 after full close");
+    assert_eq!(
+        ds_c.get_u128(&short_oi_key),
+        0,
+        "short OI must return to 0 after full close"
+    );
 
     // USDC pool GAINS Bob's forfeited collateral (his $1,000 loss).
     let short_pool_after_close = ds_c.get_u128(&pool_amount_key(env, &w.market_tk, &w.short_tk));

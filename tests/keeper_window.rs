@@ -43,7 +43,11 @@ use oracle::{Oracle, OracleClient as OClient};
 use order_handler::{OrderHandler, OrderHandlerClient as OHClient};
 use order_vault::{OrderVault, OrderVaultClient as OVClient};
 use role_store::{RoleStore, RoleStoreClient as RsClient};
-use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger as _},
+    token::StellarAssetClient,
+    Address, Env,
+};
 
 const ONE_TOKEN: i128 = 10_000_000; // 10^7 (Stellar 7-decimal precision)
 const ONE_USD: i128 = FLOAT_PRECISION;
@@ -92,6 +96,12 @@ fn setup() -> TestWorld {
     let ord_vault = env.register(OrderVault, ());
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
+    // Underlying tokens
+    let long_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let index_tk = Address::generate(&env);
+
     // Market token
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
@@ -100,13 +110,9 @@ fn setup() -> TestWorld {
         &7u32,
         &soroban_sdk::String::from_str(&env, "ETH Market"),
         &soroban_sdk::String::from_str(&env, "GM-ETH"),
+        &long_tk,
+        &long_tk,
     );
-
-    // Underlying tokens
-    let long_tk = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
-    let index_tk = Address::generate(&env);
 
     // Order handler
     let ord_handler = env.register(OrderHandler, ());
@@ -196,7 +202,10 @@ fn seed_pool(w: &TestWorld) {
 /// Open a small long position and execute it; returns the order handler client.
 ///
 /// Used to trigger `record_keeper_activity` so the heartbeat ledger is stamped.
-fn execute_order_at_current_ledger(w: &TestWorld) -> OHClient {
+fn execute_order_at_current_ledger(w: &TestWorld) -> OHClient<'_> {
+    // Oracle prices live in temporary storage and expire across the ledger
+    // jumps these tests make, so publish them at the execution ledger.
+    set_prices(w, 2_000);
     let oh_c = OHClient::new(&w.env, &w.ord_handler);
     let trader = Address::generate(&w.env);
     let collateral = 5 * ONE_TOKEN;
@@ -221,6 +230,8 @@ fn execute_order_at_current_ledger(w: &TestWorld) -> OHClient {
             min_output_amount: 0,
             order_type: OrderType::MarketIncrease,
             is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
     oh_c.execute_order(&w.keeper, &key);
@@ -394,9 +405,7 @@ fn flag_and_revoke_stale_keeper_lifecycle() {
     );
 
     // Advance past the default 2 880-ledger window.
-    w.env
-        .ledger()
-        .set_sequence_number(exec_ledger + 2_880 + 1);
+    w.env.ledger().set_sequence_number(exec_ledger + 2_880 + 1);
 
     // Confirm staleness before flagging.
     assert!(
@@ -465,9 +474,7 @@ fn non_admin_cannot_flag_stale_keeper() {
     let exec_ledger: u32 = 500;
     w.env.ledger().set_sequence_number(exec_ledger);
     execute_order_at_current_ledger(&w);
-    w.env
-        .ledger()
-        .set_sequence_number(exec_ledger + 2_880 + 1);
+    w.env.ledger().set_sequence_number(exec_ledger + 2_880 + 1);
 
     assert!(
         oh_c.check_keeper_heartbeat(&w.ds, &order_keeper_role)

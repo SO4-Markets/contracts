@@ -11,6 +11,11 @@
 //!   CreateOrder, UpdateOrder, CancelOrder,
 //!   ClaimFundingFees
 #![no_std]
+// Retain the raw events().publish() call sites below rather than migrating
+// to #[contractevent] here — that changes on-chain event topic/data encoding,
+// which is an ABI-facing behavioural change out of scope for this fix
+// (issue #529 is compilation-restoration only).
+#![allow(deprecated)]
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{global_pause_key, is_market_paused_key, scheduled_unpause_ledger_key};
@@ -90,6 +95,20 @@ pub enum Error {
     TimelockNotExpired = 6,
     /// `execute_unpause` was called without a prior `schedule_unpause` (issue #282).
     UnpauseNotScheduled = 7,
+    /// `update_withdrawal_handler` was called with a `new_handler` that matches
+    /// the router itself or one of its other registered handlers (issue #635) —
+    /// almost certainly a copy-paste mistake that would silently misroute
+    /// withdrawal calls to a contract with a different interface.
+    InvalidWithdrawalHandler = 8,
+    /// claim_funding_fees (or multicall's ClaimFundingFees action) was called
+    /// with markets.len() != tokens.len() (issue #611) — indexing would
+    /// otherwise panic with a raw Option::unwrap() on None rather than a
+    /// typed error.
+    MismatchedBatchLength = 9,
+    /// multicall's SendTokens action was given `amount <= 0` (issue #731) —
+    /// rejected up front with a typed error instead of surfacing whatever the
+    /// token contract does with a zero or negative transfer.
+    InvalidAmount = 10,
 }
 
 // ─── External handler clients ─────────────────────────────────────────────────
@@ -102,8 +121,14 @@ trait IDataStore {
     fn set_bool(env: Env, caller: Address, key: BytesN<32>, value: bool) -> bool;
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
-    fn set_position_manager(env: Env, caller: Address, market: Address, manager: Address) -> Address;
+    fn set_position_manager(
+        env: Env,
+        caller: Address,
+        market: Address,
+        manager: Address,
+    ) -> Address;
     fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address>;
+    fn remove_position_manager(env: Env, owner: Address, market: Address) -> bool;
 }
 
 #[allow(dead_code)]
@@ -124,7 +149,11 @@ trait IWithdrawalHandler {
 #[soroban_sdk::contractclient(name = "OrderHandlerClient")]
 trait IOrderHandler {
     fn create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32>;
-    fn create_orders(env: Env, caller: Address, requests: Vec<CreateOrderParams>) -> Vec<BytesN<32>>;
+    fn create_orders(
+        env: Env,
+        caller: Address,
+        requests: Vec<CreateOrderParams>,
+    ) -> Vec<BytesN<32>>;
     fn update_order(
         env: Env,
         caller: Address,
@@ -142,6 +171,21 @@ trait IOrderHandler {
 trait IFeeHandler {
     fn claim_funding_fees(env: Env, account: Address, market: Address, token: Address) -> u128;
     fn set_ui_fee_factor(env: Env, ui_receiver: Address, factor: u128);
+}
+
+/// Maximum number of actions allowed in a single `multicall` batch.
+const MAX_MULTICALL_BATCH_SIZE: u32 = 20;
+
+// ─── Private storage helper ───────────────────────────────────────────────────
+
+/// Read a handler address from instance storage, trapping with NotInitialized
+/// instead of a bare unwrap() panic. Centralises all 9 former panic sites
+/// (issue #1163).
+fn load_handler(env: &Env, key: InstanceKey) -> Address {
+    env.storage()
+        .instance()
+        .get(&key)
+        .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized))
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -203,6 +247,8 @@ impl ExchangeRouter {
     }
 
     /// Update the withdrawal_handler address. Only the stored admin may call this.
+    /// Rejects the router's own address and its other registered handler addresses
+    /// as a basic sanity check against copy-paste misconfiguration (issue #635).
     pub fn update_withdrawal_handler(env: Env, caller: Address, new_handler: Address) {
         caller.require_auth();
         let admin: Address = env
@@ -213,9 +259,126 @@ impl ExchangeRouter {
         if caller != admin {
             panic_with_error!(&env, Error::Unauthorized);
         }
+        if new_handler == env.current_contract_address() {
+            panic_with_error!(&env, Error::InvalidWithdrawalHandler);
+        }
+        for key in [
+            InstanceKey::DepositHandler,
+            InstanceKey::OrderHandler,
+            InstanceKey::FeeHandler,
+        ] {
+            if let Some(other) = env.storage().instance().get::<_, Address>(&key) {
+                if other == new_handler {
+                    panic_with_error!(&env, Error::InvalidWithdrawalHandler);
+                }
+            }
+        }
         env.storage()
             .instance()
             .set(&InstanceKey::WithdrawalHandler, &new_handler);
+        // Issue #606: re-pointing the withdrawal handler is a high-impact
+        // admin action — emit an event so off-chain monitoring has an audit
+        // trail, matching schedule_unpause's existing pattern in this file.
+        env.events()
+            .publish((soroban_sdk::symbol_short!("wth_hdlr"),), new_handler);
+    }
+
+    /// Update the deposit_handler address. Only the stored admin may call this.
+    /// Rejects the router's own address and its other registered handler addresses
+    /// as a basic sanity check against copy-paste misconfiguration.
+    pub fn update_deposit_handler(env: Env, caller: Address, new_handler: Address) {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if caller != admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        if new_handler == env.current_contract_address() {
+            panic_with_error!(&env, Error::InvalidWithdrawalHandler);
+        }
+        for key in [
+            InstanceKey::WithdrawalHandler,
+            InstanceKey::OrderHandler,
+            InstanceKey::FeeHandler,
+        ] {
+            if let Some(other) = env.storage().instance().get::<_, Address>(&key) {
+                if other == new_handler {
+                    panic_with_error!(&env, Error::InvalidWithdrawalHandler);
+                }
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&InstanceKey::DepositHandler, &new_handler);
+        env.events()
+            .publish((soroban_sdk::symbol_short!("dep_hdlr"),), new_handler);
+    }
+
+    /// Update the order_handler address. Only the stored admin may call this.
+    pub fn update_order_handler(env: Env, caller: Address, new_handler: Address) {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if caller != admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        if new_handler == env.current_contract_address() {
+            panic_with_error!(&env, Error::InvalidWithdrawalHandler);
+        }
+        for key in [
+            InstanceKey::DepositHandler,
+            InstanceKey::WithdrawalHandler,
+            InstanceKey::FeeHandler,
+        ] {
+            if let Some(other) = env.storage().instance().get::<_, Address>(&key) {
+                if other == new_handler {
+                    panic_with_error!(&env, Error::InvalidWithdrawalHandler);
+                }
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&InstanceKey::OrderHandler, &new_handler);
+        env.events()
+            .publish((soroban_sdk::symbol_short!("ord_hdlr"),), new_handler);
+    }
+
+    /// Update the fee_handler address. Only the stored admin may call this.
+    pub fn update_fee_handler(env: Env, caller: Address, new_handler: Address) {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if caller != admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        if new_handler == env.current_contract_address() {
+            panic_with_error!(&env, Error::InvalidWithdrawalHandler);
+        }
+        for key in [
+            InstanceKey::DepositHandler,
+            InstanceKey::WithdrawalHandler,
+            InstanceKey::OrderHandler,
+        ] {
+            if let Some(other) = env.storage().instance().get::<_, Address>(&key) {
+                if other == new_handler {
+                    panic_with_error!(&env, Error::InvalidWithdrawalHandler);
+                }
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&InstanceKey::FeeHandler, &new_handler);
+        env.events()
+            .publish((soroban_sdk::symbol_short!("fee_hdlr"),), new_handler);
     }
 
     /// Default timelock for unpausing: ~4 hours at 5 s/ledger (issue #282).
@@ -232,11 +395,7 @@ impl ExchangeRouter {
             .get(&InstanceKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         admin.require_auth();
-        let data_store: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::DataStore)
-            .unwrap();
+        let data_store = load_handler(&env, InstanceKey::DataStore);
         let ds = DataStoreClient::new(&env, &data_store);
         ds.set_bool(
             &env.current_contract_address(),
@@ -244,13 +403,22 @@ impl ExchangeRouter {
             &paused,
         );
         // Clear any pending unpause schedule when re-pausing.
+        let mut cleared_schedule = false;
         if paused {
             ds.set_u128(
                 &env.current_contract_address(),
                 &scheduled_unpause_ledger_key(&env),
                 &0,
             );
+            cleared_schedule = true;
         }
+        // Issue #606: pausing the entire protocol is one of the highest-impact
+        // admin actions available — emit an event so off-chain monitoring has
+        // an audit trail, matching schedule_unpause's existing pattern below.
+        env.events().publish(
+            (soroban_sdk::symbol_short!("paused"),),
+            (paused, cleared_schedule),
+        );
     }
 
     /// Schedule an unpause after `UNPAUSE_TIMELOCK_LEDGERS` ledgers (issue #282).
@@ -265,22 +433,15 @@ impl ExchangeRouter {
             .get(&InstanceKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         admin.require_auth();
-        let data_store: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::DataStore)
-            .unwrap();
-        let scheduled_at =
-            (env.ledger().sequence() + Self::UNPAUSE_TIMELOCK_LEDGERS) as u128;
+        let data_store = load_handler(&env, InstanceKey::DataStore);
+        let scheduled_at = (env.ledger().sequence() + Self::UNPAUSE_TIMELOCK_LEDGERS) as u128;
         DataStoreClient::new(&env, &data_store).set_u128(
             &env.current_contract_address(),
             &scheduled_unpause_ledger_key(&env),
             &scheduled_at,
         );
-        env.events().publish(
-            (soroban_sdk::symbol_short!("unpause_s"),),
-            scheduled_at,
-        );
+        env.events()
+            .publish((soroban_sdk::symbol_short!("unpause_s"),), scheduled_at);
     }
 
     /// Execute a previously scheduled unpause if the timelock has expired (issue #282).
@@ -295,16 +456,11 @@ impl ExchangeRouter {
             .get(&InstanceKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         admin.require_auth();
-        let data_store: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::DataStore)
-            .unwrap();
+        let data_store = load_handler(&env, InstanceKey::DataStore);
         let ds = DataStoreClient::new(&env, &data_store);
         let router = env.current_contract_address();
 
-        let scheduled =
-            ds.get_u128(&scheduled_unpause_ledger_key(&env));
+        let scheduled = ds.get_u128(&scheduled_unpause_ledger_key(&env));
         if scheduled == 0 {
             panic_with_error!(&env, Error::UnpauseNotScheduled);
         }
@@ -324,11 +480,7 @@ impl ExchangeRouter {
             .get(&InstanceKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         admin.require_auth();
-        let data_store: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::DataStore)
-            .unwrap();
+        let data_store = load_handler(&env, InstanceKey::DataStore);
         DataStoreClient::new(&env, &data_store).set_bool(
             &env.current_contract_address(),
             &is_market_paused_key(&env, &market),
@@ -360,7 +512,15 @@ impl ExchangeRouter {
     /// double require_auth() within the same invocation frame, which Soroban rejects.
     pub fn multicall(env: Env, caller: Address, actions: Vec<RouterAction>) -> Vec<BytesN<32>> {
         caller.require_auth();
-        Self::require_not_paused(&env);
+
+        if actions.len() > MAX_MULTICALL_BATCH_SIZE {
+            panic_with_error!(&env, Error::BatchSizeLimitExceeded);
+        }
+
+        // Issue #453: cancellations must always be available while paused, matching
+        // the standalone cancel_* wrappers' tested behavior. The pause check is
+        // applied per-action inside the dispatch loop below instead of as one
+        // blanket gate here, explicitly skipped for the three cancel actions.
 
         let deposit_handler: Address = env
             .storage()
@@ -389,37 +549,53 @@ impl ExchangeRouter {
         let len = actions.len();
         let mut i = 0u32;
         while i < len {
+            // Emit a diagnostic event before each action so that if the
+            // sub-call traps the host error log names the failing index
+            // (issue #1163 — CLOB-068 "stop reasons" pattern).
+            env.events()
+                .publish((soroban_sdk::symbol_short!("mc_begin"),), i);
+            // SAFETY: i < len, so get() always returns Some.
             let action = actions.get(i).unwrap();
             match action {
                 RouterAction::SendTokens(p) => {
+                    Self::require_not_paused(&env);
+                    if p.amount <= 0 {
+                        panic_with_error!(&env, Error::InvalidAmount);
+                    }
                     token::Client::new(&env, &p.token).transfer(&caller, &p.receiver, &p.amount);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateDeposit(p) => {
+                    Self::require_not_paused(&env);
                     let key = DepositHandlerClient::new(&env, &deposit_handler)
                         .create_deposit(&caller, &p);
                     results.push_back(key);
                 }
                 RouterAction::CancelDeposit(key) => {
+                    // Issue #453: cancellations must always be available while paused.
                     DepositHandlerClient::new(&env, &deposit_handler).cancel_deposit(&caller, &key);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateWithdrawal(p) => {
+                    Self::require_not_paused(&env);
                     let key = WithdrawalHandlerClient::new(&env, &withdrawal_handler)
                         .create_withdrawal(&caller, &p);
                     results.push_back(key);
                 }
                 RouterAction::CancelWithdrawal(key) => {
+                    // Issue #453: cancellations must always be available while paused.
                     WithdrawalHandlerClient::new(&env, &withdrawal_handler)
                         .cancel_withdrawal(&caller, &key);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateOrder(p) => {
+                    Self::require_not_paused(&env);
                     let key =
                         OrderHandlerClient::new(&env, &order_handler).create_order(&caller, &p);
                     results.push_back(key);
                 }
                 RouterAction::UpdateOrder(p) => {
+                    Self::require_not_paused(&env);
                     OrderHandlerClient::new(&env, &order_handler).update_order(
                         &caller,
                         &p.key,
@@ -431,10 +607,14 @@ impl ExchangeRouter {
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CancelOrder(key) => {
+                    // Issue #453: cancellations must always be available while paused.
                     OrderHandlerClient::new(&env, &order_handler).cancel_order(&caller, &key);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::ClaimFundingFees(p) => {
+                    if p.markets.len() != p.tokens.len() {
+                        panic_with_error!(&env, Error::MismatchedBatchLength);
+                    }
                     let fee_client = FeeHandlerClient::new(&env, &fee_handler);
                     let mlen = p.markets.len();
                     let mut mi = 0u32;
@@ -456,13 +636,17 @@ impl ExchangeRouter {
     }
 
     // ── Individual action helpers ─────────────────────────────────────────────
-
-    /// Transfer `amount` of `token` from caller to `receiver` (funds a vault).
-    pub fn send_tokens(env: Env, caller: Address, token: Address, receiver: Address, amount: i128) {
-        caller.require_auth();
-        Self::require_not_paused(&env);
-        token::Client::new(&env, &token).transfer(&caller, &receiver, &amount);
-    }
+    //
+    // Issue #452: `send_tokens`, `create_order`, and `create_orders` are
+    // deliberately NOT exposed as standalone entrypoints here. order_vault's
+    // `record_transfer_in` attributes its balance delta to whoever calls
+    // create_order/create_orders next, regardless of who actually sent the
+    // tokens — if funding and order-creation were separate, separately-callable
+    // transactions, any address could "steal" another user's just-sent
+    // collateral by racing to call create_order first. Routing both steps
+    // through `multicall` (atomic, single caller, single transaction) is the
+    // only supported path for increase/swap orders. Decrease/cancel/update
+    // actions, which never take fresh collateral, remain available standalone.
 
     /// Forward create_deposit to the deposit_handler.
     pub fn create_deposit(env: Env, caller: Address, params: CreateDepositParams) -> BytesN<32> {
@@ -495,83 +679,22 @@ impl ExchangeRouter {
     ) -> BytesN<32> {
         caller.require_auth();
         Self::require_not_paused(&env);
-        let withdrawal_handler: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::WithdrawalHandler)
-            .unwrap();
+        let withdrawal_handler = load_handler(&env, InstanceKey::WithdrawalHandler);
         WithdrawalHandlerClient::new(&env, &withdrawal_handler).create_withdrawal(&caller, &params)
     }
 
     /// Forward cancel_withdrawal to the withdrawal_handler.
     pub fn cancel_withdrawal(env: Env, caller: Address, key: BytesN<32>) {
         caller.require_auth();
-        let withdrawal_handler: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::WithdrawalHandler)
-            .unwrap();
+        let withdrawal_handler = load_handler(&env, InstanceKey::WithdrawalHandler);
         WithdrawalHandlerClient::new(&env, &withdrawal_handler).cancel_withdrawal(&caller, &key);
-    }
-
-    /// Forward create_order to the order_handler.
-    ///
-    /// # Required multicall sequence for increase / swap order types
-    ///
-    /// The protocol's canonical collateral model (issue #47) requires that
-    /// the caller pushes tokens into order_vault **before** this action runs.
-    /// Use `SendTokens` with `receiver = order_vault` as the immediately
-    /// preceding step in the same multicall:
-    ///
-    /// ```text
-    /// multicall([
-    ///   SendTokens { token: collateral_token, receiver: order_vault, amount },
-    ///   CreateOrder { params },   ← order_handler snapshots the delta here
-    /// ])
-    /// ```
-    ///
-    /// Omitting `SendTokens` causes order_handler to revert with `ZeroCollateral`.
-    /// Decrease / stop-loss / liquidation orders do not require a prior token send.
-    pub fn create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32> {
-        caller.require_auth();
-        Self::require_not_paused(&env);
-        let order_handler: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::OrderHandler)
-            .unwrap();
-        OrderHandlerClient::new(&env, &order_handler).create_order(&caller, &params)
-    }
-
-    /// Create up to 5 orders atomically in a single call (issue #219).
-    ///
-    /// For increase/swap orders in the batch the caller must pre-fund the
-    /// order_vault via `SendTokens` before this call (one send per increase/swap leg).
-    /// Any failure reverts the entire batch (Soroban atomicity).
-    pub fn create_orders(
-        env: Env,
-        caller: Address,
-        requests: Vec<CreateOrderParams>,
-    ) -> Vec<BytesN<32>> {
-        caller.require_auth();
-        Self::require_not_paused(&env);
-        let order_handler: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::OrderHandler)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        OrderHandlerClient::new(&env, &order_handler).create_orders(&caller, &requests)
     }
 
     /// Forward update_order to the order_handler.
     pub fn update_order(env: Env, caller: Address, params: UpdateOrderParams) {
         caller.require_auth();
         Self::require_not_paused(&env);
-        let order_handler: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::OrderHandler)
-            .unwrap();
+        let order_handler = load_handler(&env, InstanceKey::OrderHandler);
         OrderHandlerClient::new(&env, &order_handler).update_order(
             &caller,
             &params.key,
@@ -585,11 +708,7 @@ impl ExchangeRouter {
     /// Forward cancel_order to the order_handler.
     pub fn cancel_order(env: Env, caller: Address, key: BytesN<32>) {
         caller.require_auth();
-        let order_handler: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::OrderHandler)
-            .unwrap();
+        let order_handler = load_handler(&env, InstanceKey::OrderHandler);
         OrderHandlerClient::new(&env, &order_handler).cancel_order(&caller, &key);
     }
 
@@ -601,11 +720,10 @@ impl ExchangeRouter {
         tokens: Vec<Address>,
     ) {
         caller.require_auth();
-        let fee_handler: Address = env
-            .storage()
-            .instance()
-            .get(&InstanceKey::FeeHandler)
-            .unwrap();
+        if markets.len() != tokens.len() {
+            panic_with_error!(&env, Error::MismatchedBatchLength);
+        }
+        let fee_handler = load_handler(&env, InstanceKey::FeeHandler);
         let fee_client = FeeHandlerClient::new(&env, &fee_handler);
         let len = markets.len();
         let mut i = 0u32;
@@ -619,16 +737,18 @@ impl ExchangeRouter {
         }
     }
 
-    /// Set or revoke a position manager for the caller on a specific market.
+    /// Set a position manager for the caller on a specific market.
     ///
     /// A position manager is authorized to create, increase, decrease, or close
     /// positions on behalf of the owner, but cannot redirect collateral receipts.
     /// The manager cannot override the receiver — funds always go to the owner.
     ///
-    /// Call with zero_address to revoke an existing manager.
+    /// Revoke an existing manager with remove_position_manager.
     pub fn set_position_manager(env: Env, caller: Address, market: Address, manager: Address) {
         caller.require_auth();
-        let data_store: Address = env.storage().instance()
+        let data_store: Address = env
+            .storage()
+            .instance()
             .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let data_store_client = DataStoreClient::new(&env, &data_store);
@@ -637,11 +757,26 @@ impl ExchangeRouter {
 
     /// Query the current position manager for an account on a specific market.
     pub fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address> {
-        let data_store: Address = env.storage().instance()
+        let data_store: Address = env
+            .storage()
+            .instance()
             .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let data_store_client = DataStoreClient::new(&env, &data_store);
         data_store_client.get_position_manager(&owner, &market)
+    }
+
+    /// Revoke the caller's position manager on a specific market. Only the
+    /// owner can call this; get_position_manager returns None afterwards.
+    pub fn remove_position_manager(env: Env, caller: Address, market: Address) -> bool {
+        caller.require_auth();
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let data_store_client = DataStoreClient::new(&env, &data_store);
+        data_store_client.remove_position_manager(&caller, &market)
     }
 
     /// Set the UI fee factor for a receiver. Delegates auth enforcement to fee_handler.
@@ -680,6 +815,7 @@ mod tests {
     use data_store::{DataStore, DataStoreClient as DsClient};
     use deposit_handler::{DepositHandler, DepositHandlerClient};
     use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
+    use fee_handler::{FeeHandler, FeeHandlerClient as FhClient};
     use gmx_keys::roles;
     use gmx_math::FLOAT_PRECISION;
     use gmx_types::{
@@ -699,6 +835,7 @@ mod tests {
 
     // ── Issue #101: shared full-protocol harness ──────────────────────────────
 
+    #[allow(dead_code)]
     struct World {
         env: Env,
         admin: Address,
@@ -756,16 +893,6 @@ mod tests {
         let ord_vault = env.register(OrderVault, ());
         OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
-        // Market token (LP token + pool custodian)
-        let market_tk = env.register(MarketToken, ());
-        MtClient::new(&env, &market_tk).initialize(
-            &admin,
-            &rs,
-            &7u32,
-            &soroban_sdk::String::from_str(&env, "SO4 Market"),
-            &soroban_sdk::String::from_str(&env, "GM"),
-        );
-
         // Underlying tokens
         let long_tk = env
             .register_stellar_asset_contract_v2(admin.clone())
@@ -774,6 +901,18 @@ mod tests {
             .register_stellar_asset_contract_v2(admin.clone())
             .address();
         let index_tk = Address::generate(&env);
+
+        // Market token (LP token + pool custodian)
+        let market_tk = env.register(MarketToken, ());
+        MtClient::new(&env, &market_tk).initialize(
+            &admin,
+            &rs,
+            &7u32,
+            &soroban_sdk::String::from_str(&env, "SO4 Market"),
+            &soroban_sdk::String::from_str(&env, "GM"),
+            &long_tk,
+            &short_tk,
+        );
 
         // Handlers
         let dep_handler = env.register(DepositHandler, ());
@@ -963,6 +1102,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         hc.execute_order(&w.keeper, &key);
@@ -1133,6 +1273,7 @@ mod tests {
                 order_type: OrderType::MarketDecrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             },
         );
         OHClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &close_key);
@@ -1344,7 +1485,10 @@ mod tests {
             },
         );
 
-        assert!(result.is_err(), "create_deposit must fail with Paused error");
+        assert!(
+            result.is_err(),
+            "create_deposit must fail with Paused error"
+        );
 
         // No tokens should have moved — user still holds everything
         let user_bal = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&user);
@@ -1394,7 +1538,84 @@ mod tests {
             "deposit must be gone after cancel"
         );
         let balance = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&user);
-        assert_eq!(balance, ONE_TOKEN, "tokens must be refunded after cancel while paused");
+        assert_eq!(
+            balance, ONE_TOKEN,
+            "tokens must be refunded after cancel while paused"
+        );
+    }
+
+    /// Issue #453: multicall's pause check must not block a CancelDeposit action,
+    /// matching the standalone cancel_deposit wrapper's whitelisted behavior.
+    #[test]
+    fn multicall_cancel_deposit_succeeds_when_paused() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &ONE_TOKEN);
+
+        let key = DepositHandlerClient::new(&w.env, &w.dep_handler).create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: ONE_TOKEN,
+                short_token_amount: 0,
+                min_market_tokens: 0,
+                execution_fee: 0,
+            },
+        );
+
+        let router = ExchangeRouterClient::new(&w.env, &w.router);
+        router.set_paused(&true);
+
+        router.multicall(
+            &user,
+            &Vec::from_array(&w.env, [RouterAction::CancelDeposit(key.clone())]),
+        );
+
+        assert!(
+            DepositHandlerClient::new(&w.env, &w.dep_handler)
+                .get_deposit(&key)
+                .is_none(),
+            "deposit must be gone after multicall cancel while paused"
+        );
+        let balance = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&user);
+        assert_eq!(
+            balance, ONE_TOKEN,
+            "tokens must be refunded after multicall cancel while paused"
+        );
+    }
+
+    /// A multicall containing a state-creating action must still revert while
+    /// paused — only the cancel/claim actions are whitelisted.
+    #[test]
+    #[should_panic]
+    fn multicall_create_deposit_reverts_when_paused() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &ONE_TOKEN);
+
+        let router = ExchangeRouterClient::new(&w.env, &w.router);
+        router.set_paused(&true);
+
+        router.multicall(
+            &user,
+            &Vec::from_array(
+                &w.env,
+                [RouterAction::CreateDeposit(CreateDepositParams {
+                    receiver: user.clone(),
+                    market: w.market_tk.clone(),
+                    initial_long_token: w.long_tk.clone(),
+                    initial_short_token: w.short_tk.clone(),
+                    long_token_amount: ONE_TOKEN,
+                    short_token_amount: 0,
+                    min_market_tokens: 0,
+                    execution_fee: 0,
+                })],
+            ),
+        );
     }
 
     // ── Issue #135: Router multicall E2E tests ────────────────────────────────
@@ -1448,6 +1669,7 @@ mod tests {
                 order_type: OrderType::MarketIncrease,
                 is_long: true,
                 expiry_ledger: None,
+                on_behalf_of: None,
             }),
         ];
 
@@ -1549,5 +1771,548 @@ mod tests {
             vault_bal, 0,
             "order_vault must hold nothing after multicall reverts"
         );
+    }
+
+    // ── Issue #611: claim_funding_fees mismatched batch lengths ───────────────
+
+    /// claim_funding_fees must reject mismatched markets/tokens lengths with a
+    /// typed error instead of panicking on a raw Option::unwrap().
+    #[test]
+    #[should_panic]
+    fn claim_funding_fees_rejects_mismatched_lengths() {
+        let w = setup();
+        let trader = Address::generate(&w.env);
+        let router_client = ExchangeRouterClient::new(&w.env, &w.router);
+        router_client.claim_funding_fees(
+            &trader,
+            &Vec::from_array(&w.env, [w.market_tk.clone(), w.market_tk.clone()]),
+            &Vec::from_array(&w.env, [w.long_tk.clone()]),
+        );
+    }
+
+    /// multicall's ClaimFundingFees action must reject mismatched
+    /// markets/tokens lengths the same way the standalone function does.
+    #[test]
+    #[should_panic]
+    fn multicall_claim_funding_fees_rejects_mismatched_lengths() {
+        let w = setup();
+        let trader = Address::generate(&w.env);
+        let router_client = ExchangeRouterClient::new(&w.env, &w.router);
+        let actions = soroban_sdk::vec![
+            &w.env,
+            RouterAction::ClaimFundingFees(ClaimFundingFeesParams {
+                markets: Vec::from_array(&w.env, [w.market_tk.clone(), w.market_tk.clone()]),
+                tokens: Vec::from_array(&w.env, [w.long_tk.clone()]),
+            }),
+        ];
+        router_client.multicall(&trader, &actions);
+    }
+
+    // ── Issue #639: position_manager / ui_fee_factor pass-through coverage ─────
+
+    /// set_position_manager/get_position_manager round-trip through the
+    /// router to data_store, mirroring data_store's own storage.
+    #[test]
+    fn position_manager_round_trips_through_router() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let rs = env.register(RoleStore, ());
+        RsClient::new(&env, &rs).initialize(&admin);
+        let ds = env.register(DataStore, ());
+        DsClient::new(&env, &ds).initialize(&admin, &rs);
+
+        let dep_handler = Address::generate(&env);
+        let wth_handler = Address::generate(&env);
+        let ord_handler = Address::generate(&env);
+        let fee_handler = Address::generate(&env);
+        let router = env.register(ExchangeRouter, ());
+        ExchangeRouterClient::new(&env, &router).initialize(
+            &admin,
+            &rs,
+            &ds,
+            &dep_handler,
+            &wth_handler,
+            &ord_handler,
+            &fee_handler,
+        );
+
+        let owner = Address::generate(&env);
+        let market = Address::generate(&env);
+        let manager = Address::generate(&env);
+        let router_client = ExchangeRouterClient::new(&env, &router);
+
+        assert_eq!(
+            router_client.get_position_manager(&owner, &market),
+            None,
+            "no manager set yet"
+        );
+        router_client.set_position_manager(&owner, &market, &manager);
+        assert_eq!(
+            router_client.get_position_manager(&owner, &market),
+            Some(manager),
+            "router must forward to the same data_store entry get_position_manager reads"
+        );
+
+        // Revocation through the router must clear the same data_store entry.
+        assert!(router_client.remove_position_manager(&owner, &market));
+        assert_eq!(
+            router_client.get_position_manager(&owner, &market),
+            None,
+            "revoked manager must read back as None"
+        );
+    }
+
+    /// set_ui_fee_factor forwards to fee_handler and the value is readable back.
+    #[test]
+    fn set_ui_fee_factor_forwards_to_fee_handler() {
+        let env = Env::default();
+        // The router forwards to fee_handler without itself requiring the
+        // caller's auth, so fee_handler's admin.require_auth() is a non-root
+        // authorization from the router call's perspective.
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let admin = Address::generate(&env);
+        let rs = env.register(RoleStore, ());
+        let rs_c = RsClient::new(&env, &rs);
+        rs_c.initialize(&admin);
+        let ds = env.register(DataStore, ());
+        DsClient::new(&env, &ds).initialize(&admin, &rs);
+        let fh = env.register(FeeHandler, ());
+        FhClient::new(&env, &fh).initialize(&admin, &rs, &ds);
+        // fee_handler writes the factor into data_store as itself, so it
+        // needs CONTROLLER (mirrors every other handler's own test setup).
+        rs_c.grant_role(&admin, &fh, &roles::controller(&env));
+
+        let dep_handler = Address::generate(&env);
+        let wth_handler = Address::generate(&env);
+        let ord_handler = Address::generate(&env);
+        let router = env.register(ExchangeRouter, ());
+        ExchangeRouterClient::new(&env, &router).initialize(
+            &admin,
+            &rs,
+            &ds,
+            &dep_handler,
+            &wth_handler,
+            &ord_handler,
+            &fh,
+        );
+
+        let ui_recv = Address::generate(&env);
+        let factor: u128 = FLOAT_PRECISION as u128 / 100; // 1%
+        ExchangeRouterClient::new(&env, &router).set_ui_fee_factor(&ui_recv, &factor);
+
+        assert_eq!(
+            FhClient::new(&env, &fh).get_ui_fee_factor(&ui_recv),
+            factor,
+            "router's set_ui_fee_factor must reach fee_handler's stored factor"
+        );
+    }
+
+    /// set_ui_fee_factor reverts for a non-admin caller — the router forwards
+    /// the call, but fee_handler's own stored-admin check still applies.
+    #[test]
+    #[should_panic]
+    fn set_ui_fee_factor_non_admin_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let rs = env.register(RoleStore, ());
+        RsClient::new(&env, &rs).initialize(&admin);
+        let ds = env.register(DataStore, ());
+        DsClient::new(&env, &ds).initialize(&admin, &rs);
+        let fh = env.register(FeeHandler, ());
+        FhClient::new(&env, &fh).initialize(&admin, &rs, &ds);
+
+        let dep_handler = Address::generate(&env);
+        let wth_handler = Address::generate(&env);
+        let ord_handler = Address::generate(&env);
+        let router = env.register(ExchangeRouter, ());
+        ExchangeRouterClient::new(&env, &router).initialize(
+            &admin,
+            &rs,
+            &ds,
+            &dep_handler,
+            &wth_handler,
+            &ord_handler,
+            &fh,
+        );
+
+        // Disable auth mocking for the call under test: with no authorization
+        // entries provided, fee_handler's admin.require_auth() must reject it.
+        env.set_auths(&[]);
+        let ui_recv = Address::generate(&env);
+        ExchangeRouterClient::new(&env, &router).set_ui_fee_factor(&ui_recv, &100u128);
+    }
+
+    #[test]
+    fn schedule_unpause_records_timelocked_ledger() {
+        let w = setup();
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        let now = w.env.ledger().sequence();
+
+        ExchangeRouterClient::new(&w.env, &w.router).schedule_unpause();
+
+        assert_eq!(
+            ds_c.get_u128(&scheduled_unpause_ledger_key(&w.env)),
+            (now + ExchangeRouter::UNPAUSE_TIMELOCK_LEDGERS) as u128
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")] // TimelockNotExpired
+    fn test_execute_unpause_premature() {
+        let w = setup();
+        let client = ExchangeRouterClient::new(&w.env, &w.router);
+        client.schedule_unpause();
+        client.execute_unpause();
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #7)")] // UnpauseNotScheduled
+    fn execute_unpause_without_schedule_reverts() {
+        let w = setup();
+        ExchangeRouterClient::new(&w.env, &w.router).execute_unpause();
+    }
+
+    #[test]
+    fn execute_unpause_clears_pause_when_ready() {
+        use soroban_sdk::testutils::Ledger as _;
+        let w = setup();
+        let client = ExchangeRouterClient::new(&w.env, &w.router);
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_bool(&w.admin, &global_pause_key(&w.env), &true);
+
+        client.schedule_unpause();
+        let scheduled = ds_c.get_u128(&scheduled_unpause_ledger_key(&w.env)) as u32;
+        w.env.ledger().with_mut(|li| li.sequence_number = scheduled);
+        client.execute_unpause();
+
+        assert!(!ds_c.get_bool(&global_pause_key(&w.env)));
+        assert_eq!(ds_c.get_u128(&scheduled_unpause_ledger_key(&w.env)), 0);
+    }
+
+    #[test]
+    fn reset_circuit_breaker_unpauses_market() {
+        let w = setup();
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        let key = is_market_paused_key(&w.env, &w.market_tk);
+        ds_c.set_bool(&w.admin, &key, &true);
+
+        ExchangeRouterClient::new(&w.env, &w.router).reset_circuit_breaker(&w.market_tk);
+
+        assert!(!ds_c.get_bool(&key));
+    }
+
+    fn create_pending_order(
+        w: &World,
+        user: &Address,
+        collateral: i128,
+        order_type: OrderType,
+        trigger_price: i128,
+    ) -> BytesN<32> {
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(user, &collateral);
+        soroban_sdk::token::Client::new(&w.env, &w.long_tk).transfer(
+            user,
+            &w.ord_vault,
+            &collateral,
+        );
+        OHClient::new(&w.env, &w.ord_handler).create_order(
+            user,
+            &CreateOrderParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: soroban_sdk::Vec::new(&w.env),
+                size_delta_usd: 4_000 * FLOAT_PRECISION,
+                collateral_delta_amount: collateral,
+                trigger_price,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type,
+                is_long: true,
+                expiry_ledger: None,
+                on_behalf_of: None,
+            },
+        )
+    }
+
+    fn setup_with_pause_flag() -> World {
+        let w = setup();
+        let ds_c = DsClient::new(&w.env, &w.ds);
+        ds_c.set_bool(&w.admin, &gmx_keys::global_pause_key(&w.env), &false);
+        ds_c.set_bool(
+            &w.admin,
+            &gmx_keys::is_market_paused_key(&w.env, &w.market_tk),
+            &false,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::min_deposit_usd_key(&w.env, &w.market_tk),
+            &0,
+        );
+        ds_c.set_u128(&w.admin, &gmx_keys::max_swap_path_length_key(&w.env), &5);
+        w
+    }
+
+    #[test]
+    fn standalone_cancel_order_forwards_to_handler() {
+        let w = setup_with_pause_flag();
+        let fp = FLOAT_PRECISION;
+        let trader = Address::generate(&w.env);
+        set_prices(&w, 2_000 * fp);
+
+        let key = create_pending_order(&w, &trader, ONE_TOKEN, OrderType::MarketIncrease, 0);
+        let tk = soroban_sdk::token::Client::new(&w.env, &w.long_tk);
+        assert_eq!(
+            tk.balance(&trader),
+            0,
+            "collateral sits in vault before cancel"
+        );
+
+        ExchangeRouterClient::new(&w.env, &w.router).cancel_order(&trader, &key);
+
+        assert!(
+            OHClient::new(&w.env, &w.ord_handler)
+                .get_order(&key)
+                .is_none(),
+            "order must be removed after standalone cancel_order"
+        );
+        assert_eq!(
+            tk.balance(&trader),
+            ONE_TOKEN,
+            "collateral must be refunded"
+        );
+    }
+
+    #[test]
+    fn standalone_cancel_order_succeeds_when_paused() {
+        let w = setup_with_pause_flag();
+        let trader = Address::generate(&w.env);
+        set_prices(&w, 2_000 * FLOAT_PRECISION);
+
+        let key = create_pending_order(&w, &trader, ONE_TOKEN, OrderType::MarketIncrease, 0);
+        let router = ExchangeRouterClient::new(&w.env, &w.router);
+        router.set_paused(&true);
+        router.cancel_order(&trader, &key);
+
+        assert!(OHClient::new(&w.env, &w.ord_handler)
+            .get_order(&key)
+            .is_none());
+    }
+
+    #[test]
+    fn standalone_cancel_order_wrong_caller_fails() {
+        let w = setup_with_pause_flag();
+        let trader = Address::generate(&w.env);
+        let attacker = Address::generate(&w.env);
+        set_prices(&w, 2_000 * FLOAT_PRECISION);
+
+        let key = create_pending_order(&w, &trader, ONE_TOKEN, OrderType::MarketIncrease, 0);
+        let res = ExchangeRouterClient::new(&w.env, &w.router).try_cancel_order(&attacker, &key);
+        assert!(res.is_err(), "non-owner cancel must revert");
+        assert!(OHClient::new(&w.env, &w.ord_handler)
+            .get_order(&key)
+            .is_some());
+    }
+
+    #[test]
+    fn standalone_update_order_forwards_to_handler() {
+        let w = setup_with_pause_flag();
+        let fp = FLOAT_PRECISION;
+        let trader = Address::generate(&w.env);
+        set_prices(&w, 2_000 * fp);
+
+        let key =
+            create_pending_order(&w, &trader, ONE_TOKEN, OrderType::LimitIncrease, 1_900 * fp);
+
+        let new_size = 2_000 * fp;
+        let new_trigger = 1_800 * fp;
+        ExchangeRouterClient::new(&w.env, &w.router).update_order(
+            &trader,
+            &UpdateOrderParams {
+                key: key.clone(),
+                size_delta_usd: new_size,
+                acceptable_price: 0,
+                trigger_price: new_trigger,
+                min_output_amount: 0,
+            },
+        );
+
+        let order = OHClient::new(&w.env, &w.ord_handler)
+            .get_order(&key)
+            .expect("order must still exist after update");
+        assert_eq!(order.size_delta_usd, new_size);
+        assert_eq!(order.trigger_price, new_trigger);
+    }
+
+    #[test]
+    fn standalone_update_order_reverts_when_paused() {
+        let w = setup_with_pause_flag();
+        let fp = FLOAT_PRECISION;
+        let trader = Address::generate(&w.env);
+        set_prices(&w, 2_000 * fp);
+
+        let key =
+            create_pending_order(&w, &trader, ONE_TOKEN, OrderType::LimitIncrease, 1_900 * fp);
+        let router = ExchangeRouterClient::new(&w.env, &w.router);
+        router.set_paused(&true);
+
+        let res = router.try_update_order(
+            &trader,
+            &UpdateOrderParams {
+                key,
+                size_delta_usd: 1_000 * fp,
+                acceptable_price: 0,
+                trigger_price: 1_800 * fp,
+                min_output_amount: 0,
+            },
+        );
+        assert!(res.is_err(), "update_order must revert while paused");
+    }
+
+    #[test]
+    fn standalone_cancel_withdrawal_succeeds_when_paused() {
+        let w = setup_with_pause_flag();
+        let lp = Address::generate(&w.env);
+        set_prices(&w, 2_000 * FLOAT_PRECISION);
+
+        let lp_tokens = 5 * ONE_TOKEN;
+        MtClient::new(&w.env, &w.market_tk).mint(&w.admin, &lp, &lp_tokens);
+        assert_eq!(MtClient::new(&w.env, &w.market_tk).balance(&lp), lp_tokens);
+
+        let key = WithdrawalHandlerClient::new(&w.env, &w.wth_handler).create_withdrawal(
+            &lp,
+            &CreateWithdrawalParams {
+                receiver: lp.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp_tokens,
+                min_long_token_amount: 0,
+                min_short_token_amount: 0,
+                execution_fee: 0,
+            },
+        );
+
+        assert_eq!(
+            soroban_sdk::token::Client::new(&w.env, &w.market_tk).balance(&w.wth_vault),
+            lp_tokens,
+            "LP tokens should sit in the withdrawal vault after create"
+        );
+
+        WVClient::new(&w.env, &w.wth_vault).record_transfer_in(&w.admin, &w.market_tk);
+
+        assert_eq!(
+            WVClient::new(&w.env, &w.wth_vault).get_recorded_balance(&w.market_tk),
+            lp_tokens,
+            "vault must have recorded the transfer-in"
+        );
+        let router = ExchangeRouterClient::new(&w.env, &w.router);
+        router.set_paused(&true);
+        router.cancel_withdrawal(&lp, &key);
+
+        assert!(
+            WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
+                .get_withdrawal(&key)
+                .is_none(),
+            "withdrawal must be removed after standalone cancel"
+        );
+        assert_eq!(
+            MtClient::new(&w.env, &w.market_tk).balance(&lp),
+            lp_tokens,
+            "LP tokens must be returned"
+        );
+    }
+
+    // ── Issue #1163: load_handler helper + multicall action-index diagnostics ──
+
+    /// Calling any public function on an uninitialised router must trap with
+    /// NotInitialized, not a bare Option::unwrap() panic.
+    #[test]
+    #[should_panic]
+    fn not_initialized_traps_on_set_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let router = env.register(ExchangeRouter, ());
+        ExchangeRouterClient::new(&env, &router).set_paused(&true);
+    }
+
+    #[test]
+    #[should_panic]
+    fn not_initialized_traps_on_cancel_withdrawal() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let router = env.register(ExchangeRouter, ());
+        let caller = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0u8; 32]);
+        ExchangeRouterClient::new(&env, &router).cancel_withdrawal(&caller, &key);
+    }
+
+    #[test]
+    #[should_panic]
+    fn not_initialized_traps_on_claim_funding_fees() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let router = env.register(ExchangeRouter, ());
+        let caller = Address::generate(&env);
+        ExchangeRouterClient::new(&env, &router).claim_funding_fees(
+            &caller,
+            &Vec::new(&env),
+            &Vec::new(&env),
+        );
+    }
+
+    /// multicall emits a `mc_begin` event before each action so that if an
+    /// action traps the event log names the failing index (issue #1163).
+    #[test]
+    fn multicall_emits_action_index_events() {
+        let w = setup();
+        let env = &w.env;
+        let router = ExchangeRouterClient::new(env, &w.router);
+        let caller = Address::generate(env);
+        let token = env.register_stellar_asset_contract_v2(caller.clone()).address();
+        let receiver = Address::generate(env);
+        StellarAssetClient::new(env, &token).mint(&caller, &(10 * ONE_TOKEN));
+
+        let actions: Vec<RouterAction> = soroban_sdk::vec![
+            env,
+            RouterAction::SendTokens(SendTokensParams {
+                token: token.clone(),
+                receiver: receiver.clone(),
+                amount: ONE_TOKEN,
+            }),
+            RouterAction::SendTokens(SendTokensParams {
+                token: token.clone(),
+                receiver: receiver.clone(),
+                amount: ONE_TOKEN,
+            }),
+        ];
+        router.multicall(&caller, &actions);
+
+        // The event log must contain two `mc_begin` events with indexes 0 and 1.
+        let evts = env.events().all();
+        let begin_sym = soroban_sdk::symbol_short!("mc_begin");
+        let begin_events: soroban_sdk::Vec<u32> = evts
+            .iter()
+            .filter_map(|(_, topics, data)| {
+                let topic: soroban_sdk::Vec<soroban_sdk::Val> = topics;
+                if topic.len() == 1 {
+                    if let Ok(s) = topic.get(0).unwrap().try_into_val::<soroban_sdk::Symbol>(env) {
+                        if s == begin_sym {
+                            if let Ok(idx) = data.try_into_val::<u32>(env) {
+                                return Some(idx);
+                            }
+                        }
+                    }
+                }
+                None
+            })
+            .collect::<soroban_sdk::Vec<u32>>();
+
+        assert_eq!(begin_events.len(), 2);
+        assert_eq!(begin_events.get(0).unwrap(), 0u32);
+        assert_eq!(begin_events.get(1).unwrap(), 1u32);
     }
 }

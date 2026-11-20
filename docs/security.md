@@ -143,14 +143,80 @@ Delegates to `order_handler::liquidate_position` after health check. No direct t
 
 | Step | Action | Type |
 |------|--------|------|
-| 1 | Read claimable amount from DataStore | State read |
-| 2 | Compute capped transfer amount | Arithmetic |
-| 3 | **Zero out claimable amount in DataStore** | **State write (first)** |
-| 4 | `market_token.withdraw_from_pool` → receiver | External transfer |
+| 1 | Resolve the trusted fee recipient (market override, else protocol recipient) | State read |
+| 2 | Read claimable amount from DataStore | State read |
+| 3 | Compute capped transfer amount | Arithmetic |
+| 4 | **Zero out claimable amount in DataStore** | **State write (first)** |
+| 5 | `market_token.withdraw_from_pool` → configured recipient | External transfer |
 
-**Finding:** ✅ **Fully CEI compliant.** The claimable balance is zeroed (step 3) before the external transfer (step 4). A re-entrant `claim_fees` call would read zero and return early.
+**Finding:** ✅ **Fully CEI compliant.** The claimable balance is zeroed (step 4) before the external transfer (step 5). A re-entrant `claim_fees` call would read zero and return early.
 
-**Risk:** NONE — correct CEI ordering.
+**Destination:** `claim_fees(keeper, market, token)` takes no destination argument, and neither does
+`fee_batch_sweeper::claim_all_fees`. Protocol fees are paid only to the recipient held in
+`fee_handler`'s own storage:
+
+| Setting | Entrypoint | Auth | Event |
+|---|---|---|---|
+| Protocol recipient (treasury) | `set_fee_receiver(receiver)` | stored admin | `fee_rcv` `FeeReceiverSet { market: None, previous, receiver }` |
+| Per-market override (issuer / partner) | `set_market_fee_receiver(market, Some(receiver) \| None)` | stored admin | `fee_rcv` `FeeReceiverSet { market: Some(market), previous, receiver }` |
+
+Reads: `get_fee_receiver(market)` (the recipient that will actually be paid),
+`get_protocol_fee_receiver()`, `get_market_fee_receiver(market)`.
+
+- With no recipient configured, `claim_fees` reverts with `FeeReceiverNotSet` (#7) and fees stay claimable.
+- A recipient equal to the market pool or to `fee_handler` is rejected with `InvalidFeeReceiver` (#8),
+  both when it is set and when a claim resolves it. Paying the pool itself would decrement
+  `pool_amount` while the tokens never leave the pool.
+- Accrual is unchanged: settlement credits `claimable_fee_amount(market, token)` in DataStore, a key
+  derived from the market only. No order or create-order parameter (`receiver`, `swap_path`,
+  `on_behalf_of`, …) influences where protocol fees accrue or where they are paid.
+- v1 pays each market to a single recipient. Splits are not supported.
+
+**Shared quote tokens (per-market attribution):** several markets may accrue fees in the same
+token (e.g. every `*/USDC` market). The topology is market-scoped for both custody and ledger:
+
+- Custody: each market's fees sit in that market's own `market_token` pool; markets never share a
+  custody balance.
+- Ledger: fees accrue to `claimable_fee_amount(market, token)` and are backed by
+  `pool_amount(market, token)`. Both keys include the market, so two markets sharing a token write
+  different entries and cannot overwrite each other. There is no separate token-level fee ledger,
+  so the same tokens are never recorded twice.
+- Token-level reads and withdrawals aggregate per-market entries rather than replacing them:
+
+| Entrypoint | Auth | Behaviour |
+|---|---|---|
+| `claimable_fees_by_token(token, markets)` | none (view) | `TokenFeeAttribution { token, total, markets: [MarketFeeAmount { market, amount }] }` |
+| `claim_token_fees(keeper, token, markets)` | `FEE_KEEPER` | Claims each market exactly as `claim_fees` does (own pool, own `pool_amount`, own recipient, own `fee_clm` event), then emits `tkfee_clm` `TokenFeesClaimed { token, total, market_count }`. Atomic: one failing market reverts the whole call. |
+
+- Both reject a market listed twice (`DuplicateMarket`, #10), so a market's ledger cannot be counted
+  twice in `total`. Both accept at most `MAX_TOKEN_FEE_MARKETS` (20) markets (`TooManyMarkets`, #9),
+  and `total` uses checked addition (`FeeOverflow`, #11).
+- `reader::get_protocol_stats` rejects duplicate markets for the same reason (`DuplicateMarket`, #6).
+
+**Treasury reconciliation (global total vs sub-ledgers):** `total_claimable_fee_amount(token)` is the
+protocol's global fee liability in `token`. It always equals the sum of
+`claimable_fee_amount(market, token)` over every market:
+
+- Accrual: every fee path (`increase_position_utils`, `decrease_position_utils`, `swap_utils`,
+  `fee_handler::record_fee_accrual`) moves the per-market entry and the global total in the same
+  call. The three settlement paths share one implementation,
+  `gmx_market_utils::apply_delta_to_claimable_fee_amount`.
+- Claims: `claim_fees` and `claim_token_fees` release the transferred amount from the global total
+  in the same call as the per-market entry. A claim larger than the global total reverts with
+  `FeeLedgerMismatch` (#12), so a per-market entry the global ledger does not cover can never be
+  withdrawn.
+- Aggregate bound: `claim_token_fees` also checks that its total withdrawal is at most the listed
+  markets' summed accrued balances and at most the global total (`ExceedsAccruedFees`, #13).
+
+| Entrypoint | Auth | Behaviour |
+|---|---|---|
+| `total_claimable_fees(token)` | none (view) | The global total. |
+| `reconcile_token_fees(token, markets)` | none (view) | `FeeReconciliation { token, ledger_total, markets_total, reconciled, markets: [MarketFeeReconciliation { market, claimable, pool_amount, custody, backed }] }`. `backed` is `claimable <= pool_amount && claimable <= custody`; `reconciled` holds when every listed market is backed and `markets_total == ledger_total`. Pass every market that accrues `token`: a missing market shows up as `ledger_total > markets_total`. |
+| `backfill_fee_total(token, markets)` | stored admin | Upgrade migration: adds each listed `(market, token)` ledger accrued before the global total existed, at most once per pair (`fee_bkfl` `FeeTotalBackfilled { market, token, amount, total }`). |
+
+All three reject duplicate markets and accept at most `MAX_TOKEN_FEE_MARKETS` (20).
+
+**Risk:** NONE — correct CEI ordering; destination is trusted configuration only.
 
 ---
 

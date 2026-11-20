@@ -31,6 +31,8 @@ stellar keys generate --global "$SOURCE" --network "$NETWORK" --fund
 # stellar keys fund "$SOURCE" --network "$NETWORK"
 
 export ADMIN=$(stellar keys address "$SOURCE")
+# Destination for claimed protocol fees (fee_handler::set_fee_receiver).
+export TREASURY="$ADMIN"
 curl "https://friendbot.stellar.org/?addr=$ADMIN" # alternative Friendbot call
 ```
 
@@ -170,6 +172,10 @@ invoke "$ADL_HANDLER" initialize \
 FEE_HANDLER=$(deploy fee_handler)
 invoke "$FEE_HANDLER" initialize \
   --admin "$ADMIN" --role_store "$ROLE_STORE" --data_store "$DATA_STORE"
+# Protocol fees are only paid to configured recipients; claim_fees reverts with
+# FeeReceiverNotSet until this is set. Optional per-market overrides:
+#   invoke "$FEE_HANDLER" set_market_fee_receiver --market <C...> --receiver <G.../C...>
+invoke "$FEE_HANDLER" set_fee_receiver --receiver "$TREASURY"
 
 REFERRAL_STORAGE=$(deploy referral_storage)
 invoke "$REFERRAL_STORAGE" initialize --admin "$ADMIN"
@@ -193,14 +199,17 @@ automated script writes that file and JSON manifests under `.stellar/`.
 ### Grant `CONTROLLER`
 
 The role hash below is `gmx_keys::roles::controller()`. Grant it to the admin,
-factory, state-changing handlers, and router:
+factory, state-changing handlers, router, and the oracle contract (its
+circuit-breaker pauses a market by writing a market-pause flag with itself as
+the caller, which is CONTROLLER-gated — omitting this grant means the very
+first circuit-breaker trip panics with an authorization error):
 
 ```sh
 CONTROLLER=33bf87be601326e21a8a7f573f265a6b8ab0174b8c8ec58239c8e524e4587b6a
 for account in \
   "$ADMIN" "$MARKET_FACTORY" "$DEPOSIT_HANDLER" "$WITHDRAWAL_HANDLER" \
   "$ORDER_HANDLER" "$LIQUIDATION_HANDLER" "$ADL_HANDLER" \
-  "$FEE_HANDLER" "$EXCHANGE_ROUTER"
+  "$FEE_HANDLER" "$EXCHANGE_ROUTER" "$ORACLE"
 do
   invoke "$ROLE_STORE" grant_role \
     --caller "$ADMIN" --account "$account" --role "$CONTROLLER"
@@ -309,12 +318,54 @@ The Make wrapper performs the same operation using `.deployed/testnet.env`:
 make upgrade-contract CONTRACT=order_handler NETWORK="$NETWORK" SOURCE="$SOURCE"
 ```
 
+### Upgrading to the global fee ledger
+
+`fee_handler` now keeps `total_claimable_fee_amount(token)` equal to the sum of
+the per-market fee ledgers, and claims revert with `FeeLedgerMismatch` if the
+global total does not cover them. Fees accrued by older code are only in the
+per-market ledgers, so upgrade in this order:
+
+1. Upgrade `fee_handler`.
+2. For each fee token, call
+   `backfill_fee_total --token <TOKEN> --markets '[<MARKET>, ...]'` (admin;
+   at most 20 markets per call; repeat calls skip markets already added).
+3. Upgrade the contracts that accrue fees: `order_handler` and
+   `liquidation_handler`. `adl_handler` is not upgradeable, so redeploy it and
+   re-grant its roles.
+4. Check `reconcile_token_fees --token <TOKEN> --markets '[...]'` returns
+   `reconciled: true`.
+
+Don't backfill a market after step 3. Its ledger would already be counted, so
+backfilling it would overstate the global total.
+
 Currently upgradeable contracts are `oracle`, `market_factory`,
 `deposit_handler`, `withdrawal_handler`, `order_handler`,
 `liquidation_handler`, `fee_handler`, `referral_storage`, `reader`, and
 `exchange_router`. The role store, data store, vaults, ADL handler, and market
 token do not expose `upgrade`; redeploying one of those requires a planned
 migration and rewiring its dependants.
+
+## 7. Periphery contracts (deployed out-of-band)
+
+`market_util_reader`, `fee_batch_sweeper`, `insurance_fund_router`, and
+`order_cleanup` are stateless utility contracts that sit alongside the core
+protocol graph rather than inside it: none of them has an `initialize`
+entrypoint, and every dependency they need (`data_store`, `oracle`,
+`fee_handler`, `order_handler`) is passed in as a call argument instead of
+being stored at deploy time. They are intentionally **not** part of
+`scripts/deploy.sh`'s dependency-ordered sequence in section 3 above — deploy
+each standalone, whenever it's needed, with:
+
+```sh
+make deploy-contract CONTRACT=market_util_reader   NETWORK="$NETWORK" SOURCE="$SOURCE"
+make deploy-contract CONTRACT=fee_batch_sweeper     NETWORK="$NETWORK" SOURCE="$SOURCE"
+make deploy-contract CONTRACT=insurance_fund_router NETWORK="$NETWORK" SOURCE="$SOURCE"
+make deploy-contract CONTRACT=order_cleanup         NETWORK="$NETWORK" SOURCE="$SOURCE"
+```
+
+No `initialize` invocation is needed after deploy — callers (frontend, keeper
+scripts) supply `$DATA_STORE`, `$ORACLE`, `$FEE_HANDLER`, and `$ORDER_HANDLER`
+from `.deployed/<NETWORK>.env` directly on each call.
 
 ## Troubleshooting
 

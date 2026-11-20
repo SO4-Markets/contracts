@@ -24,12 +24,15 @@ use order_handler::{OrderHandler, OrderHandlerClient as OHClient};
 use order_vault::{OrderVault, OrderVaultClient as OVClient};
 use role_store::{RoleStore, RoleStoreClient as RsClient};
 use soroban_sdk::{
-    testutils::Address as _, token::StellarAssetClient, Address, BytesN, Env, Vec,
+    testutils::{Address as _, BytesN as _},
+    token::StellarAssetClient,
+    Address, BytesN, Env, Vec,
 };
 
 const ONE_TOKEN: i128 = 10_000_000;
 const ONE_USD: i128 = FLOAT_PRECISION;
 
+#[allow(dead_code)]
 struct World {
     env: Env,
     admin: Address,
@@ -70,6 +73,11 @@ fn setup() -> World {
     let ord_vault = env.register(OrderVault, ());
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
+    let long_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let index_tk = Address::generate(&env);
+
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
         &admin,
@@ -77,10 +85,9 @@ fn setup() -> World {
         &7u32,
         &soroban_sdk::String::from_str(&env, "ETH/USD Market"),
         &soroban_sdk::String::from_str(&env, "GM-ETH"),
+        &long_tk,
+        &long_tk,
     );
-
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let index_tk = Address::generate(&env);
 
     let ord_handler = env.register(OrderHandler, ());
     OHClient::new(&env, &ord_handler).initialize(&admin, &rs, &ds, &oracle_addr, &ord_vault);
@@ -162,16 +169,27 @@ fn upgrade_preserves_pending_order_and_position_storage() {
     let env = &w.env;
 
     // Place an order (decrease — no collateral transfer needed)
-    soroban_sdk::token::Client::new(env, &w.long_tk)
-        .transfer(&w.user, &w.ord_vault, &(200 * ONE_TOKEN));
+    soroban_sdk::token::Client::new(env, &w.long_tk).transfer(
+        &w.user,
+        &w.ord_vault,
+        &(200 * ONE_TOKEN),
+    );
 
     OClient::new(env, &w.oracle).set_prices_simple(
         &w.keeper,
         &Vec::from_array(
             env,
             [
-                TokenPrice { token: w.long_tk.clone(), min: 2_000 * ONE_USD, max: 2_000 * ONE_USD },
-                TokenPrice { token: w.index_tk.clone(), min: 2_000 * ONE_USD, max: 2_000 * ONE_USD },
+                TokenPrice {
+                    token: w.long_tk.clone(),
+                    min: 2_000 * ONE_USD,
+                    max: 2_000 * ONE_USD,
+                },
+                TokenPrice {
+                    token: w.index_tk.clone(),
+                    min: 2_000 * ONE_USD,
+                    max: 2_000 * ONE_USD,
+                },
             ],
         ),
     );
@@ -192,6 +210,7 @@ fn upgrade_preserves_pending_order_and_position_storage() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 

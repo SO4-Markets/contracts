@@ -34,7 +34,7 @@ Key types:
     stable_price <token>
     keeper_public_key <index>
     market_type_default
-    keeper_pubkey_key <index>
+    role <ROLE_NAME>
 
 Boolean args: true/1/yes/long = True; false/0/no/short = False
 """
@@ -203,6 +203,12 @@ def stable_price_key(token: str) -> str:
     return _sha256(_push_str("STABLE_PRICE"), _push_addr(token))
 
 
+def role_key(role_name: str) -> str:
+    """sha256(role_name_utf8_bytes), matching libs/keys/src/lib.rs's roles module
+    (e.g. roles::order_keeper() = sha256(push_str("ORDER_KEEPER")))."""
+    return _sha256(_push_str(role_name))
+
+
 def keeper_public_key_key(index: int) -> str:
     """Key read by oracle::get_keeper_pubkey for a zero-based keeper index."""
     if not 0 <= index <= 0xFFFFFFFF:
@@ -241,6 +247,7 @@ _DISPATCH = {
     "min_market_tokens_for_first_deposit": (1, lambda a: min_market_tokens_for_first_deposit_key(a[0])),
     "stable_price": (1, lambda a: stable_price_key(a[0])),
     "keeper_public_key": (1, lambda a: keeper_public_key_key(int(a[0]))),
+    "role": (1, lambda a: role_key(a[0])),
 }
 
 

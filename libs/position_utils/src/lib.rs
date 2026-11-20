@@ -5,7 +5,7 @@
 
 use gmx_keys::{
     claimable_funding_amount_key, cumulative_borrowing_factor_key, funding_amount_per_size_key,
-    max_leverage_key, min_collateral_factor_key, position_fee_factor_key, position_key,
+    max_leverage_key, min_collateral_factor_key, position_fee_factor_key,
 };
 use gmx_market_utils::validate_open_interest;
 use gmx_math::{mul_div_wide, mul_div_wide_up, FLOAT_PRECISION, TOKEN_PRECISION};
@@ -32,6 +32,9 @@ trait IDataStore {
 /// `size_delta_usd` — the portion of the position being closed (= position.size_in_usd for full).
 ///
 /// Returns (pnl_usd, uncapped_pnl_usd) — same value for now; capping happens in get_pool_value.
+/// When prorating a loss (negative PnL), rounds the magnitude up so the trader pays the pool
+/// the full amount owed (protocol-favoring direction). For profit (positive PnL), floors toward
+/// zero (trader-favoring direction), already correct per GMX invariant.
 pub fn get_position_pnl_usd(
     env: &Env,
     position: &PositionProps,
@@ -57,8 +60,17 @@ pub fn get_position_pnl_usd(
         position.size_in_usd - position_value
     };
 
-    // Scale to the slice being closed
-    let pnl_usd = mul_div_wide(env, total_pnl, size_delta_usd, position.size_in_usd);
+    // Scale to the slice being closed, rounding based on sign:
+    //   Profit (total_pnl >= 0): use floor (mul_div_wide) → protocol favoring
+    //   Loss (total_pnl < 0): round magnitude up → pool gets full amount owed
+    let pnl_usd = if total_pnl >= 0 {
+        mul_div_wide(env, total_pnl, size_delta_usd, position.size_in_usd)
+    } else {
+        // For negative PnL, negate, round up, then negate back
+        let magnitude_rounded_up =
+            mul_div_wide_up(env, -total_pnl, size_delta_usd, position.size_in_usd);
+        -magnitude_rounded_up
+    };
 
     (pnl_usd, pnl_usd)
 }
@@ -308,9 +320,10 @@ pub fn is_liquidatable(
         collateral_token_price,
         TOKEN_PRECISION,
     );
-    // net_collateral excludes PnL — used for the min_collateral_factor adequacy check.
-    // PnL should not mask a collateral shortfall: a profitable unrealised gain does
-    // not mean the deposited collateral is sufficient to absorb liquidation costs.
+    // net_collateral (fees deducted, PnL not yet applied) feeds `remaining` below,
+    // which folds pnl_usd back in before either liquidation comparison (#406):
+    // an adverse index-price move must not be able to hide insolvency behind an
+    // unrealised loss that was excluded from the check.
     let net_collateral = collateral_usd - fees_usd;
     let remaining = net_collateral + pnl_usd;
 
@@ -330,21 +343,8 @@ pub fn is_liquidatable(
         min_collateral_factor,
         FLOAT_PRECISION,
     );
-    // Use net_collateral (no PnL) so unrealised gains cannot hide a collateral shortfall.
-    net_collateral < min_required
-}
-
-// ─── Position key ─────────────────────────────────────────────────────────────
-
-/// Compute the data_store key for a position.
-pub fn get_position_key(
-    env: &Env,
-    account: &Address,
-    market_token: &Address,
-    collateral_token: &Address,
-    is_long: bool,
-) -> BytesN<32> {
-    position_key(env, account, market_token, collateral_token, is_long)
+    // Fold PnL into the comparison so adverse index-price moves cannot hide insolvency.
+    remaining < min_required
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -487,7 +487,7 @@ mod tests {
     fn position_fee_matches_bps_formula() {
         let w = setup();
         let fee_bps: i128 = 30; // 30 bps
-        let fee_factor = fee_bps * FP / 10_000;
+        let fee_factor = fee_bps * FP / (gmx_math::BPS_DIVISOR as i128);
         let ds_c = DsClient::new(&w.env, &w.ds);
         ds_c.set_u128(
             &w.admin,
@@ -606,6 +606,61 @@ mod tests {
         assert_eq!(
             pos.funding_fee_amount_per_size, global_value,
             "position tracker must be reset to current global after settlement"
+        );
+    }
+
+    // ── Issue #256: dominant OI side always pays the subordinate side ────────
+
+    /// Short-dominated market: a short position being decreased must be charged a
+    /// funding debit (funding_fee_amount > 0), never credited.
+    #[test]
+    fn get_position_fees_short_holder_pays_debit_when_shorts_dominate() {
+        let w = setup();
+        let ds_c = DsClient::new(&w.env, &w.ds);
+
+        // Shorts dominate → the short-side accumulator (short_token, is_long=false)
+        // increases, exactly as market_utils::update_funding_state computes it.
+        let fnd_key =
+            gmx_keys::funding_amount_per_size_key(&w.env, &w.market_tk, &w.short_tk, false);
+        let funding_per_size: i128 = FP / 100_000;
+        ds_c.apply_delta_to_i128(&w.admin, &fnd_key, &funding_per_size);
+
+        let market = make_market(&w);
+        let mut position = make_position(&w, 1_000 * FP, ONE_TOKEN * 10, 2_000 * FP);
+        position.is_long = false;
+        position.collateral_token = w.short_tk.clone();
+
+        let fees = get_position_fees(&w.env, &w.ds, &market, &position, FP, 1_000 * FP, true);
+
+        assert!(
+            fees.funding_fee_amount > 0,
+            "short holder must be charged a funding debit when shorts dominate, got {}",
+            fees.funding_fee_amount
+        );
+    }
+
+    /// Long-dominated market: a long position being decreased must be charged a
+    /// funding debit (funding_fee_amount > 0), never credited.
+    #[test]
+    fn get_position_fees_long_holder_pays_debit_when_longs_dominate() {
+        let w = setup();
+        let ds_c = DsClient::new(&w.env, &w.ds);
+
+        // Longs dominate → the long-side accumulator (long_token, is_long=true) increases.
+        let fnd_key = gmx_keys::funding_amount_per_size_key(&w.env, &w.market_tk, &w.long_tk, true);
+        let funding_per_size: i128 = FP / 100_000;
+        ds_c.apply_delta_to_i128(&w.admin, &fnd_key, &funding_per_size);
+
+        let market = make_market(&w);
+        let position = make_position(&w, 1_000 * FP, ONE_TOKEN * 10, 2_000 * FP);
+        // default make_position is already is_long: true, collateral_token: long_tk
+
+        let fees = get_position_fees(&w.env, &w.ds, &market, &position, FP, 1_000 * FP, true);
+
+        assert!(
+            fees.funding_fee_amount > 0,
+            "long holder must be charged a funding debit when longs dominate, got {}",
+            fees.funding_fee_amount
         );
     }
 
@@ -1078,7 +1133,7 @@ mod tests {
         let ds_c = DsClient::new(&w.env, &w.ds);
 
         let fee_bps: i128 = 30;
-        let fee_factor: i128 = fee_bps * FP / 10_000; // 30 bps in FP units
+        let fee_factor: i128 = fee_bps * FP / (gmx_math::BPS_DIVISOR as i128); // 30 bps in FP units
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::position_fee_factor_key(&w.env, &w.market_tk, true),
@@ -1164,18 +1219,21 @@ mod tests {
         );
     }
 
-    /// Bug #2 — PnL must not mask a collateral shortfall in the min_collateral_factor check.
+    /// PnL is folded into the min_collateral_factor check (#406, see
+    /// docs/liquidation-flow.md): `remaining = collateral - fees + pnl`.
     ///
     /// Setup: size=$10 000, collateral=$500 gross, pending borrowing fees≈$420
     ///   → net_collateral = $500 - $420 = $80
     ///   → min_collateral_factor = 1% → min_required = $100
-    ///   → net_collateral ($80) < min_required ($100) → LIQUIDATABLE
     ///
-    /// The position also has +$100 unrealised PnL. Before this fix, the old code
-    /// computed `remaining = $80 + $100 = $180 ≥ $100` and returned false (not
-    /// liquidatable). The fixed code must return true.
+    /// At a flat price, remaining ($80) < $100 → LIQUIDATABLE: fees alone can
+    /// push a position under the floor. After a +2% move, PnL ≈ +$200 and
+    /// remaining ≈ $280 ≥ $100 → NOT liquidatable.
+    ///
+    /// This test originally asserted the pre-#406 rule (PnL ignored in the
+    /// primary branch); #406 deliberately changed that and left the test stale.
     #[test]
-    fn pnl_does_not_mask_collateral_shortfall_below_min_factor() {
+    fn pnl_is_folded_into_min_collateral_factor_check() {
         let w = setup();
         let ds_c = DsClient::new(&w.env, &w.ds);
         let market = make_market(&w);
@@ -1204,7 +1262,7 @@ mod tests {
         // delta × 5 tokens / FP = 2_100_000 → delta = 2_100_000 × FP / (5 × TOKEN_PRECISION)
         //                                            = 2_100_000 × FP / 50_000_000 = 42 * FP / 1_000
         let size_in_tokens = 5 * ONE_TOKEN; // 5 tokens
-        let delta = 42 * FP / 1_000;        // cumulative borrowing factor delta
+        let delta = 42 * FP / 1_000; // cumulative borrowing factor delta
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::cumulative_borrowing_factor_key(&w.env, &w.market_tk, true),
@@ -1215,17 +1273,32 @@ mod tests {
         position.size_in_tokens = size_in_tokens;
         position.borrowing_factor = 0; // opened at cum=0
 
-        // Price advances 2% → unrealised PnL ≈ +$200 (should NOT save the position)
-        let current_price = 2_040 * FP; // slight profit
+        // Flat price → PnL = 0, remaining = $80 < $100 → liquidatable.
+        let flat = PriceProps {
+            min: collateral_price,
+            max: collateral_price,
+        };
+        assert!(
+            is_liquidatable(&w.env, &w.ds, &position, &market, collateral_price, &flat),
+            "fees alone pushing net collateral below min_collateral_factor must be liquidatable"
+        );
+
+        // Price advances 2% → unrealised PnL ≈ +$200 → remaining ≈ $280 ≥ $100.
+        let current_price = 2_040 * FP;
         let price_props = PriceProps {
             min: current_price,
             max: current_price,
         };
-
-        // Fixed: net_collateral < min_required → must be liquidatable
         assert!(
-            is_liquidatable(&w.env, &w.ds, &position, &market, collateral_price, &price_props),
-            "position with net_collateral below min_collateral_factor must be liquidatable even with positive PnL"
+            !is_liquidatable(
+                &w.env,
+                &w.ds,
+                &position,
+                &market,
+                collateral_price,
+                &price_props
+            ),
+            "PnL counts toward remaining collateral (#406)"
         );
     }
 
@@ -1258,7 +1331,14 @@ mod tests {
         };
 
         assert!(
-            !is_liquidatable(&w.env, &w.ds, &position, &market, collateral_price, &price_props),
+            !is_liquidatable(
+                &w.env,
+                &w.ds,
+                &position,
+                &market,
+                collateral_price,
+                &price_props
+            ),
             "well-collateralised position with healthy net collateral must not be liquidatable"
         );
     }

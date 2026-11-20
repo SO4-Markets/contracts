@@ -8,14 +8,14 @@ import json
 import os
 import sys
 
-WASM_DIR = "target/wasm32-unknown-unknown/release"
+WASM_DIR = os.environ.get("WASM_DIR", "target/wasm32v1-none/release")
 TEST_CONTRACTS = {"test_faucet", "test_token"}
 
 baseline = {}
 
 if not os.path.isdir(WASM_DIR):
     print(f"error: WASM dir not found: {WASM_DIR}", file=sys.stderr)
-    print("Run 'cargo build --target wasm32-unknown-unknown --release' first.", file=sys.stderr)
+    print("Run 'make wasm-baseline' (or 'cargo build --target wasm32v1-none --release') first.", file=sys.stderr)
     sys.exit(1)
 
 for fname in sorted(os.listdir(WASM_DIR)):

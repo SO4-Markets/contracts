@@ -1,9 +1,9 @@
 #![no_std]
 
-use gmx_keys::roles;
+use gmx_keys::{roles, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
-    BytesN, Env, Vec,
+    BytesN, Env, IntoVal, TryFromVal, Val, Vec,
 };
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -32,6 +32,8 @@ enum RoleKey {
     AllRoles,
     /// Init flag
     Initialized,
+    /// u32 — number of members holding a given role (avoids full Vec read)
+    RoleMemberCount(BytesN<32>),
 }
 
 // ─── Events ───────────────────────────────────────────────────────────────────
@@ -46,6 +48,7 @@ pub struct RoleStoreInitialized {
 #[contractevent(topics = ["grant"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoleGranted {
+    pub caller: Address,
     pub account: Address,
     pub role: BytesN<32>,
 }
@@ -53,6 +56,7 @@ pub struct RoleGranted {
 #[contractevent(topics = ["revoke"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoleRevoked {
+    pub caller: Address,
     pub account: Address,
     pub role: BytesN<32>,
 }
@@ -87,7 +91,11 @@ impl RoleStore {
         require_init(&env);
         require_admin(&env, &caller);
         internal_grant_role(&env, &account, &role);
-        env.events().publish_event(&RoleGranted { account, role });
+        env.events().publish_event(&RoleGranted {
+            caller,
+            account,
+            role,
+        });
     }
 
     /// Revoke `role` from `account`. Caller must hold ROLE_ADMIN.
@@ -99,78 +107,84 @@ impl RoleStore {
 
         let admin_role = roles::role_admin(&env);
         if role == admin_role {
-            let members: Vec<Address> = env
-                .storage()
-                .persistent()
-                .get(&RoleKey::RoleMembers(admin_role.clone()))
-                .unwrap_or(Vec::new(&env));
+            let members: Vec<Address> =
+                read_persistent(&env, &RoleKey::RoleMembers(admin_role.clone()))
+                    .unwrap_or(Vec::new(&env));
             if members.len() <= 1 {
                 panic_with_error!(&env, Error::LastAdmin);
             }
         }
 
         internal_revoke_role(&env, &account, &role);
-        env.events().publish_event(&RoleRevoked { account, role });
+        env.events().publish_event(&RoleRevoked {
+            caller,
+            account,
+            role,
+        });
     }
 
     // ── Public reads ─────────────────────────────────────────────────────────
 
     /// Returns true if `account` currently holds `role`.
     pub fn has_role(env: Env, account: Address, role: BytesN<32>) -> bool {
-        env.storage()
-            .persistent()
-            .get(&RoleKey::HasRole(account, role))
-            .unwrap_or(false)
+        read_persistent(&env, &RoleKey::HasRole(account, role)).unwrap_or(false)
     }
 
     /// All roles currently held by `account`.
     pub fn get_roles(env: Env, account: Address) -> Vec<BytesN<32>> {
-        env.storage()
-            .persistent()
-            .get(&RoleKey::AccountRoles(account))
-            .unwrap_or(Vec::new(&env))
+        read_persistent(&env, &RoleKey::AccountRoles(account)).unwrap_or(Vec::new(&env))
     }
 
     /// Paginated list of all accounts that hold `role`.
     pub fn get_role_members(env: Env, role: BytesN<32>, start: u32, end: u32) -> Vec<Address> {
-        let members: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&RoleKey::RoleMembers(role))
-            .unwrap_or(Vec::new(&env));
+        let members: Vec<Address> =
+            read_persistent(&env, &RoleKey::RoleMembers(role)).unwrap_or(Vec::new(&env));
         paginate_addr(&env, &members, start, end)
     }
 
     /// Count of accounts holding `role`.
     pub fn get_role_member_count(env: Env, role: BytesN<32>) -> u32 {
-        let members: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&RoleKey::RoleMembers(role))
-            .unwrap_or(Vec::new(&env));
-        members.len()
+        read_persistent(&env, &RoleKey::RoleMemberCount(role)).unwrap_or(0)
     }
 
     /// All role IDs that have ever been granted.
     pub fn get_all_roles(env: Env) -> Vec<BytesN<32>> {
-        env.storage()
-            .persistent()
-            .get(&RoleKey::AllRoles)
-            .unwrap_or(Vec::new(&env))
+        read_persistent(&env, &RoleKey::AllRoles).unwrap_or(Vec::new(&env))
     }
 
     /// Count of distinct roles.
     pub fn get_role_count(env: Env) -> u32 {
-        let all: Vec<BytesN<32>> = env
-            .storage()
-            .persistent()
-            .get(&RoleKey::AllRoles)
-            .unwrap_or(Vec::new(&env));
+        let all: Vec<BytesN<32>> =
+            read_persistent(&env, &RoleKey::AllRoles).unwrap_or(Vec::new(&env));
         all.len()
     }
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
+
+// Persistent TTL policy (#800): role entries (notably ROLE_ADMIN/CONTROLLER)
+// are written once and read constantly, so every read and write renews the
+// entry's TTL, mirroring data_store. Only entries that exist are bumped —
+// extend_ttl on a missing key panics, and has_role must return false, not trap.
+
+fn bump_persistent(env: &Env, key: &RoleKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+}
+
+fn read_persistent<V: TryFromVal<Env, Val>>(env: &Env, key: &RoleKey) -> Option<V> {
+    let val = env.storage().persistent().get::<_, V>(key);
+    if val.is_some() {
+        bump_persistent(env, key);
+    }
+    val
+}
+
+fn write_persistent<V: IntoVal<Env, Val>>(env: &Env, key: &RoleKey, val: &V) {
+    env.storage().persistent().set(key, val);
+    bump_persistent(env, key);
+}
 
 fn require_init(env: &Env) {
     if !env.storage().instance().has(&RoleKey::Initialized) {
@@ -180,11 +194,8 @@ fn require_init(env: &Env) {
 
 fn require_admin(env: &Env, caller: &Address) {
     let admin_role = roles::role_admin(env);
-    let has: bool = env
-        .storage()
-        .persistent()
-        .get(&RoleKey::HasRole(caller.clone(), admin_role))
-        .unwrap_or(false);
+    let has: bool =
+        read_persistent(env, &RoleKey::HasRole(caller.clone(), admin_role)).unwrap_or(false);
     if !has {
         panic_with_error!(env, Error::Unauthorized);
     }
@@ -192,83 +203,62 @@ fn require_admin(env: &Env, caller: &Address) {
 
 fn internal_grant_role(env: &Env, account: &Address, role: &BytesN<32>) {
     let has_key = RoleKey::HasRole(account.clone(), role.clone());
-    if env
-        .storage()
-        .persistent()
-        .get::<_, bool>(&has_key)
-        .unwrap_or(false)
-    {
+    if read_persistent::<bool>(env, &has_key).unwrap_or(false) {
         return; // idempotent
     }
-    env.storage().persistent().set(&has_key, &true);
+    write_persistent(env, &has_key, &true);
+
+    // Increment member count
+    let count_key = RoleKey::RoleMemberCount(role.clone());
+    let count: u32 = read_persistent(env, &count_key).unwrap_or(0);
+    write_persistent(env, &count_key, &(count + 1));
 
     // Add to role's member list
-    let mut members: Vec<Address> = env
-        .storage()
-        .persistent()
-        .get(&RoleKey::RoleMembers(role.clone()))
-        .unwrap_or(Vec::new(env));
+    let mut members: Vec<Address> =
+        read_persistent(env, &RoleKey::RoleMembers(role.clone())).unwrap_or(Vec::new(env));
     members.push_back(account.clone());
-    env.storage()
-        .persistent()
-        .set(&RoleKey::RoleMembers(role.clone()), &members);
+    write_persistent(env, &RoleKey::RoleMembers(role.clone()), &members);
 
     // Add to account's role list
-    let mut acct_roles: Vec<BytesN<32>> = env
-        .storage()
-        .persistent()
-        .get(&RoleKey::AccountRoles(account.clone()))
-        .unwrap_or(Vec::new(env));
+    let mut acct_roles: Vec<BytesN<32>> =
+        read_persistent(env, &RoleKey::AccountRoles(account.clone())).unwrap_or(Vec::new(env));
     acct_roles.push_back(role.clone());
-    env.storage()
-        .persistent()
-        .set(&RoleKey::AccountRoles(account.clone()), &acct_roles);
+    write_persistent(env, &RoleKey::AccountRoles(account.clone()), &acct_roles);
 
     // Track in all-roles list (deduplicated)
-    let mut all: Vec<BytesN<32>> = env
-        .storage()
-        .persistent()
-        .get(&RoleKey::AllRoles)
-        .unwrap_or(Vec::new(env));
+    let mut all: Vec<BytesN<32>> =
+        read_persistent(env, &RoleKey::AllRoles).unwrap_or(Vec::new(env));
     if !vec_contains_b32(&all, role) {
         all.push_back(role.clone());
-        env.storage().persistent().set(&RoleKey::AllRoles, &all);
+        write_persistent(env, &RoleKey::AllRoles, &all);
     }
 }
 
 fn internal_revoke_role(env: &Env, account: &Address, role: &BytesN<32>) {
     let has_key = RoleKey::HasRole(account.clone(), role.clone());
-    if !env
-        .storage()
-        .persistent()
-        .get::<_, bool>(&has_key)
-        .unwrap_or(false)
-    {
+    if !read_persistent::<bool>(env, &has_key).unwrap_or(false) {
         return; // idempotent
     }
     env.storage().persistent().remove(&has_key);
 
+    // Decrement member count
+    let count_key = RoleKey::RoleMemberCount(role.clone());
+    let count: u32 = read_persistent(env, &count_key).unwrap_or(0);
+    if count > 0 {
+        write_persistent(env, &count_key, &(count - 1));
+    }
+
     // Remove from role's member list
-    let mut members: Vec<Address> = env
-        .storage()
-        .persistent()
-        .get(&RoleKey::RoleMembers(role.clone()))
-        .unwrap_or(Vec::new(env));
+    let mut members: Vec<Address> =
+        read_persistent(env, &RoleKey::RoleMembers(role.clone())).unwrap_or(Vec::new(env));
     vec_remove_addr(&mut members, account);
-    env.storage()
-        .persistent()
-        .set(&RoleKey::RoleMembers(role.clone()), &members);
+    write_persistent(env, &RoleKey::RoleMembers(role.clone()), &members);
 
     // Remove from account's role list
-    let mut acct_roles: Vec<BytesN<32>> = env
-        .storage()
-        .persistent()
-        .get(&RoleKey::AccountRoles(account.clone()))
-        .unwrap_or(Vec::new(env));
+    let mut acct_roles: Vec<BytesN<32>> =
+        read_persistent(env, &RoleKey::AccountRoles(account.clone())).unwrap_or(Vec::new(env));
     vec_remove_b32(&mut acct_roles, role);
-    env.storage()
-        .persistent()
-        .set(&RoleKey::AccountRoles(account.clone()), &acct_roles);
+    write_persistent(env, &RoleKey::AccountRoles(account.clone()), &acct_roles);
 }
 
 // ─── Vec utilities (no_std) ───────────────────────────────────────────────────
@@ -432,6 +422,49 @@ mod tests {
         client.revoke_role(&impostor, &holder, &ctrl);
     }
 
+    // ── Issue #359: get_roles(account) test coverage ────────────────────────
+
+    /// get_roles(account) must reflect grants and revokes on the account-keyed
+    /// side of the bookkeeping (AccountRoles), including multiple roles
+    /// simultaneously and correct removal after revoke.
+    #[test]
+    fn get_roles_reflects_grants_and_revokes() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let order_keeper = roles::order_keeper(&env);
+        let user = Address::generate(&env);
+
+        // Initially empty
+        let roles_list = client.get_roles(&user);
+        assert_eq!(roles_list.len(), 0);
+
+        // Grant first role
+        client.grant_role(&admin, &user, &ctrl);
+        let roles_list = client.get_roles(&user);
+        assert_eq!(roles_list.len(), 1);
+        assert_eq!(roles_list.get_unchecked(0), ctrl);
+
+        // Grant second role — both must be present
+        client.grant_role(&admin, &user, &order_keeper);
+        let roles_list = client.get_roles(&user);
+        assert_eq!(roles_list.len(), 2);
+        assert!(vec_contains_b32(&roles_list, &ctrl));
+        assert!(vec_contains_b32(&roles_list, &order_keeper));
+
+        // Revoke first role — only second must remain
+        client.revoke_role(&admin, &user, &ctrl);
+        let roles_list = client.get_roles(&user);
+        assert_eq!(roles_list.len(), 1);
+        assert_eq!(roles_list.get_unchecked(0), order_keeper);
+        assert!(!vec_contains_b32(&roles_list, &ctrl));
+
+        // Revoke second role — empty again
+        client.revoke_role(&admin, &user, &order_keeper);
+        let roles_list = client.get_roles(&user);
+        assert_eq!(roles_list.len(), 0);
+    }
+
     // ── Issue #233: CONTROLLER cannot self-grant ROLE_ADMIN ──────────────────
 
     /// A CONTROLLER-only address cannot call grant_role to elevate itself to
@@ -464,5 +497,237 @@ mod tests {
         client.grant_role(&admin, &controller_addr, &ctrl);
         // CONTROLLER tries to grant ROLE_ADMIN to victim — must panic Unauthorized
         client.grant_role(&controller_addr, &victim, &admin_role);
+    }
+
+    #[test]
+    fn test_events_include_caller() {
+        use soroban_sdk::testutils::Events;
+        use soroban_sdk::Event;
+
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let keeper = Address::generate(&env);
+
+        client.grant_role(&admin, &keeper, &ctrl);
+
+        assert_eq!(
+            env.events().all().filter_by_contract(&contract_id),
+            [RoleGranted {
+                caller: admin.clone(),
+                account: keeper.clone(),
+                role: ctrl.clone(),
+            }
+            .to_xdr(&env, &contract_id)]
+        );
+
+        client.revoke_role(&admin, &keeper, &ctrl);
+
+        assert_eq!(
+            env.events().all().filter_by_contract(&contract_id),
+            [RoleRevoked {
+                caller: admin.clone(),
+                account: keeper.clone(),
+                role: ctrl.clone(),
+            }
+            .to_xdr(&env, &contract_id)]
+        );
+    }
+
+    // ── Issue #564: revoke-side RoleMemberCount/RoleMembers coverage ─────────
+
+    /// Grant a role to two accounts, revoke one, and assert the count
+    /// decremented by exactly one and the remaining member list is correct.
+    #[test]
+    fn test_revoke_decrements_count_and_removes_member() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let k1 = Address::generate(&env);
+        let k2 = Address::generate(&env);
+
+        client.grant_role(&admin, &k1, &ctrl);
+        client.grant_role(&admin, &k2, &ctrl);
+        assert_eq!(client.get_role_member_count(&ctrl), 2);
+        let members = client.get_role_members(&ctrl, &0, &10);
+        assert_eq!(members.len(), 2);
+
+        client.revoke_role(&admin, &k1, &ctrl);
+
+        assert_eq!(
+            client.get_role_member_count(&ctrl),
+            1,
+            "count must decrement by exactly one after revoke"
+        );
+        assert!(!client.has_role(&k1, &ctrl));
+        assert!(client.has_role(&k2, &ctrl));
+
+        let members = client.get_role_members(&ctrl, &0, &10);
+        assert_eq!(members.len(), 1);
+        assert_eq!(members.get_unchecked(0), k2);
+        // revoked account must no longer appear
+        assert!(!vec_contains_b32(&client.get_roles(&k1), &ctrl));
+    }
+
+    /// Revoke one member out of three and assert the other two remain in order
+    /// and vec_remove_addr removed only the target (middle of the list).
+    #[test]
+    fn test_revoke_one_of_many_leaves_others() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let k1 = Address::generate(&env);
+        let k2 = Address::generate(&env);
+        let k3 = Address::generate(&env);
+
+        client.grant_role(&admin, &k1, &ctrl);
+        client.grant_role(&admin, &k2, &ctrl);
+        client.grant_role(&admin, &k3, &ctrl);
+        assert_eq!(client.get_role_member_count(&ctrl), 3);
+
+        // revoke the middle member (k2) — exercises vec_remove_addr not just popping tail
+        client.revoke_role(&admin, &k2, &ctrl);
+
+        assert_eq!(client.get_role_member_count(&ctrl), 2);
+        assert!(!client.has_role(&k2, &ctrl));
+        assert!(client.has_role(&k1, &ctrl));
+        assert!(client.has_role(&k3, &ctrl));
+
+        let members = client.get_role_members(&ctrl, &0, &10);
+        assert_eq!(members.len(), 2);
+        // remaining members must be k1 and k3 (k2 removed from middle)
+        assert_eq!(members.get_unchecked(0), k1);
+        assert_eq!(members.get_unchecked(1), k3);
+
+        // revoke the first member (k1) — exercises remove from start of list
+        client.revoke_role(&admin, &k1, &ctrl);
+        assert_eq!(client.get_role_member_count(&ctrl), 1);
+        let members = client.get_role_members(&ctrl, &0, &10);
+        assert_eq!(members.len(), 1);
+        assert_eq!(members.get_unchecked(0), k3);
+    }
+
+    /// Second revoke of the same account/role must be a harmless no-op
+    /// (internal_revoke_role is documented as idempotent). Count must not
+    /// go negative or decrement twice.
+    #[test]
+    fn test_idempotent_revoke() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let keeper = Address::generate(&env);
+
+        client.grant_role(&admin, &keeper, &ctrl);
+        assert_eq!(client.get_role_member_count(&ctrl), 1);
+
+        client.revoke_role(&admin, &keeper, &ctrl);
+        assert_eq!(client.get_role_member_count(&ctrl), 0);
+        assert!(!client.has_role(&keeper, &ctrl));
+
+        // second revoke — must not panic, must not decrement below zero
+        client.revoke_role(&admin, &keeper, &ctrl);
+        assert_eq!(
+            client.get_role_member_count(&ctrl),
+            0,
+            "second revoke must be a no-op and not go negative"
+        );
+        assert!(!client.has_role(&keeper, &ctrl));
+        let members = client.get_role_members(&ctrl, &0, &10);
+        assert_eq!(members.len(), 0);
+
+        // revoking an account that never held the role at all must also be a no-op
+        let never_holder = Address::generate(&env);
+        client.revoke_role(&admin, &never_holder, &ctrl);
+        assert_eq!(client.get_role_member_count(&ctrl), 0);
+    }
+
+    /// Revoke-side bookkeeping for get_roles: after revoke, the account's
+    /// role list must no longer contain the revoked role while other roles
+    /// remain — mirroring get_roles_reflects_grants_and_revokes.
+    #[test]
+    fn test_revoke_updates_account_roles_and_member_list_together() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let order_keeper = roles::order_keeper(&env);
+        let user = Address::generate(&env);
+        let other = Address::generate(&env);
+
+        // give user two roles and other one role
+        client.grant_role(&admin, &user, &ctrl);
+        client.grant_role(&admin, &user, &order_keeper);
+        client.grant_role(&admin, &other, &ctrl);
+        assert_eq!(client.get_role_member_count(&ctrl), 2);
+
+        // revoke ctrl from user — user should keep order_keeper, other keeps ctrl
+        client.revoke_role(&admin, &user, &ctrl);
+
+        assert_eq!(client.get_role_member_count(&ctrl), 1);
+        let members = client.get_role_members(&ctrl, &0, &10);
+        assert_eq!(members.len(), 1);
+        assert_eq!(members.get_unchecked(0), other);
+
+        let user_roles = client.get_roles(&user);
+        assert_eq!(user_roles.len(), 1);
+        assert_eq!(user_roles.get_unchecked(0), order_keeper);
+        assert!(!vec_contains_b32(&user_roles, &ctrl));
+    }
+
+    // ── Issue #800: persistent TTL renewal ────────────────────────────────────
+
+    fn ttl_of(env: &Env, contract_id: &Address, key: &RoleKey) -> u32 {
+        use soroban_sdk::testutils::storage::Persistent as _;
+        env.as_contract(contract_id, || env.storage().persistent().get_ttl(key))
+    }
+
+    /// Granting a role must leave every entry it writes at the bump target.
+    #[test]
+    fn test_grant_extends_persistent_ttl() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl = roles::controller(&env);
+        let keeper = Address::generate(&env);
+        client.grant_role(&admin, &keeper, &ctrl);
+
+        for key in [
+            RoleKey::HasRole(keeper.clone(), ctrl.clone()),
+            RoleKey::RoleMemberCount(ctrl.clone()),
+            RoleKey::RoleMembers(ctrl.clone()),
+            RoleKey::AccountRoles(keeper.clone()),
+            RoleKey::AllRoles,
+        ] {
+            assert!(ttl_of(&env, &contract_id, &key) >= PERSISTENT_BUMP_TARGET);
+        }
+    }
+
+    /// A read-only has_role call on an ageing ROLE_ADMIN entry must renew it,
+    /// so a role that is checked but never rewritten is not archived.
+    #[test]
+    fn test_has_role_read_renews_admin_ttl() {
+        use soroban_sdk::testutils::Ledger as _;
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let admin_role = roles::role_admin(&env);
+        let key = RoleKey::HasRole(admin.clone(), admin_role.clone());
+
+        // Age the entry until its remaining TTL is below the bump threshold.
+        let start = env.ledger().sequence();
+        env.ledger()
+            .set_sequence_number(start + PERSISTENT_BUMP_TARGET - MIN_BUMP_THRESHOLD + 1);
+        assert!(ttl_of(&env, &contract_id, &key) < MIN_BUMP_THRESHOLD);
+
+        assert!(client.has_role(&admin, &admin_role));
+        assert!(ttl_of(&env, &contract_id, &key) >= PERSISTENT_BUMP_TARGET);
+    }
+
+    /// Reading a role that was never granted must return false, not trap on
+    /// extend_ttl of a missing entry.
+    #[test]
+    fn test_has_role_unset_key_returns_false() {
+        let (env, _admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let stranger = Address::generate(&env);
+        assert!(!client.has_role(&stranger, &roles::controller(&env)));
+        assert_eq!(client.get_roles(&stranger).len(), 0);
     }
 }

@@ -2,9 +2,11 @@
 name = "gmx-integration-tests"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 [dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+clob-model  = { path = "../libs/clob_model" }
 gmx-types = { path = "../libs/types" }
 gmx-keys = { path = "../libs/keys" }
 gmx-math = { path = "../libs/math" }
@@ -26,6 +28,11 @@ fee-handler = { path = "../contracts/fee_handler" }
 market-token = { path = "../contracts/market_token" }
 reader = { path = "../contracts/reader" }
 order-cleanup = { path = "../contracts/order_cleanup" }
+exchange-router = { path = "../contracts/exchange_router" }
+market-factory = { path = "../contracts/market_factory" }
+insurance-fund-router = { path = "../contracts/insurance_fund_router" }
+fee-batch-sweeper = { path = "../contracts/fee_batch_sweeper" }
+referral-storage = { path = "../contracts/referral_storage" }
 
 [lib]
 path = "lib.rs"
@@ -86,3 +93,43 @@ path = "short_position_lifecycle.rs"
 [[test]]
 name = "lp_fee_distribution"
 path = "lp_fee_distribution.rs"
+
+[[test]]
+name = "multi_market_funding_isolation"
+path = "multi_market_funding_isolation.rs"
+
+[[test]]
+name = "funding_conservation_e2e"
+path = "funding_conservation_e2e.rs"
+
+[[test]]
+name = "order_cleanup"
+path = "order_cleanup.rs"
+
+[[test]]
+name = "router_and_factory_coverage"
+path = "router_and_factory_coverage.rs"
+
+[[test]]
+name = "resource_bench"
+path = "resource_bench.rs"
+
+[[test]]
+name = "clob_model"
+path = "clob_model.rs"
+
+[[test]]
+name = "clob_properties"
+path = "clob_properties.rs"
+
+[[test]]
+name = "privileged_auth_matrix"
+path = "privileged_auth_matrix.rs"
+
+[[test]]
+name = "fee_receiver_routing"
+path = "fee_receiver_routing.rs"
+
+[[test]]
+name = "shared_quote_token_fees"
+path = "shared_quote_token_fees.rs"

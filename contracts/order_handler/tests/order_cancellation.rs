@@ -21,12 +21,9 @@ use oracle::{Oracle, OracleClient as OClient};
 use order_handler::{CreateOrderParams, OrderHandler, OrderHandlerClient};
 use order_vault::{OrderVault, OrderVaultClient as OVClient};
 use role_store::{RoleStore, RoleStoreClient as RsClient};
-use soroban_sdk::{
-    testutils::Address as _,
-    token::StellarAssetClient,
-    Address, Env, Vec,
-};
+use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env, Vec};
 
+#[allow(dead_code)]
 struct World {
     env: Env,
     admin: Address,
@@ -46,7 +43,7 @@ struct World {
 fn setup() -> World {
     let env = Env::default();
     env.mock_all_auths();
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
 
     let admin = Address::generate(&env);
     let keeper = Address::generate(&env);
@@ -65,6 +62,13 @@ fn setup() -> World {
     let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
     OClient::new(&env, &oracle_addr).initialize(&admin, &rs, &ds, &passphrase);
 
+    let long_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let short_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
         &admin,
@@ -72,6 +76,8 @@ fn setup() -> World {
         &7u32,
         &soroban_sdk::String::from_str(&env, "GMX Market Token"),
         &soroban_sdk::String::from_str(&env, "GM"),
+        &long_tk,
+        &short_tk,
     );
     rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
 
@@ -82,23 +88,43 @@ fn setup() -> World {
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
     let dep_handler = env.register(DepositHandler, ());
-    DepositHandlerClient::new(&env, &dep_handler)
-        .initialize(&admin, &rs, &ds, &oracle_addr, &dep_vault);
+    DepositHandlerClient::new(&env, &dep_handler).initialize(
+        &admin,
+        &rs,
+        &ds,
+        &oracle_addr,
+        &dep_vault,
+    );
     rs_c.grant_role(&admin, &dep_handler, &roles::controller(&env));
 
     let ord_handler = env.register(OrderHandler, ());
-    OrderHandlerClient::new(&env, &ord_handler)
-        .initialize(&admin, &rs, &ds, &oracle_addr, &ord_vault);
+    OrderHandlerClient::new(&env, &ord_handler).initialize(
+        &admin,
+        &rs,
+        &ds,
+        &oracle_addr,
+        &ord_vault,
+    );
     rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
 
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
     let index_tk = Address::generate(&env);
 
     let ds_c = DsClient::new(&env, &ds);
-    ds_c.set_address(&admin, &gmx_keys::market_index_token_key(&env, &market_tk), &index_tk);
-    ds_c.set_address(&admin, &gmx_keys::market_long_token_key(&env, &market_tk), &long_tk);
-    ds_c.set_address(&admin, &gmx_keys::market_short_token_key(&env, &market_tk), &short_tk);
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_index_token_key(&env, &market_tk),
+        &index_tk,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_long_token_key(&env, &market_tk),
+        &long_tk,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_short_token_key(&env, &market_tk),
+        &short_tk,
+    );
 
     World {
         env,
@@ -117,6 +143,7 @@ fn setup() -> World {
     }
 }
 
+#[allow(dead_code)]
 fn seed_pool(w: &World) {
     let lp = Address::generate(&w.env);
     StellarAssetClient::new(&w.env, &w.long_tk).mint(&lp, &(10_000 * TOKEN_PRECISION));
@@ -140,9 +167,21 @@ fn seed_pool(w: &World) {
         &Vec::from_array(
             &w.env,
             [
-                TokenPrice { token: w.long_tk.clone(), min: 2_000 * fp, max: 2_000 * fp },
-                TokenPrice { token: w.short_tk.clone(), min: fp, max: fp },
-                TokenPrice { token: w.index_tk.clone(), min: 2_000 * fp, max: 2_000 * fp },
+                TokenPrice {
+                    token: w.long_tk.clone(),
+                    min: 2_000 * fp,
+                    max: 2_000 * fp,
+                },
+                TokenPrice {
+                    token: w.short_tk.clone(),
+                    min: fp,
+                    max: fp,
+                },
+                TokenPrice {
+                    token: w.index_tk.clone(),
+                    min: 2_000 * fp,
+                    max: 2_000 * fp,
+                },
             ],
         ),
     );
@@ -182,6 +221,7 @@ fn cancel_usdc_order_refunds_exact_short_token() {
             order_type: OrderType::MarketIncrease,
             is_long: false,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 
@@ -196,7 +236,10 @@ fn cancel_usdc_order_refunds_exact_short_token() {
         deposit,
         after - before
     );
-    assert!(hc.get_order(&key).is_none(), "order record must be removed after cancel");
+    assert!(
+        hc.get_order(&key).is_none(),
+        "order record must be removed after cancel"
+    );
     assert_eq!(
         OVClient::new(&w.env, &w.ord_vault).get_recorded_balance(&w.short_tk),
         0,
@@ -230,6 +273,7 @@ fn cancel_xlm_order_refunds_exact_long_token() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 
@@ -244,7 +288,10 @@ fn cancel_xlm_order_refunds_exact_long_token() {
         deposit,
         after - before
     );
-    assert!(hc.get_order(&key).is_none(), "order record must be removed after cancel");
+    assert!(
+        hc.get_order(&key).is_none(),
+        "order record must be removed after cancel"
+    );
     assert_eq!(
         OVClient::new(&w.env, &w.ord_vault).get_recorded_balance(&w.long_tk),
         0,
@@ -277,6 +324,7 @@ fn keeper_freeze_then_user_cancel_refunds_exact_collateral() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 
@@ -293,7 +341,10 @@ fn keeper_freeze_then_user_cancel_refunds_exact_collateral() {
         deposit,
         "frozen-then-cancelled order must refund exact collateral"
     );
-    assert!(hc.get_order(&key).is_none(), "frozen order must be removed after user cancel");
+    assert!(
+        hc.get_order(&key).is_none(),
+        "frozen order must be removed after user cancel"
+    );
 }
 
 /// After cancel, both the global order list and the account order list are purged.
@@ -321,6 +372,7 @@ fn cancel_removes_order_from_all_storage_lists() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 
@@ -365,6 +417,7 @@ fn non_owner_cannot_cancel_order() {
             order_type: OrderType::MarketIncrease,
             is_long: true,
             expiry_ledger: None,
+            on_behalf_of: None,
         },
     );
 

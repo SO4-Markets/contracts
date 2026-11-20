@@ -72,6 +72,12 @@ All handlers check      ──► RoleStore  (role-based access control)
 
 MarketFactory  ──► deploy MarketToken (SEP-41 LP) + register in DataStore
 Reader         ──► stateless views over DataStore (no writes)
+
+Periphery (stateless, deployed out-of-band — see Contract Map below):
+MarketUtilReader     ──► read-only OI-to-pool-depth ratio
+FeeBatchSweeper      ──► batches FeeHandler.claim_fees across markets/tokens
+InsuranceFundRouter  ──► routes liquidation penalties, covers pool shortfalls
+OrderCleanup         ──► cancels expired orders, previews cleanup fees
 ```
 
 ### Contract Map
@@ -95,6 +101,20 @@ Reader         ──► stateless views over DataStore (no writes)
 | `referral_storage` | On-chain referral code registry with tier-based rebate/discount config. |
 | `reader` | Read-only aggregate views: positions, markets, OI, funding, liquidation checks. Stores only upgrade admin metadata. |
 | `exchange_router` | Single user entry point. Supports multicall for atomic multi-step actions. |
+| `market_util_reader` | Read-only view of a market's OI-to-pool-depth utilisation and OI-cap status. Stateless — no init, no writes. |
+| `fee_batch_sweeper` | Batches `fee_handler.claim_fees` across many market/token pairs in one call. Stateless — delegates auth and accounting to `fee_handler`. |
+| `insurance_fund_router` | Configures per-market insurance funds and routes liquidation penalties / shortfall coverage between pool, treasury, and fund. |
+| `order_cleanup` | Cancels orders that have sat unexecuted past their configured expiry and previews the resulting cleanup fee. |
+| `test_faucet` | Test-only faucet that dispenses configured token amounts to callers. Excluded from production builds and WASM size budget. |
+| `test_token` | Test-only SEP-41 token used alongside `test_faucet` for testnet bootstrap workflows. Excluded from production builds and WASM size budget. |
+
+`market_util_reader`, `fee_batch_sweeper`, `insurance_fund_router`, and
+`order_cleanup` are stateless periphery contracts: none of them expose an
+`initialize` entrypoint, and every dependency (`data_store`, `oracle`,
+`fee_handler`, `order_handler`) is passed in per-call rather than stored at
+init. They are intentionally deployed out-of-band from the core protocol
+graph — see [`docs/deployment.md`](docs/deployment.md#7-periphery-contracts-deployed-out-of-band)
+— with `make deploy-contract CONTRACT=<name>`.
 
 ### Shared Libraries
 
@@ -102,7 +122,7 @@ Reader         ──► stateless views over DataStore (no writes)
 |---|---|
 | `libs/types` | All shared structs: `MarketProps`, `PositionProps`, `OrderProps`, `PriceProps`, `PositionFees`, etc. |
 | `libs/math` | `FLOAT_PRECISION` (10³⁰), `TOKEN_PRECISION` (10⁷), `mul_div_wide` (I256), `pow_factor`, `sqrt_fp`. |
-| `libs/keys` | ~58 deterministic `sha256`-based key derivation functions. |
+| `libs/keys` | A large and growing set of deterministic `sha256`-based key derivation functions (one per configurable/derived `data_store` key). |
 | `libs/market_utils` | Pool value, open interest, PnL, funding state, borrowing fees, pool/OI validation. |
 | `libs/position_utils` | Per-position PnL, fee breakdown, funding settlement, leverage validation, liquidation check. |
 | `libs/pricing_utils` | Swap and position price impact, execution price, impact pool management. |
@@ -137,18 +157,19 @@ impact = factor × (diff ^ exponent)
 ### Funding Rate
 ```
 funding_factor_per_second = funding_factor × (|long_oi - short_oi| / total_oi) ^ exponent
-funding_amount_per_size  += factor_per_second × dt × index_token_price
+funding_amount_per_size  += factor_per_second × dt
 ```
+(open interest is already USD-denominated, so no separate price term is applied)
 
 ### Borrowing Fee
 ```
-cumulative_borrowing_factor += borrowing_factor × dt × (open_interest / pool_amount)
+cumulative_borrowing_factor += borrowing_factor × dt × (open_interest / pool_amount) ^ exponent
 position_borrow_fee          = (cumulative_factor_now - factor_at_open) × size_in_tokens
 ```
 
 ### Liquidation
 ```
-remaining   = collateral_usd - borrowing_fees - funding_fees + unrealised_pnl
+remaining   = collateral_usd - borrowing_fees - funding_fees - position_fee + unrealised_pnl
 liquidatable when: remaining < min_collateral_factor × position_size_usd
 ```
 
@@ -1078,7 +1099,13 @@ contracts/
 │   ├── fee_handler/              # fee distribution and claims
 │   ├── referral_storage/         # referral codes and tier rebates
 │   ├── reader/                   # stateless aggregate views
-│   └── exchange_router/          # user entry point, multicall
+│   ├── exchange_router/          # user entry point, multicall
+│   ├── market_util_reader/       # stateless OI-to-pool-depth view (periphery)
+│   ├── fee_batch_sweeper/        # batches fee_handler claims (periphery)
+│   ├── insurance_fund_router/    # liquidation penalty routing (periphery)
+│   ├── order_cleanup/            # expired order cancellation (periphery)
+│   ├── test_faucet/              # test-only token faucet (excluded from budget)
+│   └── test_token/               # test-only SEP-41 token (excluded from budget)
 │
 └── libs/
     ├── types/                    # shared #[contracttype] structs
@@ -1268,6 +1295,7 @@ SO4.market is being built in the open. All nine implementation phases are comple
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for deployment, upgrade workflow rules, and the PR checklist.
 For the post-issue-campaign cleanup map, see [docs/PROJECT_CLEANUP.md](docs/PROJECT_CLEANUP.md).
+For the current CLOB implementation status (what compiles, what does not, and what must land first), see [docs/clob-status.md](docs/clob-status.md).
 
 ---
 
