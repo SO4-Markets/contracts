@@ -143,3 +143,45 @@ Changes to this policy require:
 4. SDK documentation update.
 
 NO runtime changes to immutable contracts or upgrade logic without coordination.
+
+## Automated Drift Prevention (#1171)
+
+The three lists in `mx/upgrade.mk` —
+
+| Makefile variable | Meaning |
+|---|---|
+| `UPGRADE_CONTRACTS` | Crates that expose `pub fn upgrade`; `make upgrade-all` iterates these |
+| `IMMUTABLE_CONTRACTS` | Crates explicitly barred from ever being upgraded |
+| `NON_UPGRADEABLE_CONTRACTS` | Crates that currently lack an upgrade entrypoint but are not architecturally immutable |
+
+— are verified by `scripts/check_upgrade_lists.py`, which runs in CI via
+`.github/workflows/upgrade-list-check.yml` on every PR that touches
+`contracts/**/src/lib.rs` or `mx/upgrade.mk`.
+
+The script enforces five invariants:
+
+1. Every crate in `UPGRADE_CONTRACTS` has `pub fn upgrade` in its `lib.rs`.
+2. No crate in `IMMUTABLE_CONTRACTS` or `NON_UPGRADEABLE_CONTRACTS` has `pub fn upgrade`.
+3. Every crate in `contracts/` whose `lib.rs` defines `pub fn upgrade` appears in `UPGRADE_CONTRACTS`.
+4. The three lists are mutually exclusive (no crate in two lists).
+5. The union of all three lists equals the set of all contract crates (no contract is omitted).
+
+**To add a new contract**: place it in one of the three variables in `mx/upgrade.mk`
+before the PR lands; CI will reject the PR if it is omitted.
+
+**To move a contract** (e.g. from `NON_UPGRADEABLE_CONTRACTS` to `UPGRADE_CONTRACTS`
+after adding an upgrade entrypoint): update `mx/upgrade.mk` and add `pub fn upgrade`
+to the contract in the same PR.
+
+### Contracts categorised by #1171
+
+The following four crates had no `pub fn upgrade` and were not listed in any Makefile
+variable before this issue was resolved.  They have been added to `NON_UPGRADEABLE_CONTRACTS`
+to reflect their current state; a future design decision may promote them to `UPGRADE_CONTRACTS`:
+
+| Contract | Rationale for non-upgradeable classification |
+|---|---|
+| `fee_batch_sweeper` | Batch fee-sweep helper; deterministic logic; no state worth migrating |
+| `insurance_fund_router` | Routes insurance payouts; changing routing logic mid-flight is risky without governance |
+| `market_util_reader` | Read-only view contract; upgrades rarely needed; promote to `UPGRADE_CONTRACTS` if oracle feeds change |
+| `order_cleanup` | Maintenance helper; stateless; replace with a new deployment if logic must change |
