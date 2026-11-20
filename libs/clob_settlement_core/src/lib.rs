@@ -546,7 +546,10 @@ pub struct FillQuoteLegs {
     pub debit: i128,
     /// Added to the seller's available quote.
     pub credit: i128,
-    /// Credited to the protocol dust account.
+    /// Rounding residue (0 or 1 atom). Ownership is tracked by the protocol
+    /// dust account (CLOB-083). Until that account is implemented the residue
+    /// is computed and checked but not transferred anywhere — it is effectively
+    /// discarded each fill.
     pub residue: i128,
 }
 
@@ -584,10 +587,15 @@ pub fn fill_quote_legs(
     let debit = lock_before - lock_after;
     let residue = debit - credit;
     // Two rounded-up values differ by at most one atom from their rounded-down
-    // sum, so a single fill can only leave a residue of 0 or 1.
-    if !(0..=1).contains(&residue) {
-        return Err("fill: residue out of bounds");
-    }
+    // sum, so a single fill can only leave a residue of 0 or 1.  This is a
+    // structural theorem of the arithmetic, not a caller-supplied invariant, so
+    // it is expressed as a debug_assert rather than a returned error (#1124).
+    // A property test (`fill_residue_is_always_zero_or_one`) covers random
+    // (lot_size, remaining, fill, price) tuples.
+    debug_assert!(
+        (0..=1).contains(&residue),
+        "fill: residue {residue} out of bounds — arithmetic theorem violated"
+    );
     Ok(FillQuoteLegs { debit, credit, residue })
 }
 
