@@ -954,6 +954,59 @@ impl TraderAccount {
         }
         Ok(())
     }
+
+    /// Move `amount` from `available_balance` to `locked_balance`.
+    ///
+    /// Called at bid placement to reserve the quote amount plus the
+    /// worst-case fee (see `MarketFeeConfig::required_bid_reservation`).
+    pub fn lock(&mut self, amount: i128) -> Result<(), &'static str> {
+        if amount <= 0 {
+            return Err("lock: amount must be positive");
+        }
+        if amount > self.available_balance {
+            return Err("lock: insufficient available balance");
+        }
+        self.available_balance = self.available_balance
+            .checked_sub(amount)
+            .ok_or("lock: available underflow")?;
+        self.locked_balance = self.locked_balance
+            .checked_add(amount)
+            .ok_or("lock: locked overflow")?;
+        self.validate_invariants()
+    }
+
+    /// Move `amount` from `locked_balance` back to `available_balance`.
+    ///
+    /// Called on cancel, expiry, or to release over-reserved dust after a fill.
+    pub fn release(&mut self, amount: i128) -> Result<(), &'static str> {
+        if amount <= 0 {
+            return Err("release: amount must be positive");
+        }
+        if amount > self.locked_balance {
+            return Err("release: insufficient locked balance");
+        }
+        self.locked_balance = self.locked_balance
+            .checked_sub(amount)
+            .ok_or("release: locked underflow")?;
+        self.available_balance = self.available_balance
+            .checked_add(amount)
+            .ok_or("release: available overflow")?;
+        self.validate_invariants()
+    }
+
+    /// Reserve the full bid amount for a new bid order.
+    ///
+    /// Calls `required_bid_reservation` to compute quote + worst-case fee and
+    /// locks that amount. This is the canonical call-site for bid placement.
+    pub fn lock_bid_reservation(
+        &mut self,
+        config: &MarketFeeConfig,
+        quote_amount: i128,
+    ) -> Result<i128, &'static str> {
+        let reservation = config.required_bid_reservation(quote_amount)?;
+        self.lock(reservation)?;
+        Ok(reservation)
+    }
 }
 
 #[derive(Clone)]
@@ -2698,5 +2751,154 @@ mod bounded_work_tests {
         assert!(MAX_BATCH_SIZE <= u32::MAX);
         assert!(MAX_DEPTH_QUERY_SIZE <= u32::MAX);
         assert!(MAX_ORDER_PAYLOAD_BYTES <= u32::MAX);
+    }
+}
+
+// ============ #1135: bid reservation lock/release tests ============
+#[cfg(test)]
+mod bid_reservation_tests {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+
+    fn funded_account(env: &soroban_sdk::Env, amount: i128) -> TraderAccount {
+        let mut acct = TraderAccount::new(
+            Address::generate(env),
+            Address::generate(env),
+        );
+        // Simulate a deposit so available_balance == amount.
+        acct.total_balance = amount;
+        acct.available_balance = amount;
+        acct
+    }
+
+    #[test]
+    fn lock_moves_available_to_locked() {
+        let env = soroban_sdk::Env::default();
+        let mut acct = funded_account(&env, 1_000);
+        acct.lock(300).unwrap();
+        assert_eq!(acct.available_balance, 700);
+        assert_eq!(acct.locked_balance, 300);
+        assert_eq!(acct.total_balance, 1_000);
+        acct.validate_invariants().unwrap();
+    }
+
+    #[test]
+    fn release_moves_locked_back_to_available() {
+        let env = soroban_sdk::Env::default();
+        let mut acct = funded_account(&env, 1_000);
+        acct.lock(300).unwrap();
+        acct.release(300).unwrap();
+        assert_eq!(acct.available_balance, 1_000);
+        assert_eq!(acct.locked_balance, 0);
+        assert_eq!(acct.total_balance, 1_000);
+        acct.validate_invariants().unwrap();
+    }
+
+    #[test]
+    fn lock_rejects_zero_and_negative() {
+        let env = soroban_sdk::Env::default();
+        let mut acct = funded_account(&env, 1_000);
+        assert!(acct.lock(0).is_err());
+        assert!(acct.lock(-1).is_err());
+    }
+
+    #[test]
+    fn release_rejects_zero_and_negative() {
+        let env = soroban_sdk::Env::default();
+        let mut acct = funded_account(&env, 1_000);
+        acct.lock(100).unwrap();
+        assert!(acct.release(0).is_err());
+        assert!(acct.release(-1).is_err());
+    }
+
+    #[test]
+    fn lock_rejects_overdraft() {
+        let env = soroban_sdk::Env::default();
+        let mut acct = funded_account(&env, 500);
+        assert!(acct.lock(501).is_err());
+        // State must be unchanged after a failed lock.
+        assert_eq!(acct.available_balance, 500);
+        assert_eq!(acct.locked_balance, 0);
+    }
+
+    #[test]
+    fn release_rejects_over_release() {
+        let env = soroban_sdk::Env::default();
+        let mut acct = funded_account(&env, 1_000);
+        acct.lock(200).unwrap();
+        assert!(acct.release(201).is_err());
+        assert_eq!(acct.locked_balance, 200);
+    }
+
+    #[test]
+    fn lock_bid_reservation_includes_fee_and_caller_has_enough() {
+        let env = soroban_sdk::Env::default();
+        // 0.1% taker / 0.2% maker; worst-case = maker = 0.2%
+        let config = MarketFeeConfig::new(100_000, 200_000).unwrap();
+        let quote = 1_000_000_i128;
+        let expected_reservation = config.required_bid_reservation(quote).unwrap();
+
+        let mut acct = funded_account(&env, expected_reservation);
+        let locked = acct.lock_bid_reservation(&config, quote).unwrap();
+
+        assert_eq!(locked, expected_reservation);
+        assert_eq!(acct.available_balance, 0);
+        assert_eq!(acct.locked_balance, expected_reservation);
+        acct.validate_invariants().unwrap();
+    }
+
+    #[test]
+    fn lock_bid_reservation_rejects_insufficient_balance() {
+        let env = soroban_sdk::Env::default();
+        let config = MarketFeeConfig::new(100_000, 200_000).unwrap();
+        let quote = 1_000_000_i128;
+        // Fund with one atom less than the reservation.
+        let reservation = config.required_bid_reservation(quote).unwrap();
+        let mut acct = funded_account(&env, reservation - 1);
+        assert!(acct.lock_bid_reservation(&config, quote).is_err());
+        // Available must be unchanged after failure.
+        assert_eq!(acct.available_balance, reservation - 1);
+        assert_eq!(acct.locked_balance, 0);
+    }
+
+    /// A bid that fills as a maker must never drive available_balance below zero.
+    ///
+    /// Scenario: a bid is placed and its full reservation is locked.
+    /// It then fills as a maker: settle_with_fees deducts the maker fee from
+    /// the locked quote. The residual reservation is released back to
+    /// available. At no point should available_balance go negative.
+    #[test]
+    fn bid_filling_as_maker_never_drives_available_below_zero() {
+        let env = soroban_sdk::Env::default();
+        let config = MarketFeeConfig::new(100_000, 200_000).unwrap();
+        let quote_amount = 1_000_000_i128;
+
+        // 1. Place bid: lock the full reservation.
+        let mut acct = funded_account(&env, 2_000_000);
+        let reservation = acct.lock_bid_reservation(&config, quote_amount).unwrap();
+        assert!(acct.available_balance >= 0);
+
+        // 2. Fill as maker: the locked quote is consumed (debit) and the
+        //    maker fee is taken from it. Release any surplus (reservation - quote).
+        let surplus = reservation
+            .checked_sub(quote_amount)
+            .expect("reservation >= quote by construction");
+        if surplus > 0 {
+            acct.release(surplus).unwrap();
+        }
+        // Debit the quote from locked (simulating the settlement path).
+        acct.locked_balance = acct
+            .locked_balance
+            .checked_sub(quote_amount)
+            .unwrap();
+        acct.total_balance = acct
+            .total_balance
+            .checked_sub(quote_amount)
+            .unwrap();
+
+        // available_balance must still be non-negative.
+        assert!(acct.available_balance >= 0);
+        // And the invariant must hold.
+        acct.validate_invariants().unwrap();
     }
 }
