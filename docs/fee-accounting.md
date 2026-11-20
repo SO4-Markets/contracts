@@ -121,6 +121,33 @@ role. A bid for quote `q` locks:
 required_bid_reservation(q) = q + max(taker_fee(q), maker_fee(q))
 ```
 
+### Implementation — `TraderAccount::lock` / `release` / `lock_bid_reservation`
+
+`required_bid_reservation` is called through `TraderAccount::lock_bid_reservation`,
+which is the **only** correct call-site for bid placement:
+
+```rust
+// At bid placement:
+account.lock_bid_reservation(&config, quote_amount)?;
+
+// On cancel or expiry (full release):
+account.release(reservation)?;
+
+// After a maker fill (release any over-reserved dust):
+let surplus = reservation - quote_deducted;
+if surplus > 0 { account.release(surplus)?; }
+```
+
+`lock` moves `amount` from `available_balance` to `locked_balance`, leaving
+`total_balance` unchanged and failing with an error if `available_balance`
+would go negative. `release` is the inverse. Both call `validate_invariants`
+after mutating state.
+
+A bid that does not call `lock_bid_reservation` before placement allows
+`settle_with_fees` to deduct the maker fee from `available_balance` directly,
+which can drive it negative. The fix is wiring `lock_bid_reservation` into
+the placement path before a bid is inserted into the order book.
+
 ## Tiers
 
 Version one resolves either the market-wide rate or one bounded, already
