@@ -195,12 +195,41 @@ jobs:
             python3 scripts/wasm-size-check.py "$RUNNER_TEMP/wasm-head"
           fi
 
+  # Lints and tests the Python scripts in scripts/. Issue #1167.
+  python:
+    name: Python lint & tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint scripts/ with ruff
+        run: ruff check scripts/
+
+      - name: Run test_compute_key
+        run: python3 -m pytest scripts/test_compute_key.py -v
+
+      - name: Run test_wasm_size_check
+        run: python3 -m pytest scripts/test_wasm_size_check.py -v
+
+      - name: Run test_gen_auth_audit
+        run: python3 -m pytest scripts/test_gen_auth_audit.py -v
+
+      - name: Run test_bench_compare
+        run: python3 -m pytest scripts/test_bench_compare.py -v
+
   # Single status to mark as required in branch protection: it is red unless
   # every job above succeeded (a skipped or cancelled job counts as failure).
   ci-passed:
     name: CI passed
     if: always()
-    needs: [fmt, clippy, build, test, wasm-size]
+    needs: [fmt, clippy, build, test, wasm-size, python]
     runs-on: ubuntu-latest
     steps:
       - name: Require every CI job to succeed
