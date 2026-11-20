@@ -18,11 +18,12 @@
 
 use data_store::{DataStore, DataStoreClient as DsClient};
 use gmx_keys::{
-    claimable_funding_amount_key, funding_amount_per_size_key, funding_decrease_factor_per_second_key,
-    funding_exponent_factor_key, funding_factor_key, funding_increase_factor_per_second_key,
-    funding_updated_at_key, market_index_token_key, market_long_token_key, market_short_token_key,
-    max_funding_factor_per_second_key, min_funding_factor_per_second_key, open_interest_key,
-    position_key, roles, saved_funding_factor_per_second_key,
+    claimable_funding_amount_key, funding_amount_per_size_key,
+    funding_decrease_factor_per_second_key, funding_exponent_factor_key, funding_factor_key,
+    funding_increase_factor_per_second_key, funding_updated_at_key, market_index_token_key,
+    market_long_token_key, market_short_token_key, max_funding_factor_per_second_key,
+    min_funding_factor_per_second_key, open_interest_key, position_key, roles,
+    saved_funding_factor_per_second_key,
 };
 use gmx_math::FLOAT_PRECISION;
 use gmx_types::{CreateOrderParams, OrderType, TokenPrice};
@@ -232,28 +233,27 @@ fn seed_pool_and_set_prices(w: &TestWorld, eth_usd: i128) {
 fn open_long_position(w: &TestWorld, size_usd: i128, collateral: i128) -> BytesN<32> {
     let oh_c = OHClient::new(&w.env, &w.ord_handler);
 
-    StellarAssetClient::new(&w.env, &w.long_tk).transfer(
-        &w.trader1,
-        &w.ord_vault,
-        &collateral,
-    );
+    StellarAssetClient::new(&w.env, &w.long_tk).transfer(&w.trader1, &w.ord_vault, &collateral);
 
-    let order_key = oh_c.create_order(&w.trader1, &CreateOrderParams {
-        receiver: w.trader1.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: size_usd,
-        collateral_delta_amount: collateral,
-        trigger_price: 0,
-        acceptable_price: 2_100 * ONE_USD,
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::MarketIncrease,
-        is_long: true,
-        expiry_ledger: None,
-        on_behalf_of: None,
-    });
+    let order_key = oh_c.create_order(
+        &w.trader1,
+        &CreateOrderParams {
+            receiver: w.trader1.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: size_usd,
+            collateral_delta_amount: collateral,
+            trigger_price: 0,
+            acceptable_price: 2_100 * ONE_USD,
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketIncrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
 
     oh_c.execute_order(&w.keeper, &order_key);
 
@@ -264,28 +264,27 @@ fn open_long_position(w: &TestWorld, size_usd: i128, collateral: i128) -> BytesN
 fn open_short_position(w: &TestWorld, size_usd: i128, collateral: i128) -> BytesN<32> {
     let oh_c = OHClient::new(&w.env, &w.ord_handler);
 
-    StellarAssetClient::new(&w.env, &w.long_tk).transfer(
-        &w.trader2,
-        &w.ord_vault,
-        &collateral,
-    );
+    StellarAssetClient::new(&w.env, &w.long_tk).transfer(&w.trader2, &w.ord_vault, &collateral);
 
-    let order_key = oh_c.create_order(&w.trader2, &CreateOrderParams {
-        receiver: w.trader2.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: size_usd,
-        collateral_delta_amount: collateral,
-        trigger_price: 0,
-        acceptable_price: 1_900 * ONE_USD,
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::MarketIncrease,
-        is_long: false,
-        expiry_ledger: None,
-        on_behalf_of: None,
-    });
+    let order_key = oh_c.create_order(
+        &w.trader2,
+        &CreateOrderParams {
+            receiver: w.trader2.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: size_usd,
+            collateral_delta_amount: collateral,
+            trigger_price: 0,
+            acceptable_price: 1_900 * ONE_USD,
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketIncrease,
+            is_long: false,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
 
     oh_c.execute_order(&w.keeper, &order_key);
 
@@ -333,22 +332,25 @@ fn funding_rate_longs_pay_shorts_when_long_oi_exceeds_short() {
     w.env.ledger().set_timestamp(new_time);
 
     // Trigger funding update via position decrease (partial close)
-    let close_key = oh_c.create_order(&w.trader1, &CreateOrderParams {
-        receiver: w.trader1.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: 10_000 * ONE_USD,
-        collateral_delta_amount: 1_000 * ONE_TOKEN,
-        trigger_price: 0,
-        acceptable_price: 1_900 * ONE_USD, // decrease: floor for longs, ceiling for shorts
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::MarketDecrease,
-        is_long: true,
-        expiry_ledger: None,
-        on_behalf_of: None,
-    });
+    let close_key = oh_c.create_order(
+        &w.trader1,
+        &CreateOrderParams {
+            receiver: w.trader1.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: 10_000 * ONE_USD,
+            collateral_delta_amount: 1_000 * ONE_TOKEN,
+            trigger_price: 0,
+            acceptable_price: 1_900 * ONE_USD, // decrease: floor for longs, ceiling for shorts
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketDecrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
     oh_c.execute_order(&w.keeper, &close_key);
 
     // Verify funding state was updated
@@ -435,22 +437,25 @@ fn funding_rate_shorts_pay_longs_when_short_oi_exceeds_long() {
     w.env.ledger().set_timestamp(3600);
 
     // Trigger funding via decrease
-    let close_key = oh_c.create_order(&w.trader2, &CreateOrderParams {
-        receiver: w.trader2.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: 10_000 * ONE_USD,
-        collateral_delta_amount: 1_000 * ONE_TOKEN,
-        trigger_price: 0,
-        acceptable_price: 2_100 * ONE_USD, // decrease: floor for longs, ceiling for shorts
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::MarketDecrease,
-        is_long: false,
-        expiry_ledger: None,
-        on_behalf_of: None,
-    });
+    let close_key = oh_c.create_order(
+        &w.trader2,
+        &CreateOrderParams {
+            receiver: w.trader2.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: 10_000 * ONE_USD,
+            collateral_delta_amount: 1_000 * ONE_TOKEN,
+            trigger_price: 0,
+            acceptable_price: 2_100 * ONE_USD, // decrease: floor for longs, ceiling for shorts
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketDecrease,
+            is_long: false,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
     oh_c.execute_order(&w.keeper, &close_key);
 
     let saved_factor = ds_c.get_i128(&saved_funding_factor_per_second_key(&w.env, &w.market_tk));
@@ -515,22 +520,25 @@ fn funding_rate_zero_when_oi_balanced() {
     w.env.ledger().set_timestamp(3600);
 
     // Trigger funding via decrease
-    let close_key = oh_c.create_order(&w.trader1, &CreateOrderParams {
-        receiver: w.trader1.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: 10_000 * ONE_USD,
-        collateral_delta_amount: 1_000 * ONE_TOKEN,
-        trigger_price: 0,
-        acceptable_price: 1_900 * ONE_USD, // decrease: floor for longs, ceiling for shorts
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::MarketDecrease,
-        is_long: true,
-        expiry_ledger: None,
-        on_behalf_of: None,
-    });
+    let close_key = oh_c.create_order(
+        &w.trader1,
+        &CreateOrderParams {
+            receiver: w.trader1.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: 10_000 * ONE_USD,
+            collateral_delta_amount: 1_000 * ONE_TOKEN,
+            trigger_price: 0,
+            acceptable_price: 1_900 * ONE_USD, // decrease: floor for longs, ceiling for shorts
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketDecrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
     oh_c.execute_order(&w.keeper, &close_key);
 
     let saved_factor = ds_c.get_i128(&saved_funding_factor_per_second_key(&w.env, &w.market_tk));
@@ -590,22 +598,25 @@ fn funding_rate_zero_when_no_oi() {
 
     // Fully close the position
     let pos = oh_c.get_position(&pos_key).expect("position must exist");
-    let close_key = oh_c.create_order(&w.trader1, &CreateOrderParams {
-        receiver: w.trader1.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: pos.size_in_usd,
-        collateral_delta_amount: pos.collateral_amount,
-        trigger_price: 0,
-        acceptable_price: 1_900 * ONE_USD, // decrease: floor for longs, ceiling for shorts
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::MarketDecrease,
-        is_long: true,
-        expiry_ledger: None,
-        on_behalf_of: None,
-    });
+    let close_key = oh_c.create_order(
+        &w.trader1,
+        &CreateOrderParams {
+            receiver: w.trader1.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: pos.size_in_usd,
+            collateral_delta_amount: pos.collateral_amount,
+            trigger_price: 0,
+            acceptable_price: 1_900 * ONE_USD, // decrease: floor for longs, ceiling for shorts
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketDecrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
     oh_c.execute_order(&w.keeper, &close_key);
 
     // Position should be fully closed — no OI left
@@ -654,37 +665,37 @@ fn funding_settlement_accumulates_claimable_amount() {
     let pos_key = open_long_position(&w, 50_000 * ONE_USD, 5_000 * ONE_TOKEN);
 
     // Record the initial claimable amount (should be 0)
-    let claimable_key = claimable_funding_amount_key(
-        &w.env,
-        &w.market_tk,
-        &w.long_tk,
-        &w.trader1,
-    );
+    let claimable_key = claimable_funding_amount_key(&w.env, &w.market_tk, &w.long_tk, &w.trader1);
     let _claimable_before = ds_c.get_i128(&claimable_key);
 
     // Advance time by 1 hour and trigger funding via another decrease
     w.env.ledger().set_timestamp(3600);
 
-    let close_key = oh_c.create_order(&w.trader1, &CreateOrderParams {
-        receiver: w.trader1.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: 10_000 * ONE_USD,
-        collateral_delta_amount: 1_000 * ONE_TOKEN,
-        trigger_price: 0,
-        acceptable_price: 1_900 * ONE_USD, // decrease: floor for longs, ceiling for shorts
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::MarketDecrease,
-        is_long: true,
-        expiry_ledger: None,
-        on_behalf_of: None,
-    });
+    let close_key = oh_c.create_order(
+        &w.trader1,
+        &CreateOrderParams {
+            receiver: w.trader1.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: 10_000 * ONE_USD,
+            collateral_delta_amount: 1_000 * ONE_TOKEN,
+            trigger_price: 0,
+            acceptable_price: 1_900 * ONE_USD, // decrease: floor for longs, ceiling for shorts
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketDecrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
     oh_c.execute_order(&w.keeper, &close_key);
 
     // After settlement, the position's funding_fee_amount_per_size should be updated
-    let pos = oh_c.get_position(&pos_key).expect("position must still exist");
+    let pos = oh_c
+        .get_position(&pos_key)
+        .expect("position must still exist");
     assert_ne!(
         pos.funding_fee_amount_per_size, 0,
         "Position funding fee per size must be nonzero after settlement"
@@ -692,12 +703,7 @@ fn funding_settlement_accumulates_claimable_amount() {
 
     // The claimable amount may or may not change depending on whether the
     // position was fully settled; verify the per-size value changed from initial
-    let funding_per_size_key = funding_amount_per_size_key(
-        &w.env,
-        &w.market_tk,
-        &w.long_tk,
-        true,
-    );
+    let funding_per_size_key = funding_amount_per_size_key(&w.env, &w.market_tk, &w.long_tk, true);
     let funding_per_size = ds_c.get_i128(&funding_per_size_key);
     assert!(
         funding_per_size < 0,
@@ -737,22 +743,25 @@ fn funding_rate_ramps_proportionally_to_dt() {
 
     w.env.ledger().set_timestamp(3600);
 
-    let close_key = oh_c.create_order(&w.trader1, &CreateOrderParams {
-        receiver: w.trader1.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: 10_000 * ONE_USD,
-        collateral_delta_amount: 1_000 * ONE_TOKEN,
-        trigger_price: 0,
-        acceptable_price: 1_900 * ONE_USD, // decrease: floor for longs, ceiling for shorts
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::MarketDecrease,
-        is_long: true,
-        expiry_ledger: None,
-        on_behalf_of: None,
-    });
+    let close_key = oh_c.create_order(
+        &w.trader1,
+        &CreateOrderParams {
+            receiver: w.trader1.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: 10_000 * ONE_USD,
+            collateral_delta_amount: 1_000 * ONE_TOKEN,
+            trigger_price: 0,
+            acceptable_price: 1_900 * ONE_USD, // decrease: floor for longs, ceiling for shorts
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketDecrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
     oh_c.execute_order(&w.keeper, &close_key);
 
     let factor_1h = ds_c.get_i128(&saved_funding_factor_per_second_key(&w.env, &w.market_tk));
@@ -774,22 +783,25 @@ fn funding_rate_ramps_proportionally_to_dt() {
 
     w.env.ledger().set_timestamp(7200);
 
-    let close_key2 = oh_c.create_order(&w.trader1, &CreateOrderParams {
-        receiver: w.trader1.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: 10_000 * ONE_USD,
-        collateral_delta_amount: 1_000 * ONE_TOKEN,
-        trigger_price: 0,
-        acceptable_price: 1_900 * ONE_USD, // decrease: floor for longs, ceiling for shorts
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::MarketDecrease,
-        is_long: true,
-        expiry_ledger: None,
-        on_behalf_of: None,
-    });
+    let close_key2 = oh_c.create_order(
+        &w.trader1,
+        &CreateOrderParams {
+            receiver: w.trader1.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: 10_000 * ONE_USD,
+            collateral_delta_amount: 1_000 * ONE_TOKEN,
+            trigger_price: 0,
+            acceptable_price: 1_900 * ONE_USD, // decrease: floor for longs, ceiling for shorts
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketDecrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
     oh_c.execute_order(&w.keeper, &close_key2);
 
     let factor_2h = ds_c.get_i128(&saved_funding_factor_per_second_key(&w.env, &w.market_tk));
@@ -878,22 +890,25 @@ fn test_funding_rate_accumulation_and_settlement_integration() {
         &(5_000 * ONE_TOKEN),
     );
     let oh_c = OHClient::new(&w.env, &w.ord_handler);
-    let seed_key = oh_c.create_order(&w.trader1, &CreateOrderParams {
-        receiver: w.trader1.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: 50_000 * ONE_USD,
-        collateral_delta_amount: 5_000 * ONE_TOKEN,
-        trigger_price: 0,
-        acceptable_price: 2_100 * ONE_USD,
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::MarketIncrease,
-        is_long: true,
-        expiry_ledger: None,
-        on_behalf_of: None,
-    });
+    let seed_key = oh_c.create_order(
+        &w.trader1,
+        &CreateOrderParams {
+            receiver: w.trader1.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: 50_000 * ONE_USD,
+            collateral_delta_amount: 5_000 * ONE_TOKEN,
+            trigger_price: 0,
+            acceptable_price: 2_100 * ONE_USD,
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketIncrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
     oh_c.execute_order(&w.keeper, &seed_key);
 
     // ── Step 4: advance ledger state by 1 000 seconds ─────────────────────────
@@ -911,13 +926,7 @@ fn test_funding_rate_accumulation_and_settlement_integration() {
         short_token: w.long_tk.clone(), // same token (single-sided market, matching setup())
     };
 
-    let result = update_funding_state(
-        &w.env,
-        &w.ds,
-        &w.admin,
-        &market_props,
-        dt,
-    );
+    let result = update_funding_state(&w.env, &w.ds, &w.admin, &market_props, dt);
 
     // ── Step 6a: direction checks ──────────────────────────────────────────────
     assert!(
@@ -1007,7 +1016,9 @@ fn test_funding_rate_accumulation_and_settlement_integration() {
     let short_recv = abs_short as u128 * short_oi / ONE_USD as u128;
     let conserv_num = long_paid.abs_diff(short_recv);
     let conserv_denom = long_paid.max(short_recv);
-    let conserv_error_bps = (conserv_num * 10_000).checked_div(conserv_denom).unwrap_or(0);
+    let conserv_error_bps = (conserv_num * 10_000)
+        .checked_div(conserv_denom)
+        .unwrap_or(0);
 
     assert!(
         conserv_error_bps <= tolerance_bps as u128,

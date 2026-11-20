@@ -158,14 +158,14 @@ impl AdlHandler {
             }
         }
         let old_oracle: Address = env.storage().instance().get(&InstanceKey::Oracle).unwrap();
-        env.storage().instance().set(&InstanceKey::Oracle, &new_oracle);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Oracle, &new_oracle);
         // Issue #605: the oracle address every subsequent price validation
         // relies on just changed — emit an event so off-chain monitoring has
         // an audit trail for this admin action.
-        env.events().publish(
-            (symbol_short!("orcl_set"),),
-            (old_oracle, new_oracle),
-        );
+        env.events()
+            .publish((symbol_short!("orcl_set"),), (old_oracle, new_oracle));
     }
 
     /// Check whether ADL is currently required for the given market side.
@@ -346,8 +346,8 @@ mod tests {
     use data_store::{DataStore, DataStoreClient as DsClient};
     use deposit_handler::{DepositHandler, DepositHandlerClient};
     use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
-    use gmx_keys::roles;
     use gmx_keys::max_pnl_factor_for_adl_key;
+    use gmx_keys::roles;
     use gmx_math::FLOAT_PRECISION;
     use gmx_types::{CreateDepositParams, CreateOrderParams, OrderType, TokenPrice};
     use market_token::{MarketToken, MarketTokenClient as MtClient};

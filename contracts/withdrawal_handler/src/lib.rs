@@ -112,7 +112,11 @@ trait IDataStore {
 #[soroban_sdk::contractclient(name = "OracleClient")]
 trait IOracle {
     fn get_primary_price(env: Env, token: Address) -> gmx_types::PriceProps;
-    fn require_price_fresh(env: Env, token: Address, expected_ledger_seq: u32) -> gmx_types::PriceProps;
+    fn require_price_fresh(
+        env: Env,
+        token: Address,
+        expected_ledger_seq: u32,
+    ) -> gmx_types::PriceProps;
 }
 
 #[allow(dead_code)]
@@ -214,14 +218,14 @@ impl WithdrawalHandler {
             }
         }
         let old_oracle: Address = env.storage().instance().get(&InstanceKey::Oracle).unwrap();
-        env.storage().instance().set(&InstanceKey::Oracle, &new_oracle);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Oracle, &new_oracle);
         // Issue #605: the oracle address every subsequent price validation
         // relies on just changed — emit an event so off-chain monitoring has
         // an audit trail for this admin action.
-        env.events().publish(
-            (symbol_short!("orcl_set"),),
-            (old_oracle, new_oracle),
-        );
+        env.events()
+            .publish((symbol_short!("orcl_set"),), (old_oracle, new_oracle));
     }
 
     // ── Create withdrawal ─────────────────────────────────────────────────────
@@ -332,7 +336,12 @@ impl WithdrawalHandler {
         // RPC round-trip.
         env.events().publish(
             (symbol_short!("wth_crt"),),
-            (key.clone(), caller, market_addr, withdrawal.market_token_amount),
+            (
+                key.clone(),
+                caller,
+                market_addr,
+                withdrawal.market_token_amount,
+            ),
         );
         key
     }
@@ -385,8 +394,10 @@ impl WithdrawalHandler {
         let oracle_client = OracleClient::new(&env, &oracle);
         let current_seq = env.ledger().sequence();
         let long_price_props = oracle_client.require_price_fresh(&market.long_token, &current_seq);
-        let short_price_props = oracle_client.require_price_fresh(&market.short_token, &current_seq);
-        let index_price_props = oracle_client.require_price_fresh(&market.index_token, &current_seq);
+        let short_price_props =
+            oracle_client.require_price_fresh(&market.short_token, &current_seq);
+        let index_price_props =
+            oracle_client.require_price_fresh(&market.index_token, &current_seq);
         let long_price = long_price_props.mid_price();
         let short_price = short_price_props.mid_price();
 
@@ -424,8 +435,10 @@ impl WithdrawalHandler {
             // FLOAT_PRECISION fraction first and re-applying it: chaining two roundings
             // can leave 1-unit dust behind even on a full (100%) withdrawal, where this
             // fused form is exact.
-            let long_out_usd = mul_div_wide(&env, withdrawal_value_usd, long_pool_usd, total_pool_usd);
-            let short_out_usd = mul_div_wide(&env, withdrawal_value_usd, short_pool_usd, total_pool_usd);
+            let long_out_usd =
+                mul_div_wide(&env, withdrawal_value_usd, long_pool_usd, total_pool_usd);
+            let short_out_usd =
+                mul_div_wide(&env, withdrawal_value_usd, short_pool_usd, total_pool_usd);
 
             let long_out = if long_price > 0 {
                 mul_div_wide(&env, long_out_usd, TOKEN_PRECISION, long_price)
@@ -1339,7 +1352,11 @@ mod tests {
     /// side), and mints `lp_supply` LP tokens to `user`.
     fn fund_long_only_pool(w: &World, user: &Address, pool_amount: i128, lp_supply: i128) {
         let ds_c = DsClient::new(&w.env, &w.ds);
-        ds_c.set_bool(&w.admin, &is_market_paused_key(&w.env, &w.market_tk), &false);
+        ds_c.set_bool(
+            &w.admin,
+            &is_market_paused_key(&w.env, &w.market_tk),
+            &false,
+        );
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &pool_amount);
         ds_c.set_u128(
             &w.admin,
@@ -1372,7 +1389,11 @@ mod tests {
         );
         for token in [&w.long_tk, &w.short_tk] {
             for is_long in [true, false] {
-                ds_c.set_u128(&w.admin, &gmx_keys::open_interest_key(&w.env, &w.market_tk, token, is_long), &0);
+                ds_c.set_u128(
+                    &w.admin,
+                    &gmx_keys::open_interest_key(&w.env, &w.market_tk, token, is_long),
+                    &0,
+                );
                 ds_c.set_u128(
                     &w.admin,
                     &gmx_keys::open_interest_in_tokens_key(&w.env, &w.market_tk, token, is_long),
@@ -1402,7 +1423,12 @@ mod tests {
     /// Writes a WithdrawalProps record directly (standing in for
     /// create_withdrawal) and moves the LP tokens into withdrawal_vault, as
     /// create_withdrawal itself would have done via a real transfer.
-    fn write_withdrawal_and_fund_vault(w: &World, user: &Address, key: &BytesN<32>, lp_amount: i128) {
+    fn write_withdrawal_and_fund_vault(
+        w: &World,
+        user: &Address,
+        key: &BytesN<32>,
+        lp_amount: i128,
+    ) {
         w.env.as_contract(&w.wth_handler, || {
             w.env.storage().persistent().set(
                 &LocalKey::Withdrawal(key.clone()),
@@ -1454,9 +1480,21 @@ mod tests {
             &Vec::from_array(
                 env,
                 [
-                    TokenPrice { token: w.long_tk.clone(), min: 2000 * fp, max: 2000 * fp },
-                    TokenPrice { token: w.short_tk.clone(), min: fp, max: fp },
-                    TokenPrice { token: w.index_tk.clone(), min: 2400 * fp, max: 2400 * fp },
+                    TokenPrice {
+                        token: w.long_tk.clone(),
+                        min: 2000 * fp,
+                        max: 2000 * fp,
+                    },
+                    TokenPrice {
+                        token: w.short_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: w.index_tk.clone(),
+                        min: 2400 * fp,
+                        max: 2400 * fp,
+                    },
                 ],
             ),
         );
@@ -1477,7 +1515,10 @@ mod tests {
             long_out < gross_formula_payout,
             "profitable traders must reduce payout below the gross-formula amount: got {long_out}, gross would be {gross_formula_payout}"
         );
-        assert_eq!(long_out, expected_nav_payout, "payout must match PnL-adjusted NAV exactly");
+        assert_eq!(
+            long_out, expected_nav_payout,
+            "payout must match PnL-adjusted NAV exactly"
+        );
     }
 
     /// Acceptance criterion (negative PnL): a $40M-unprofitable short position
@@ -1508,9 +1549,21 @@ mod tests {
             &Vec::from_array(
                 env,
                 [
-                    TokenPrice { token: w.long_tk.clone(), min: 2000 * fp, max: 2000 * fp },
-                    TokenPrice { token: w.short_tk.clone(), min: fp, max: fp },
-                    TokenPrice { token: w.index_tk.clone(), min: 2400 * fp, max: 2400 * fp },
+                    TokenPrice {
+                        token: w.long_tk.clone(),
+                        min: 2000 * fp,
+                        max: 2000 * fp,
+                    },
+                    TokenPrice {
+                        token: w.short_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: w.index_tk.clone(),
+                        min: 2400 * fp,
+                        max: 2400 * fp,
+                    },
                 ],
             ),
         );
@@ -1531,7 +1584,10 @@ mod tests {
             long_out > gross_formula_payout,
             "unprofitable traders must raise payout above the gross-formula amount: got {long_out}, gross would be {gross_formula_payout}"
         );
-        assert_eq!(long_out, expected_nav_payout, "payout must match PnL-adjusted NAV exactly");
+        assert_eq!(
+            long_out, expected_nav_payout,
+            "payout must match PnL-adjusted NAV exactly"
+        );
     }
 
     // ── Issue #255: withdrawal output matches current pool weight ────────────
@@ -1580,7 +1636,11 @@ mod tests {
 
         // expect ~70% long, 30% short (within 1 bps = 0.01%)
         let long_bps = long_out_usd * 10_000 / total_usd;
-        assert!((long_bps - 7000).abs() <= 1, "long_bps={} expected ~7000", long_bps);
+        assert!(
+            (long_bps - 7000).abs() <= 1,
+            "long_bps={} expected ~7000",
+            long_bps
+        );
     }
 
     /// execute_withdrawal must revert once the ledger has advanced past the price
@@ -1609,9 +1669,12 @@ mod tests {
             },
         );
 
-        // Ledger advances with no fresh price submitted — the stored price is now stale.
+        // Ledger advances past the oracle's freshness window with no fresh price
+        // submitted — the stored price is now stale (oracle#1205 accepts prices
+        // for PRICE_FRESHNESS_WINDOW ledgers, so a single-ledger step is not enough).
         let seq = env.ledger().sequence();
-        env.ledger().set_sequence_number(seq + 1);
+        env.ledger()
+            .set_sequence_number(seq + oracle::PRICE_FRESHNESS_WINDOW + 1);
 
         WithdrawalHandlerClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &wth_key);
     }
@@ -1712,8 +1775,7 @@ mod tests {
     #[should_panic]
     fn update_oracle_rejects_noop() {
         let w = setup();
-        WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
-            .update_oracle(&w.admin, &w.oracle);
+        WithdrawalHandlerClient::new(&w.env, &w.wth_handler).update_oracle(&w.admin, &w.oracle);
     }
 
     /// update_oracle must reject the withdrawal_vault's address — a plausible
@@ -1722,8 +1784,7 @@ mod tests {
     #[should_panic]
     fn update_oracle_rejects_sibling_vault_address() {
         let w = setup();
-        WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
-            .update_oracle(&w.admin, &w.wth_vault);
+        WithdrawalHandlerClient::new(&w.env, &w.wth_handler).update_oracle(&w.admin, &w.wth_vault);
     }
 
     /// A genuinely different oracle address must succeed.
@@ -1731,7 +1792,6 @@ mod tests {
     fn update_oracle_accepts_valid_new_address() {
         let w = setup();
         let new_oracle = Address::generate(&w.env);
-        WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
-            .update_oracle(&w.admin, &new_oracle);
+        WithdrawalHandlerClient::new(&w.env, &w.wth_handler).update_oracle(&w.admin, &new_oracle);
     }
 }

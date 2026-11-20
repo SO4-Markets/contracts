@@ -21,11 +21,7 @@ use oracle::{Oracle, OracleClient as OClient};
 use order_handler::{CreateOrderParams, OrderHandler, OrderHandlerClient};
 use order_vault::{OrderVault, OrderVaultClient as OVClient};
 use role_store::{RoleStore, RoleStoreClient as RsClient};
-use soroban_sdk::{
-    testutils::Address as _,
-    token::StellarAssetClient,
-    Address, Env, Vec,
-};
+use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env, Vec};
 
 struct World {
     env: Env,
@@ -65,8 +61,12 @@ fn setup() -> World {
     let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
     OClient::new(&env, &oracle_addr).initialize(&admin, &rs, &ds, &passphrase);
 
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let long_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let short_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
 
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
@@ -87,21 +87,43 @@ fn setup() -> World {
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
     let dep_handler = env.register(DepositHandler, ());
-    DepositHandlerClient::new(&env, &dep_handler)
-        .initialize(&admin, &rs, &ds, &oracle_addr, &dep_vault);
+    DepositHandlerClient::new(&env, &dep_handler).initialize(
+        &admin,
+        &rs,
+        &ds,
+        &oracle_addr,
+        &dep_vault,
+    );
     rs_c.grant_role(&admin, &dep_handler, &roles::controller(&env));
 
     let ord_handler = env.register(OrderHandler, ());
-    OrderHandlerClient::new(&env, &ord_handler)
-        .initialize(&admin, &rs, &ds, &oracle_addr, &ord_vault);
+    OrderHandlerClient::new(&env, &ord_handler).initialize(
+        &admin,
+        &rs,
+        &ds,
+        &oracle_addr,
+        &ord_vault,
+    );
     rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
 
     let index_tk = Address::generate(&env);
 
     let ds_c = DsClient::new(&env, &ds);
-    ds_c.set_address(&admin, &gmx_keys::market_index_token_key(&env, &market_tk), &index_tk);
-    ds_c.set_address(&admin, &gmx_keys::market_long_token_key(&env, &market_tk), &long_tk);
-    ds_c.set_address(&admin, &gmx_keys::market_short_token_key(&env, &market_tk), &short_tk);
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_index_token_key(&env, &market_tk),
+        &index_tk,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_long_token_key(&env, &market_tk),
+        &long_tk,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_short_token_key(&env, &market_tk),
+        &short_tk,
+    );
 
     World {
         env,
@@ -126,9 +148,21 @@ fn set_prices(w: &World, index_usd: i128) {
         &Vec::from_array(
             &w.env,
             [
-                TokenPrice { token: w.long_tk.clone(), min: index_usd, max: index_usd },
-                TokenPrice { token: w.short_tk.clone(), min: FLOAT_PRECISION, max: FLOAT_PRECISION },
-                TokenPrice { token: w.index_tk.clone(), min: index_usd, max: index_usd },
+                TokenPrice {
+                    token: w.long_tk.clone(),
+                    min: index_usd,
+                    max: index_usd,
+                },
+                TokenPrice {
+                    token: w.short_tk.clone(),
+                    min: FLOAT_PRECISION,
+                    max: FLOAT_PRECISION,
+                },
+                TokenPrice {
+                    token: w.index_tk.clone(),
+                    min: index_usd,
+                    max: index_usd,
+                },
             ],
         ),
     );
@@ -209,11 +243,14 @@ fn imbalancing_swaps_increase_impact_pool() {
 
     seed_pool(&w);
 
-    let impact_pool_key =
-        gmx_keys::swap_impact_pool_amount_key(&w.env, &w.market_tk, &w.short_tk);
+    let impact_pool_key = gmx_keys::swap_impact_pool_amount_key(&w.env, &w.market_tk, &w.short_tk);
 
     // Impact pool starts at 0
-    assert_eq!(ds_c.get_u128(&impact_pool_key), 0, "impact pool must start at 0");
+    assert_eq!(
+        ds_c.get_u128(&impact_pool_key),
+        0,
+        "impact pool must start at 0"
+    );
 
     // First large imbalancing swap
     execute_swap_long_to_short(&w, 50 * TOKEN_PRECISION); // 50 long_tk ≈ $100k
@@ -256,8 +293,7 @@ fn impact_pool_running_balance_is_additive() {
 
     seed_pool(&w);
 
-    let impact_pool_key =
-        gmx_keys::swap_impact_pool_amount_key(&w.env, &w.market_tk, &w.short_tk);
+    let impact_pool_key = gmx_keys::swap_impact_pool_amount_key(&w.env, &w.market_tk, &w.short_tk);
 
     execute_swap_long_to_short(&w, 30 * TOKEN_PRECISION);
     let x = ds_c.get_u128(&impact_pool_key);
@@ -267,7 +303,12 @@ fn impact_pool_running_balance_is_additive() {
 
     // Both increments are positive (x > 0, x+y > x)
     assert!(x > 0);
-    assert!(x_plus_y > x, "second swap must further increase the pool: {} → {}", x, x_plus_y);
+    assert!(
+        x_plus_y > x,
+        "second swap must further increase the pool: {} → {}",
+        x,
+        x_plus_y
+    );
 }
 
 /// Positive price impact (balancing swap) is capped at the available pool amount;
@@ -307,10 +348,12 @@ fn balancing_swap_rebate_capped_at_pool_balance() {
 
     // Build up a tiny short_tk impact pool via a small imbalancing swap
     execute_swap_long_to_short(&w, 5 * TOKEN_PRECISION);
-    let impact_pool_key =
-        gmx_keys::swap_impact_pool_amount_key(&w.env, &w.market_tk, &w.short_tk);
+    let impact_pool_key = gmx_keys::swap_impact_pool_amount_key(&w.env, &w.market_tk, &w.short_tk);
     let pool_built = ds_c.get_u128(&impact_pool_key);
-    assert!(pool_built > 0, "pool must be non-zero after imbalancing swap");
+    assert!(
+        pool_built > 0,
+        "pool must be non-zero after imbalancing swap"
+    );
 
     // Directly set the short_tk impact pool to a tiny amount so the next balancing
     // swap will try to pay more rebate than the pool can cover.
@@ -393,8 +436,7 @@ fn impact_pool_key_reflects_accumulated_fees() {
 
     seed_pool(&w);
 
-    let impact_pool_key =
-        gmx_keys::swap_impact_pool_amount_key(&w.env, &w.market_tk, &w.short_tk);
+    let impact_pool_key = gmx_keys::swap_impact_pool_amount_key(&w.env, &w.market_tk, &w.short_tk);
 
     let before = ds_c.get_u128(&impact_pool_key);
     execute_swap_long_to_short(&w, 20 * TOKEN_PRECISION);

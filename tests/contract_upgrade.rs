@@ -73,7 +73,9 @@ fn setup() -> World {
     let ord_vault = env.register(OrderVault, ());
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let long_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
     let index_tk = Address::generate(&env);
 
     let market_tk = env.register(MarketToken, ());
@@ -167,16 +169,27 @@ fn upgrade_preserves_pending_order_and_position_storage() {
     let env = &w.env;
 
     // Place an order (decrease — no collateral transfer needed)
-    soroban_sdk::token::Client::new(env, &w.long_tk)
-        .transfer(&w.user, &w.ord_vault, &(200 * ONE_TOKEN));
+    soroban_sdk::token::Client::new(env, &w.long_tk).transfer(
+        &w.user,
+        &w.ord_vault,
+        &(200 * ONE_TOKEN),
+    );
 
     OClient::new(env, &w.oracle).set_prices_simple(
         &w.keeper,
         &Vec::from_array(
             env,
             [
-                TokenPrice { token: w.long_tk.clone(), min: 2_000 * ONE_USD, max: 2_000 * ONE_USD },
-                TokenPrice { token: w.index_tk.clone(), min: 2_000 * ONE_USD, max: 2_000 * ONE_USD },
+                TokenPrice {
+                    token: w.long_tk.clone(),
+                    min: 2_000 * ONE_USD,
+                    max: 2_000 * ONE_USD,
+                },
+                TokenPrice {
+                    token: w.index_tk.clone(),
+                    min: 2_000 * ONE_USD,
+                    max: 2_000 * ONE_USD,
+                },
             ],
         ),
     );

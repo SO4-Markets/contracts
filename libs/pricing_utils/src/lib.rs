@@ -1279,9 +1279,23 @@ mod tests {
         let pos_factor = FLOAT_PRECISION / 2_000;
 
         seed_position_market(
-            &env, &ds, &admin, &market, oi, oi, neg_factor, pos_factor, FLOAT_PRECISION,
+            &env,
+            &ds,
+            &admin,
+            &market,
+            oi,
+            oi,
+            neg_factor,
+            pos_factor,
+            FLOAT_PRECISION,
         );
-        seed_impact_pool(&env, &ds, &admin, &market, 100_000 * TOKEN_PRECISION as u128);
+        seed_impact_pool(
+            &env,
+            &ds,
+            &admin,
+            &market,
+            100_000 * TOKEN_PRECISION as u128,
+        );
 
         let size_delta = 1_000 * FLOAT_PRECISION;
         let index_price = FLOAT_PRECISION; // $1 per token in FP units
@@ -1319,7 +1333,15 @@ mod tests {
         let pos_factor = FLOAT_PRECISION / 2_000;
 
         seed_position_market(
-            &env, &ds, &admin, &market, long_oi, short_oi, neg_factor, pos_factor, FLOAT_PRECISION,
+            &env,
+            &ds,
+            &admin,
+            &market,
+            long_oi,
+            short_oi,
+            neg_factor,
+            pos_factor,
+            FLOAT_PRECISION,
         );
         // Pool large enough so the computed rebate is never capped
         seed_impact_pool(&env, &ds, &admin, &market, 1_000 * TOKEN_PRECISION as u128);
@@ -1331,7 +1353,10 @@ mod tests {
             get_position_price_impact(&env, &ds, &market, false, size_delta, true, index_price);
 
         let expected = FLOAT_PRECISION / 2;
-        assert!(impact > 0, "balancing short must yield positive rebate, got {impact}");
+        assert!(
+            impact > 0,
+            "balancing short must yield positive rebate, got {impact}"
+        );
         assert_eq!(
             impact, expected,
             "balancing short: expected FP/2 = {expected}, got {impact}"
@@ -1361,9 +1386,23 @@ mod tests {
         let pos_factor = FLOAT_PRECISION / 2_000;
 
         seed_position_market(
-            &env, &ds, &admin, &market, long_oi, short_oi, neg_factor, pos_factor, FLOAT_PRECISION,
+            &env,
+            &ds,
+            &admin,
+            &market,
+            long_oi,
+            short_oi,
+            neg_factor,
+            pos_factor,
+            FLOAT_PRECISION,
         );
-        seed_impact_pool(&env, &ds, &admin, &market, 100_000 * TOKEN_PRECISION as u128);
+        seed_impact_pool(
+            &env,
+            &ds,
+            &admin,
+            &market,
+            100_000 * TOKEN_PRECISION as u128,
+        );
 
         let size_delta = 1_000 * FLOAT_PRECISION;
         let index_price = FLOAT_PRECISION;
@@ -1371,7 +1410,10 @@ mod tests {
         let impact =
             get_position_price_impact(&env, &ds, &market, true, size_delta, true, index_price);
 
-        assert!(impact < 0, "worsening long must produce negative impact, got {impact}");
+        assert!(
+            impact < 0,
+            "worsening long must produce negative impact, got {impact}"
+        );
         assert_eq!(
             impact, -FLOAT_PRECISION,
             "worsening long-increase: expected −FP, got {impact}"
@@ -1429,7 +1471,15 @@ mod tests {
         let pos_factor = FLOAT_PRECISION / 100; // aggressive factor to produce large raw rebate
 
         seed_position_market(
-            &env, &ds, &admin, &market, long_oi, short_oi, neg_factor, pos_factor, FLOAT_PRECISION,
+            &env,
+            &ds,
+            &admin,
+            &market,
+            long_oi,
+            short_oi,
+            neg_factor,
+            pos_factor,
+            FLOAT_PRECISION,
         );
         // Only 5 tokens in the pool → pool_usd = 5·FP, much less than raw rebate
         let pool_tokens: u128 = 5 * TOKEN_PRECISION as u128;
@@ -1444,7 +1494,10 @@ mod tests {
 
         // pool_usd = pool_tokens × index_price / TOKEN_PRECISION = 5·TOKEN_PRECISION × FP / TOKEN_PRECISION = 5·FP
         let pool_usd = mul_div_wide(&env, pool_tokens as i128, index_price, TOKEN_PRECISION);
-        assert!(impact > 0, "over-balancing short must produce positive rebate, got {impact}");
+        assert!(
+            impact > 0,
+            "over-balancing short must produce positive rebate, got {impact}"
+        );
         assert_eq!(
             impact, pool_usd,
             "rebate must be capped at pool_usd={pool_usd}, got {impact}"
@@ -1464,14 +1517,12 @@ mod tests {
         let target_bps: i128 = 50;
         let target_impact_usd = trade_usd * target_bps / 10_000;
 
-        let factor_scaled =
-            target_impact_usd * FLOAT_PRECISION / (trade_usd * trade_usd);
+        let factor_scaled = target_impact_usd * FLOAT_PRECISION / (trade_usd * trade_usd);
 
         assert_eq!(target_impact_usd, 250);
         assert_eq!(factor_scaled, 100_000_000_000_000_000_000_000);
 
-        let recomputed_impact_usd =
-            factor_scaled * trade_usd * trade_usd / FLOAT_PRECISION;
+        let recomputed_impact_usd = factor_scaled * trade_usd * trade_usd / FLOAT_PRECISION;
         assert_eq!(recomputed_impact_usd, target_impact_usd);
     }
 }

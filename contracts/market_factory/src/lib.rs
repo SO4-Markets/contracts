@@ -251,9 +251,21 @@ impl MarketFactory {
         let long_decimals = token::Client::new(&env, &long_token).decimals() as u128;
         let short_decimals = token::Client::new(&env, &short_token).decimals() as u128;
         let index_decimals = token::Client::new(&env, &index_token).decimals() as u128;
-        ds_client.set_u128(&factory, &token_decimals_key(&env, &long_token), &long_decimals);
-        ds_client.set_u128(&factory, &token_decimals_key(&env, &short_token), &short_decimals);
-        ds_client.set_u128(&factory, &token_decimals_key(&env, &index_token), &index_decimals);
+        ds_client.set_u128(
+            &factory,
+            &token_decimals_key(&env, &long_token),
+            &long_decimals,
+        );
+        ds_client.set_u128(
+            &factory,
+            &token_decimals_key(&env, &short_token),
+            &short_decimals,
+        );
+        ds_client.set_u128(
+            &factory,
+            &token_decimals_key(&env, &index_token),
+            &index_decimals,
+        );
         // 4. Add to market list
         ds_client.add_address_to_set(&factory, &market_list_key(&env), &market_token_address);
 

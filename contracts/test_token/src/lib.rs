@@ -681,12 +681,7 @@ mod tests {
         let bob = Address::generate(&env);
         let spender = Address::generate(&env);
         client.mint(&owner, &alice, &1000);
-        client.approve(
-            &alice,
-            &spender,
-            &1000,
-            &(env.ledger().sequence() + 100),
-        );
+        client.approve(&alice, &spender, &1000, &(env.ledger().sequence() + 100));
         client.transfer_from(&spender, &alice, &bob, &-1);
     }
 
@@ -697,12 +692,7 @@ mod tests {
         let alice = Address::generate(&env);
         let spender = Address::generate(&env);
         client.mint(&owner, &alice, &1000);
-        client.approve(
-            &alice,
-            &spender,
-            &1000,
-            &(env.ledger().sequence() + 100),
-        );
+        client.approve(&alice, &spender, &1000, &(env.ledger().sequence() + 100));
         client.burn_from(&spender, &alice, &-1);
     }
 }

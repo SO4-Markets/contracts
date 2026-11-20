@@ -9,9 +9,7 @@
 use data_store::{DataStore, DataStoreClient as DsClient};
 use deposit_handler::{DepositHandler, DepositHandlerClient as DHClient};
 use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
-use gmx_keys::{
-    market_index_token_key, market_long_token_key, market_short_token_key, roles,
-};
+use gmx_keys::{market_index_token_key, market_long_token_key, market_short_token_key, roles};
 use gmx_types::{CreateDepositParams, CreateOrderParams, CreateWithdrawalParams, OrderType};
 use market_token::{MarketToken, MarketTokenClient as MtClient};
 use oracle::{Oracle, OracleClient as OClient};
@@ -76,8 +74,12 @@ fn setup() -> World {
     let ord_vault = env.register(OrderVault, ());
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let long_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let short_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
     let index_tk = Address::generate(&env);
 
     let market_tk = env.register(MarketToken, ());
@@ -142,8 +144,11 @@ fn market_increase_with_zero_size_reverts() {
     let env = &w.env;
 
     // Transfer collateral into vault first (required for increase orders)
-    soroban_sdk::token::Client::new(env, &w.long_tk)
-        .transfer(&w.user, &w.ord_vault, &(100 * ONE_TOKEN));
+    soroban_sdk::token::Client::new(env, &w.long_tk).transfer(
+        &w.user,
+        &w.ord_vault,
+        &(100 * ONE_TOKEN),
+    );
 
     let result = OHClient::new(env, &w.ord_handler).try_create_order(
         &w.user,
@@ -178,8 +183,11 @@ fn limit_increase_with_zero_size_reverts() {
     let w = setup();
     let env = &w.env;
 
-    soroban_sdk::token::Client::new(env, &w.long_tk)
-        .transfer(&w.user, &w.ord_vault, &(100 * ONE_TOKEN));
+    soroban_sdk::token::Client::new(env, &w.long_tk).transfer(
+        &w.user,
+        &w.ord_vault,
+        &(100 * ONE_TOKEN),
+    );
 
     let result = OHClient::new(env, &w.ord_handler).try_create_order(
         &w.user,
@@ -248,8 +256,11 @@ fn swap_order_with_zero_size_succeeds() {
     let env = &w.env;
 
     // Swap orders use size_delta_usd = 0 legitimately; should NOT revert
-    soroban_sdk::token::Client::new(env, &w.long_tk)
-        .transfer(&w.user, &w.ord_vault, &(100 * ONE_TOKEN));
+    soroban_sdk::token::Client::new(env, &w.long_tk).transfer(
+        &w.user,
+        &w.ord_vault,
+        &(100 * ONE_TOKEN),
+    );
 
     let result = OHClient::new(env, &w.ord_handler).try_create_order(
         &w.user,

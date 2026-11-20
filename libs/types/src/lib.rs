@@ -118,6 +118,7 @@ pub enum OrderType {
 
 /// Mirrors GMX's Order.Props.
 #[contracttype]
+#[derive(Clone, Debug)]
 pub struct OrderProps {
     pub account: Address,
     pub receiver: Address,
@@ -303,7 +304,7 @@ pub struct DecreasePositionResult {
 /// `computed_at_ledger`.
 #[contracttype]
 pub struct ProtocolStats {
-    pub total_pool_value_usd: i128,       // sum of get_pool_value across all markets
+    pub total_pool_value_usd: i128, // sum of get_pool_value across all markets
     pub total_long_open_interest_usd: i128,
     pub total_short_open_interest_usd: i128,
     pub total_accumulated_fees_usd: i128, // sum of unclaimed fee balances, in USD
@@ -345,22 +346,22 @@ pub struct PositionInfo {
 #[contracttype]
 #[derive(Clone)]
 pub struct AdlCandidate {
-    pub key: BytesN<32>,                  // position key for order_handler::get_position
-    pub owner: Address,                   // position owner
-    pub size_usd: u128,                   // position size in USD (absolute value)
-    pub unrealised_pnl_usd: u128,         // positive PnL only (loss positions are filtered)
-    pub pnl_to_size_ratio_bps: u32,       // unrealised_pnl / size in basis points (sort key)
+    pub key: BytesN<32>,            // position key for order_handler::get_position
+    pub owner: Address,             // position owner
+    pub size_usd: u128,             // position size in USD (absolute value)
+    pub unrealised_pnl_usd: u128,   // positive PnL only (loss positions are filtered)
+    pub pnl_to_size_ratio_bps: u32, // unrealised_pnl / size in basis points (sort key)
 }
 
 /// Estimated swap output for dry-run queries.
 /// Returned by reader::estimate_swap_output.
 #[contracttype]
 pub struct SwapEstimate {
-    pub token_out: Address,               // output token after full swap path
-    pub amount_out: u128,                 // estimated output amount
-    pub price_impact_usd: i128,           // cumulative impact (negative = cost, positive = rebate)
-    pub execution_price: u128,            // effective rate for the full swap path
-    pub reverts_if_executed: bool,        // true if any market is paused or insufficient liquidity
+    pub token_out: Address,        // output token after full swap path
+    pub amount_out: u128,          // estimated output amount
+    pub price_impact_usd: i128,    // cumulative impact (negative = cost, positive = rebate)
+    pub execution_price: u128,     // effective rate for the full swap path
+    pub reverts_if_executed: bool, // true if any market is paused or insufficient liquidity
 }
 
 /// Position leverage breakdown returned by reader::get_position_leverage.
@@ -399,11 +400,11 @@ pub struct PendingOrder {
 /// under-collateralised positions appear first.
 #[contracttype]
 pub struct LiquidatablePosition {
-    pub key: BytesN<32>,           // canonical position key for order_handler::get_position
+    pub key: BytesN<32>, // canonical position key for order_handler::get_position
     pub owner: Address,
     pub size_usd: u128,
     pub collateral_usd: u128,
-    pub health_factor_bps: u32,    // collateral_usd * 10000 / size_usd; < 10000 = liquidatable
+    pub health_factor_bps: u32, // collateral_usd * 10000 / size_usd; < 10000 = liquidatable
 }
 
 use soroban_sdk::BytesN;
@@ -428,3 +429,17 @@ mod tests {
         assert_eq!(price.pick_price(false), 100);
     }
 }
+
+// ─── Protocol modules ─────────────────────────────────────────────────────────
+pub mod errors;
+pub mod event_schema;
+pub mod market_state;
+
+pub use errors::ProtocolError;
+pub use event_schema::{
+    DepositCreatedEvent, DepositExecutedEvent, FundingRateUpdatedEvent, MarketStateTransitionEvent,
+    OrderCancelledEvent, OrderCreatedEvent, OrderExecutedEvent, PositionDecreasedEvent,
+    PositionIncreasedEvent, PositionLiquidatedEvent, TransactionRejectedEvent,
+    WithdrawalCreatedEvent, WithdrawalExecutedEvent, EVENT_SCHEMA_VERSION,
+};
+pub use market_state::{validate_state_transition, MarketState, TransitionAuthority};

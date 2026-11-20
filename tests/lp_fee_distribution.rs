@@ -16,7 +16,9 @@ use gmx_keys::{
     position_key, roles,
 };
 use gmx_math::FLOAT_PRECISION;
-use gmx_types::{CreateDepositParams, CreateOrderParams, CreateWithdrawalParams, OrderType, TokenPrice};
+use gmx_types::{
+    CreateDepositParams, CreateOrderParams, CreateWithdrawalParams, OrderType, TokenPrice,
+};
 use market_token::{MarketToken, MarketTokenClient as MtClient};
 use oracle::{Oracle, OracleClient as OClient};
 use order_handler::{OrderHandler, OrderHandlerClient as OHClient};
@@ -74,8 +76,12 @@ fn setup() -> World {
     let ord_vault = env.register(OrderVault, ());
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let long_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let short_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
     let index_tk = Address::generate(&env);
 
     let market_tk = env.register(MarketToken, ());
@@ -129,9 +135,21 @@ fn set_prices(w: &World, eth_usd: i128) {
         &soroban_sdk::Vec::from_array(
             &w.env,
             [
-                TokenPrice { token: w.long_tk.clone(), min: eth_usd * ONE_USD, max: eth_usd * ONE_USD },
-                TokenPrice { token: w.short_tk.clone(), min: ONE_USD, max: ONE_USD },
-                TokenPrice { token: w.index_tk.clone(), min: eth_usd * ONE_USD, max: eth_usd * ONE_USD },
+                TokenPrice {
+                    token: w.long_tk.clone(),
+                    min: eth_usd * ONE_USD,
+                    max: eth_usd * ONE_USD,
+                },
+                TokenPrice {
+                    token: w.short_tk.clone(),
+                    min: ONE_USD,
+                    max: ONE_USD,
+                },
+                TokenPrice {
+                    token: w.index_tk.clone(),
+                    min: eth_usd * ONE_USD,
+                    max: eth_usd * ONE_USD,
+                },
             ],
         ),
     );
@@ -170,7 +188,10 @@ fn lp_fees_split_proportionally_between_two_equal_depositors() {
     set_prices(&w, 2000);
     let alice_gm = lp_deposit_short_only(&w, &alice, 10_000);
     let bob_gm = lp_deposit_short_only(&w, &bob, 10_000);
-    assert_eq!(alice_gm, bob_gm, "equal deposits at the same price must mint equal GM shares");
+    assert_eq!(
+        alice_gm, bob_gm,
+        "equal deposits at the same price must mint equal GM shares"
+    );
 
     let short_pool_before_trade = ds_c.get_u128(&pool_amount_key(env, &w.market_tk, &w.short_tk));
 
@@ -246,7 +267,8 @@ fn lp_fees_split_proportionally_between_two_equal_depositors() {
         },
     );
     WHClient::new(env, &w.wth_handler).execute_withdrawal(&w.keeper, &wth_key_a);
-    let alice_payout = StellarAssetClient::new(env, &w.short_tk).balance(&alice) - alice_usdc_before;
+    let alice_payout =
+        StellarAssetClient::new(env, &w.short_tk).balance(&alice) - alice_usdc_before;
 
     let bob_usdc_before = StellarAssetClient::new(env, &w.short_tk).balance(&bob);
     let wth_key_b = WHClient::new(env, &w.wth_handler).create_withdrawal(
@@ -270,8 +292,14 @@ fn lp_fees_split_proportionally_between_two_equal_depositors() {
     assert!(diff <= 1, "equal GM shares must split the pool proportionally within 1 unit of rounding, got diff={diff} (alice={alice_payout}, bob={bob_payout})");
 
     let gm_supply = MtClient::new(env, &w.market_tk).total_supply();
-    assert_eq!(gm_supply, 0, "GM total supply must return to 0 after both LPs withdraw");
+    assert_eq!(
+        gm_supply, 0,
+        "GM total supply must return to 0 after both LPs withdraw"
+    );
 
     let short_pool_final = ds_c.get_u128(&pool_amount_key(env, &w.market_tk, &w.short_tk));
-    assert_eq!(short_pool_final, 0, "USDC pool must be fully drained after both withdrawals");
+    assert_eq!(
+        short_pool_final, 0,
+        "USDC pool must be fully drained after both withdrawals"
+    );
 }

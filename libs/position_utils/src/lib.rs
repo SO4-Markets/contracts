@@ -620,7 +620,8 @@ mod tests {
 
         // Shorts dominate → the short-side accumulator (short_token, is_long=false)
         // increases, exactly as market_utils::update_funding_state computes it.
-        let fnd_key = gmx_keys::funding_amount_per_size_key(&w.env, &w.market_tk, &w.short_tk, false);
+        let fnd_key =
+            gmx_keys::funding_amount_per_size_key(&w.env, &w.market_tk, &w.short_tk, false);
         let funding_per_size: i128 = FP / 100_000;
         ds_c.apply_delta_to_i128(&w.admin, &fnd_key, &funding_per_size);
 
@@ -1261,7 +1262,7 @@ mod tests {
         // delta × 5 tokens / FP = 2_100_000 → delta = 2_100_000 × FP / (5 × TOKEN_PRECISION)
         //                                            = 2_100_000 × FP / 50_000_000 = 42 * FP / 1_000
         let size_in_tokens = 5 * ONE_TOKEN; // 5 tokens
-        let delta = 42 * FP / 1_000;        // cumulative borrowing factor delta
+        let delta = 42 * FP / 1_000; // cumulative borrowing factor delta
         ds_c.set_u128(
             &w.admin,
             &gmx_keys::cumulative_borrowing_factor_key(&w.env, &w.market_tk, true),
@@ -1289,7 +1290,14 @@ mod tests {
             max: current_price,
         };
         assert!(
-            !is_liquidatable(&w.env, &w.ds, &position, &market, collateral_price, &price_props),
+            !is_liquidatable(
+                &w.env,
+                &w.ds,
+                &position,
+                &market,
+                collateral_price,
+                &price_props
+            ),
             "PnL counts toward remaining collateral (#406)"
         );
     }
@@ -1323,7 +1331,14 @@ mod tests {
         };
 
         assert!(
-            !is_liquidatable(&w.env, &w.ds, &position, &market, collateral_price, &price_props),
+            !is_liquidatable(
+                &w.env,
+                &w.ds,
+                &position,
+                &market,
+                collateral_price,
+                &price_props
+            ),
             "well-collateralised position with healthy net collateral must not be liquidatable"
         );
     }

@@ -1,6 +1,6 @@
 # Build and static-analysis workflows.
 
-.PHONY: check lint lint-all build build-release test-wasm bindings inspect list-contracts wasm-sizes wasm-baseline
+.PHONY: check lint lint-all build build-release build-wasm test-wasm bindings inspect list-contracts wasm-sizes wasm-baseline
 
 check:
 	cargo check --workspace
@@ -19,6 +19,13 @@ build: preflight
 # stellar-cli >= 26 dropped `--release`; release is already the default profile.
 build-release: preflight
 	stellar contract build --profile release
+
+# Build every deployable contract in $(CONTRACTS) for the deploy target with
+# plain cargo (no stellar CLI), as CI does. Don't use
+# `cargo build --workspace --target $(WASM_TARGET)`: that also compiles the
+# test-only crates, which turns on soroban-sdk `testutils` for wasm and fails.
+build-wasm:
+	cargo build --target $(WASM_TARGET) --profile $(WASM_PROFILE) $(foreach c,$(CONTRACTS),-p $(subst _,-,$(c)))
 
 # WASM artifacts that test code embeds via `contractimport!`
 # (tests/router_and_factory_coverage.rs). Plain cargo — no stellar CLI needed.

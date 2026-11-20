@@ -26,9 +26,9 @@ use gmx_position_utils::{get_position_fees, get_position_pnl_usd, is_liquidatabl
 use gmx_pricing_utils::{get_execution_price, get_position_price_impact, get_swap_price_impact};
 use gmx_types::{
     AdlCandidate, DepositProps, FundingAmountResult, FundingInfo, FundingRateInfo,
-    KeeperHeartbeatStatus, LiquidatablePosition, MarketProps, OrderProps, PoolValueInfo,
-    PositionFees, PositionInfo, PositionLeverage, PositionProps, PriceProps, ProtocolStats,
-    SwapEstimate, WithdrawalProps, PendingOrder,
+    KeeperHeartbeatStatus, LiquidatablePosition, MarketProps, OrderProps, PendingOrder,
+    PoolValueInfo, PositionFees, PositionInfo, PositionLeverage, PositionProps, PriceProps,
+    ProtocolStats, SwapEstimate, WithdrawalProps,
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
@@ -68,6 +68,9 @@ pub enum Error {
     /// (issue #371) so callers can match this condition as a typed error
     /// instead of a generic execution failure.
     InvalidMarket = 5,
+    /// `get_protocol_stats` listed the same market twice, which would count its
+    /// pool value, open interest and fee ledgers twice.
+    DuplicateMarket = 6,
 }
 
 // ─── External clients ─────────────────────────────────────────────────────────
@@ -205,7 +208,8 @@ impl Reader {
         if supply <= 0 {
             return FLOAT_PRECISION as u128; // seed price: 1.00 USD per GM token
         }
-        let info = Self::get_market_pool_value_info(env.clone(), data_store, oracle, market, maximize);
+        let info =
+            Self::get_market_pool_value_info(env.clone(), data_store, oracle, market, maximize);
         // pool_value is USD at FLOAT_PRECISION; supply is GM tokens at TOKEN_PRECISION raw units.
         // price_per_token (FLOAT_PRECISION USD) = pool_value × TOKEN_PRECISION / supply.
         mul_div_wide(&env, info.pool_value.max(0), TOKEN_PRECISION, supply) as u128
@@ -301,7 +305,8 @@ impl Reader {
     /// View-only: reads `data_store` and `oracle`, writes nothing.
     ///
     /// Panics with `TooManyMarkets` if `markets.len() > MAX_STATS_MARKETS`, which
-    /// bounds the per-call compute cost. An empty `markets` vec is valid and
+    /// bounds the per-call compute cost, and with `DuplicateMarket` if a market
+    /// is listed twice. An empty `markets` vec is valid and
     /// returns all-zero stats (with `market_count = 0`). A market whose pool value
     /// is zero simply contributes zero — no special-casing, no panic.
     pub fn get_protocol_stats(
@@ -312,6 +317,14 @@ impl Reader {
     ) -> ProtocolStats {
         if markets.len() > MAX_STATS_MARKETS {
             panic_with_error!(&env, Error::TooManyMarkets);
+        }
+        // Bounded by MAX_STATS_MARKETS: each market's ledgers are summed once.
+        for i in 0..markets.len() {
+            for j in (i + 1)..markets.len() {
+                if markets.get_unchecked(i) == markets.get_unchecked(j) {
+                    panic_with_error!(&env, Error::DuplicateMarket);
+                }
+            }
         }
 
         let ds = DataStoreClient::new(&env, &data_store);
@@ -391,8 +404,7 @@ impl Reader {
         role: BytesN<32>,
     ) -> KeeperHeartbeatStatus {
         let ds = DataStoreClient::new(&env, &data_store);
-        let last_active_ledger =
-            ds.get_u128(&last_keeper_activity_key(&env, &role)) as u64;
+        let last_active_ledger = ds.get_u128(&last_keeper_activity_key(&env, &role)) as u64;
         let current_ledger = env.ledger().sequence() as u64;
         let ledgers_since_last_activity = current_ledger.saturating_sub(last_active_ledger);
 
@@ -430,7 +442,8 @@ impl Reader {
         // Read position from canonical location (order_handler storage)
         let pk = position_key(&env, &account, &market, &collateral_token, is_long);
         // Bump TTL on read so monitoring via Reader keeps positions alive.
-        OrderHandlerClient::new(&env, &order_handler).bump_position_ttl(&env.current_contract_address(), &pk);
+        OrderHandlerClient::new(&env, &order_handler)
+            .bump_position_ttl(&env.current_contract_address(), &pk);
         let position: PositionProps =
             OrderHandlerClient::new(&env, &order_handler).get_position(&pk)?;
 
@@ -506,7 +519,12 @@ impl Reader {
 
         // Issue #260: compute weighted average entry price from accumulated size_in_usd / size_in_tokens.
         let avg_entry_price = if position.size_in_tokens > 0 {
-            mul_div_wide(&env, position.size_in_usd, TOKEN_PRECISION, position.size_in_tokens)
+            mul_div_wide(
+                &env,
+                position.size_in_usd,
+                TOKEN_PRECISION,
+                position.size_in_tokens,
+            )
         } else {
             0
         };
@@ -543,7 +561,8 @@ impl Reader {
         let position: PositionProps =
             OrderHandlerClient::new(&env, &order_handler).get_position(&pk)?;
 
-        let market_props = Self::get_market(env.clone(), data_store.clone(), position.market.clone());
+        let market_props =
+            Self::get_market(env.clone(), data_store.clone(), position.market.clone());
         let ds = DataStoreClient::new(&env, &data_store);
 
         // Claimable side: same per-size delta settle_funding_fees computes, for both tokens.
@@ -555,19 +574,39 @@ impl Reader {
         .into_iter()
         .enumerate()
         {
-            let fnd_key = funding_amount_per_size_key(&env, &market_props.market_token, tok, position.is_long);
+            let fnd_key = funding_amount_per_size_key(
+                &env,
+                &market_props.market_token,
+                tok,
+                position.is_long,
+            );
             let latest = ds.get_i128(&fnd_key);
             let claimable_per_size = tracker - latest;
             if claimable_per_size > 0 {
-                claimable[i] = mul_div_wide(&env, claimable_per_size, position.size_in_usd, FLOAT_PRECISION);
+                claimable[i] = mul_div_wide(
+                    &env,
+                    claimable_per_size,
+                    position.size_in_usd,
+                    FLOAT_PRECISION,
+                );
             }
         }
 
         // Owed side: same funding_fee_amount get_position_fees computes on a real decrease,
         // expressed in the position's own collateral token (long_token or short_token).
         let oracle_client = OracleClient::new(&env, &oracle);
-        let collateral_price = oracle_client.get_primary_price(&position.collateral_token).mid_price();
-        let fees = get_position_fees(&env, &data_store, &market_props, &position, collateral_price, 0, false);
+        let collateral_price = oracle_client
+            .get_primary_price(&position.collateral_token)
+            .mid_price();
+        let fees = get_position_fees(
+            &env,
+            &data_store,
+            &market_props,
+            &position,
+            collateral_price,
+            0,
+            false,
+        );
 
         let mut long_token_amount = claimable[0];
         let mut short_token_amount = claimable[1];
@@ -638,7 +677,8 @@ impl Reader {
     ) -> bool {
         // Read position from canonical location (order_handler storage)
         let pk = position_key(&env, &account, &market, &collateral_token, is_long);
-        OrderHandlerClient::new(&env, &order_handler).bump_position_ttl(&env.current_contract_address(), &pk);
+        OrderHandlerClient::new(&env, &order_handler)
+            .bump_position_ttl(&env.current_contract_address(), &pk);
         let position: PositionProps =
             match OrderHandlerClient::new(&env, &order_handler).get_position(&pk) {
                 Some(p) => p,
@@ -707,13 +747,13 @@ impl Reader {
         let ds = DataStoreClient::new(&env, &data_store);
         let set_key = order_list_key(&env);
         let total_count = ds.get_bytes32_set_count(&set_key);
-        
+
         let mut matching_orders = Vec::new(&env);
         let mut skipped = 0;
-        
+
         let keys = ds.get_bytes32_set_at(&set_key, &0, &total_count);
         let oh_client = OrderHandlerClient::new(&env, &order_handler);
-        
+
         for i in 0..keys.len() {
             let k = keys.get_unchecked(i);
             if let Some(order) = oh_client.get_order(&k) {
@@ -722,7 +762,7 @@ impl Reader {
                         skipped += 1;
                         continue;
                     }
-                    
+
                     matching_orders.push_back(PendingOrder {
                         owner: order.account,
                         market: order.market.clone(),
@@ -732,14 +772,14 @@ impl Reader {
                         updated_at_time: order.updated_at_time,
                         is_long: order.is_long,
                     });
-                    
+
                     if matching_orders.len() >= limit {
                         break;
                     }
                 }
             }
         }
-        
+
         matching_orders
     }
 
@@ -751,7 +791,8 @@ impl Reader {
         order_handler: Address,
         position_key: BytesN<32>,
     ) -> Option<PositionInfo> {
-        OrderHandlerClient::new(&env, &order_handler).bump_position_ttl(&env.current_contract_address(), &position_key);
+        OrderHandlerClient::new(&env, &order_handler)
+            .bump_position_ttl(&env.current_contract_address(), &position_key);
         let position: PositionProps =
             OrderHandlerClient::new(&env, &order_handler).get_position(&position_key)?;
 
@@ -821,7 +862,12 @@ impl Reader {
 
         // Issue #260: weighted average entry price.
         let avg_entry_price = if position.size_in_tokens > 0 {
-            mul_div_wide(&env, position.size_in_usd, TOKEN_PRECISION, position.size_in_tokens)
+            mul_div_wide(
+                &env,
+                position.size_in_usd,
+                TOKEN_PRECISION,
+                position.size_in_tokens,
+            )
         } else {
             0
         };
@@ -1047,15 +1093,31 @@ impl Reader {
             false,
         );
 
-        let borrowing_fee_usd =
-            mul_div_wide(&env, fees.borrowing_fee_amount, collateral_price, TOKEN_PRECISION);
-        let funding_fee_usd =
-            mul_div_wide(&env, fees.funding_fee_amount, collateral_price, TOKEN_PRECISION);
-        let gross_collateral_usd =
-            mul_div_wide(&env, position.collateral_amount, collateral_price, TOKEN_PRECISION);
+        let borrowing_fee_usd = mul_div_wide(
+            &env,
+            fees.borrowing_fee_amount,
+            collateral_price,
+            TOKEN_PRECISION,
+        );
+        let funding_fee_usd = mul_div_wide(
+            &env,
+            fees.funding_fee_amount,
+            collateral_price,
+            TOKEN_PRECISION,
+        );
+        let gross_collateral_usd = mul_div_wide(
+            &env,
+            position.collateral_amount,
+            collateral_price,
+            TOKEN_PRECISION,
+        );
 
         let net_signed = gross_collateral_usd - borrowing_fee_usd - funding_fee_usd;
-        let net_collateral_usd = if net_signed > 0 { net_signed as u128 } else { 0u128 };
+        let net_collateral_usd = if net_signed > 0 {
+            net_signed as u128
+        } else {
+            0u128
+        };
         let position_size_usd = if position.size_in_usd > 0 {
             position.size_in_usd as u128
         } else {
@@ -1153,10 +1215,9 @@ impl Reader {
                             } else {
                                 1
                             };
-                            let health_factor_bps = u32::try_from(
-                                collateral_usd.saturating_mul(10000) / size_usd,
-                            )
-                            .unwrap_or(u32::MAX);
+                            let health_factor_bps =
+                                u32::try_from(collateral_usd.saturating_mul(10000) / size_usd)
+                                    .unwrap_or(u32::MAX);
 
                             candidates.push_back(LiquidatablePosition {
                                 key: pk,
@@ -1239,7 +1300,11 @@ impl Reader {
 
         let mut i = 0u32;
         while i < pos_count {
-            let batch_end = if i + 100 > pos_count { pos_count } else { i + 100 };
+            let batch_end = if i + 100 > pos_count {
+                pos_count
+            } else {
+                i + 100
+            };
             let position_keys = ds.get_bytes32_set_at(&pos_list_key, &i, &batch_end);
 
             let keys_len = position_keys.len();
@@ -1364,15 +1429,23 @@ impl Reader {
             // the long/short prices (issue #298). Fetching it here would cost an
             // extra oracle read per hop and would make the estimate revert on a
             // stale index price where the real swap would succeed.
-            let long_price =
-                oracle_client.get_primary_price(&market_props.long_token).mid_price();
-            let short_price =
-                oracle_client.get_primary_price(&market_props.short_token).mid_price();
+            let long_price = oracle_client
+                .get_primary_price(&market_props.long_token)
+                .mid_price();
+            let short_price = oracle_client
+                .get_primary_price(&market_props.short_token)
+                .mid_price();
 
             let (input_token, output_token) = if current_token == market_props.long_token {
-                (market_props.long_token.clone(), market_props.short_token.clone())
+                (
+                    market_props.long_token.clone(),
+                    market_props.short_token.clone(),
+                )
             } else if current_token == market_props.short_token {
-                (market_props.short_token.clone(), market_props.long_token.clone())
+                (
+                    market_props.short_token.clone(),
+                    market_props.long_token.clone(),
+                )
             } else {
                 reverts_if_executed = true;
                 break;
@@ -1413,8 +1486,7 @@ impl Reader {
                 break;
             }
 
-            current_amount =
-                mul_div_wide(&env, output_usd, TOKEN_PRECISION, output_price) as u128;
+            current_amount = mul_div_wide(&env, output_usd, TOKEN_PRECISION, output_price) as u128;
             current_token = output_token;
 
             i += 1;
@@ -1424,8 +1496,12 @@ impl Reader {
         let final_amount_out = current_amount;
 
         let execution_price = if final_amount_out > 0 {
-            mul_div_wide(&env, amount_in as i128, TOKEN_PRECISION, final_amount_out as i128)
-                as u128
+            mul_div_wide(
+                &env,
+                amount_in as i128,
+                TOKEN_PRECISION,
+                final_amount_out as i128,
+            ) as u128
         } else {
             0u128
         };
@@ -1521,12 +1597,24 @@ mod tests {
         let ds_c = DsClient::new(env, &w.ds);
 
         // Wire the market's token addresses.
-        ds_c.set_address(&w.admin, &market_index_token_key(env, &market_tk), &index_tk);
+        ds_c.set_address(
+            &w.admin,
+            &market_index_token_key(env, &market_tk),
+            &index_tk,
+        );
         ds_c.set_address(&w.admin, &market_long_token_key(env, &market_tk), &long_tk);
-        ds_c.set_address(&w.admin, &market_short_token_key(env, &market_tk), &short_tk);
+        ds_c.set_address(
+            &w.admin,
+            &market_short_token_key(env, &market_tk),
+            &short_tk,
+        );
 
         // Pool amounts (raw token units).
-        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market_tk, &long_tk), &long_pool);
+        ds_c.set_u128(
+            &w.admin,
+            &pool_amount_key(env, &market_tk, &long_tk),
+            &long_pool,
+        );
         ds_c.set_u128(
             &w.admin,
             &pool_amount_key(env, &market_tk, &short_tk),
@@ -1637,11 +1725,13 @@ mod tests {
         let short_oi = 400 * fp as u128;
 
         let m = seed_market(&w, 100, 100, long_oi, short_oi, 0, 0, 2 * fp);
-        let (long, short) =
-            ReaderClient::new(&w.env, &w.reader).get_open_interest(&w.ds, &m);
+        let (long, short) = ReaderClient::new(&w.env, &w.reader).get_open_interest(&w.ds, &m);
 
         assert_eq!(long, long_oi as i128, "long open interest must come first");
-        assert_eq!(short, short_oi as i128, "short open interest must come second");
+        assert_eq!(
+            short, short_oi as i128,
+            "short open interest must come second"
+        );
     }
 
     /// Two markets: totals are the sum of the per-market contributions.
@@ -1697,9 +1787,17 @@ mod tests {
         let short_tk = Address::generate(env);
         let index_tk = Address::generate(env);
 
-        ds_c.set_address(&w.admin, &market_index_token_key(env, &market_tk), &index_tk);
+        ds_c.set_address(
+            &w.admin,
+            &market_index_token_key(env, &market_tk),
+            &index_tk,
+        );
         ds_c.set_address(&w.admin, &market_long_token_key(env, &market_tk), &long_tk);
-        ds_c.set_address(&w.admin, &market_short_token_key(env, &market_tk), &short_tk);
+        ds_c.set_address(
+            &w.admin,
+            &market_short_token_key(env, &market_tk),
+            &short_tk,
+        );
 
         ds_c.set_i128(
             &w.admin,
@@ -1753,9 +1851,17 @@ mod tests {
         let long_tk = Address::generate(env);
         let short_tk = Address::generate(env);
         let index_tk = Address::generate(env);
-        ds_c.set_address(&w.admin, &market_index_token_key(env, &market_tk), &index_tk);
+        ds_c.set_address(
+            &w.admin,
+            &market_index_token_key(env, &market_tk),
+            &index_tk,
+        );
         ds_c.set_address(&w.admin, &market_long_token_key(env, &market_tk), &long_tk);
-        ds_c.set_address(&w.admin, &market_short_token_key(env, &market_tk), &short_tk);
+        ds_c.set_address(
+            &w.admin,
+            &market_short_token_key(env, &market_tk),
+            &short_tk,
+        );
 
         let rate_info = ReaderClient::new(env, &w.reader).get_funding_rate_info(&w.ds, &market_tk);
         assert_eq!(rate_info.long_funding_amount_per_size, 0);
@@ -1774,6 +1880,27 @@ mod tests {
             markets.push_back(Address::generate(&w.env));
         }
         ReaderClient::new(&w.env, &w.reader).get_protocol_stats(&w.ds, &w.oracle, &markets);
+    }
+
+    /// Listing a market twice would count its fees (and pool value and OI)
+    /// twice in the protocol totals, so it is rejected.
+    #[test]
+    fn protocol_stats_rejects_duplicate_market() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let fee_units = 5 * gmx_math::TOKEN_PRECISION as u128;
+        let m = seed_market(&w, 100, 100, 0, 0, fee_units, fee_units, fp);
+        let other = seed_market(&w, 100, 100, 0, 0, 0, 0, fp);
+
+        let result = ReaderClient::new(&w.env, &w.reader).try_get_protocol_stats(
+            &w.ds,
+            &w.oracle,
+            &SdkVec::from_array(&w.env, [m.clone(), other, m]),
+        );
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            soroban_sdk::Error::from(Error::DuplicateMarket)
+        );
     }
 
     // ── Issue #218: get_position_leverage ────────────────────────────────────
@@ -1820,9 +1947,21 @@ mod tests {
             &SdkVec::from_array(
                 &env,
                 [
-                    TokenPrice { token: index_tk.clone(), min: fp, max: fp },
-                    TokenPrice { token: long_tk.clone(), min: fp, max: fp },
-                    TokenPrice { token: short_tk.clone(), min: fp, max: fp },
+                    TokenPrice {
+                        token: index_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: long_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: short_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
                 ],
             ),
         );
@@ -1864,8 +2003,8 @@ mod tests {
                 .set(&PositionStorageKey::Position(pk.clone()), &position);
         });
 
-        let result = ReaderClient::new(&env, &reader)
-            .get_position_leverage(&ds, &oracle, &ord_handler, &pk);
+        let result =
+            ReaderClient::new(&env, &reader).get_position_leverage(&ds, &oracle, &ord_handler, &pk);
 
         let lev = result.unwrap();
         assert_eq!(lev.effective_leverage_x100, 2000);
@@ -1903,8 +2042,12 @@ mod tests {
         ReaderClient::new(&env, &reader).initialize(&admin);
 
         let missing_key = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
-        let result =
-            ReaderClient::new(&env, &reader).get_position_leverage(&ds, &oracle, &ord, &missing_key);
+        let result = ReaderClient::new(&env, &reader).get_position_leverage(
+            &ds,
+            &oracle,
+            &ord,
+            &missing_key,
+        );
         assert!(result.is_none());
     }
 
@@ -1953,9 +2096,21 @@ mod tests {
             &SdkVec::from_array(
                 &env,
                 [
-                    TokenPrice { token: index_tk.clone(), min: 2 * fp, max: 2 * fp },
-                    TokenPrice { token: long_tk.clone(), min: fp, max: fp },
-                    TokenPrice { token: short_tk.clone(), min: fp, max: fp },
+                    TokenPrice {
+                        token: index_tk.clone(),
+                        min: 2 * fp,
+                        max: 2 * fp,
+                    },
+                    TokenPrice {
+                        token: long_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: short_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
                 ],
             ),
         );
@@ -1994,8 +2149,14 @@ mod tests {
         // The reader scans data_store's global position list.
         ds_c.add_bytes32_to_set(&admin, &position_list_key(&env), &pk);
 
-        let result = ReaderClient::new(&env, &reader)
-            .get_adl_eligible_positions(&ds, &oracle, &ord_handler, &market_tk, &true, &10);
+        let result = ReaderClient::new(&env, &reader).get_adl_eligible_positions(
+            &ds,
+            &oracle,
+            &ord_handler,
+            &market_tk,
+            &true,
+            &10,
+        );
 
         assert_eq!(result.len(), 1);
         let c = result.get(0).unwrap();
@@ -2046,9 +2207,21 @@ mod tests {
             &SdkVec::from_array(
                 &env,
                 [
-                    TokenPrice { token: index_tk.clone(), min: 2 * fp, max: 2 * fp },
-                    TokenPrice { token: long_tk.clone(), min: fp, max: fp },
-                    TokenPrice { token: short_tk.clone(), min: fp, max: fp },
+                    TokenPrice {
+                        token: index_tk.clone(),
+                        min: 2 * fp,
+                        max: 2 * fp,
+                    },
+                    TokenPrice {
+                        token: long_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: short_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
                 ],
             ),
         );
@@ -2066,7 +2239,11 @@ mod tests {
         // order low-ratio -> low-ratio -> high-ratio. Entry price is encoded via
         // size_in_tokens (higher size_in_tokens per size_in_usd = cheaper entry =
         // bigger profit ratio at the same $2 exit price).
-        let ratios_entry_price = [(2i128 * fp / 3, "low_a"), (fp / 2, "low_b"), (fp / 5, "high")];
+        let ratios_entry_price = [
+            (2i128 * fp / 3, "low_a"),
+            (fp / 2, "low_b"),
+            (fp / 5, "high"),
+        ];
         let mut traders = SdkVec::new(&env);
         for (entry_price, _label) in ratios_entry_price.iter() {
             let trader = Address::generate(&env);
@@ -2100,12 +2277,20 @@ mod tests {
         // limit = 2 forces the old buggy scan to stop after the first two
         // (both low-ratio) positions, before ever reaching the third,
         // highest-ratio one.
-        let result = ReaderClient::new(&env, &reader)
-            .get_adl_eligible_positions(&ds, &oracle, &ord_handler, &market_tk, &true, &2);
+        let result = ReaderClient::new(&env, &reader).get_adl_eligible_positions(
+            &ds,
+            &oracle,
+            &ord_handler,
+            &market_tk,
+            &true,
+            &2,
+        );
 
         assert_eq!(result.len(), 2);
-        let owners: SdkVec<Address> =
-            SdkVec::from_array(&env, [result.get(0).unwrap().owner, result.get(1).unwrap().owner]);
+        let owners: SdkVec<Address> = SdkVec::from_array(
+            &env,
+            [result.get(0).unwrap().owner, result.get(1).unwrap().owner],
+        );
         assert!(
             owners.contains(traders.get(2).unwrap()),
             "the highest-ratio position (scanned last) must be included"
@@ -2158,9 +2343,21 @@ mod tests {
             &SdkVec::from_array(
                 &env,
                 [
-                    TokenPrice { token: index_tk.clone(), min: fp / 2, max: fp / 2 },
-                    TokenPrice { token: long_tk.clone(), min: fp, max: fp },
-                    TokenPrice { token: short_tk.clone(), min: fp, max: fp },
+                    TokenPrice {
+                        token: index_tk.clone(),
+                        min: fp / 2,
+                        max: fp / 2,
+                    },
+                    TokenPrice {
+                        token: long_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: short_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
                 ],
             ),
         );
@@ -2196,8 +2393,14 @@ mod tests {
                 .set(&PositionStorageKey::Position(pk.clone()), &position);
         });
 
-        let result = ReaderClient::new(&env, &reader)
-            .get_adl_eligible_positions(&ds, &oracle, &ord_handler, &market_tk, &true, &10);
+        let result = ReaderClient::new(&env, &reader).get_adl_eligible_positions(
+            &ds,
+            &oracle,
+            &ord_handler,
+            &market_tk,
+            &true,
+            &10,
+        );
 
         assert_eq!(result.len(), 0);
     }
@@ -2236,19 +2439,43 @@ mod tests {
         let ds_c = DsClient::new(env, &w.ds);
 
         // Wire the market's token addresses.
-        ds_c.set_address(&w.admin, &market_index_token_key(env, &market_tk), &index_tk);
+        ds_c.set_address(
+            &w.admin,
+            &market_index_token_key(env, &market_tk),
+            &index_tk,
+        );
         ds_c.set_address(&w.admin, &market_long_token_key(env, &market_tk), &long_tk);
-        ds_c.set_address(&w.admin, &market_short_token_key(env, &market_tk), &short_tk);
+        ds_c.set_address(
+            &w.admin,
+            &market_short_token_key(env, &market_tk),
+            &short_tk,
+        );
 
         // Seed balanced pools: 10,000 tokens each.
         let pool_size = 10_000 * tp as u128;
-        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market_tk, &long_tk), &pool_size);
-        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market_tk, &short_tk), &pool_size);
+        ds_c.set_u128(
+            &w.admin,
+            &pool_amount_key(env, &market_tk, &long_tk),
+            &pool_size,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &pool_amount_key(env, &market_tk, &short_tk),
+            &pool_size,
+        );
 
         // Equal long/short OI to minimize impact.
         let oi = 5_000 * fp as u128;
-        ds_c.set_u128(&w.admin, &open_interest_key(env, &market_tk, &long_tk, true), &oi);
-        ds_c.set_u128(&w.admin, &open_interest_key(env, &market_tk, &short_tk, false), &oi);
+        ds_c.set_u128(
+            &w.admin,
+            &open_interest_key(env, &market_tk, &long_tk, true),
+            &oi,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &open_interest_key(env, &market_tk, &short_tk, false),
+            &oi,
+        );
 
         // Set oracle prices at $1 for all tokens.
         let price = fp;
@@ -2257,9 +2484,21 @@ mod tests {
             &SdkVec::from_array(
                 env,
                 [
-                    TokenPrice { token: long_tk.clone(), min: price, max: price },
-                    TokenPrice { token: short_tk.clone(), min: price, max: price },
-                    TokenPrice { token: index_tk, min: price, max: price },
+                    TokenPrice {
+                        token: long_tk.clone(),
+                        min: price,
+                        max: price,
+                    },
+                    TokenPrice {
+                        token: short_tk.clone(),
+                        min: price,
+                        max: price,
+                    },
+                    TokenPrice {
+                        token: index_tk,
+                        min: price,
+                        max: price,
+                    },
                 ],
             ),
         );
@@ -2268,13 +2507,8 @@ mod tests {
         let amount_in = 100 * tp as u128;
         let swap_path = SdkVec::from_array(env, [market_tk]);
 
-        let result = ReaderClient::new(env, &w.reader).estimate_swap_output(
-            &w.ds,
-            &w.oracle,
-            &long_tk,
-            &amount_in,
-            &swap_path,
-        );
+        let result = ReaderClient::new(env, &w.reader)
+            .estimate_swap_output(&w.ds, &w.oracle, &long_tk, &amount_in, &swap_path);
 
         // Output token should be short_tk.
         assert_eq!(result.token_out, short_tk);
@@ -2312,10 +2546,26 @@ mod tests {
 
         let pool_size = 10_000 * tp as u128;
         let oi = 5_000 * fp as u128;
-        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market1, &token_a), &pool_size);
-        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market1, &token_b), &pool_size);
-        ds_c.set_u128(&w.admin, &open_interest_key(env, &market1, &token_a, true), &oi);
-        ds_c.set_u128(&w.admin, &open_interest_key(env, &market1, &token_b, false), &oi);
+        ds_c.set_u128(
+            &w.admin,
+            &pool_amount_key(env, &market1, &token_a),
+            &pool_size,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &pool_amount_key(env, &market1, &token_b),
+            &pool_size,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &open_interest_key(env, &market1, &token_a, true),
+            &oi,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &open_interest_key(env, &market1, &token_b, false),
+            &oi,
+        );
 
         // Market 2: tokenB (long) <-> tokenC (short).
         let market2 = Address::generate(env);
@@ -2325,10 +2575,26 @@ mod tests {
         ds_c.set_address(&w.admin, &market_long_token_key(env, &market2), &token_b);
         ds_c.set_address(&w.admin, &market_short_token_key(env, &market2), &token_c);
 
-        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market2, &token_b), &pool_size);
-        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market2, &token_c), &pool_size);
-        ds_c.set_u128(&w.admin, &open_interest_key(env, &market2, &token_b, true), &oi);
-        ds_c.set_u128(&w.admin, &open_interest_key(env, &market2, &token_c, false), &oi);
+        ds_c.set_u128(
+            &w.admin,
+            &pool_amount_key(env, &market2, &token_b),
+            &pool_size,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &pool_amount_key(env, &market2, &token_c),
+            &pool_size,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &open_interest_key(env, &market2, &token_b, true),
+            &oi,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &open_interest_key(env, &market2, &token_c, false),
+            &oi,
+        );
 
         // Set oracle prices at $1 for all tokens.
         let price = fp;
@@ -2337,11 +2603,31 @@ mod tests {
             &SdkVec::from_array(
                 env,
                 [
-                    TokenPrice { token: token_a.clone(), min: price, max: price },
-                    TokenPrice { token: token_b.clone(), min: price, max: price },
-                    TokenPrice { token: token_c.clone(), min: price, max: price },
-                    TokenPrice { token: index1, min: price, max: price },
-                    TokenPrice { token: index2, min: price, max: price },
+                    TokenPrice {
+                        token: token_a.clone(),
+                        min: price,
+                        max: price,
+                    },
+                    TokenPrice {
+                        token: token_b.clone(),
+                        min: price,
+                        max: price,
+                    },
+                    TokenPrice {
+                        token: token_c.clone(),
+                        min: price,
+                        max: price,
+                    },
+                    TokenPrice {
+                        token: index1,
+                        min: price,
+                        max: price,
+                    },
+                    TokenPrice {
+                        token: index2,
+                        min: price,
+                        max: price,
+                    },
                 ],
             ),
         );
@@ -2350,13 +2636,8 @@ mod tests {
         let amount_in = 100 * tp as u128;
         let swap_path = SdkVec::from_array(env, [market1, market2]);
 
-        let result = ReaderClient::new(env, &w.reader).estimate_swap_output(
-            &w.ds,
-            &w.oracle,
-            &token_a,
-            &amount_in,
-            &swap_path,
-        );
+        let result = ReaderClient::new(env, &w.reader)
+            .estimate_swap_output(&w.ds, &w.oracle, &token_a, &amount_in, &swap_path);
 
         // Output token should be tokenC.
         assert_eq!(result.token_out, token_c);
@@ -2384,16 +2665,40 @@ mod tests {
         let index_tk = Address::generate(env);
         let ds_c = DsClient::new(env, &w.ds);
 
-        ds_c.set_address(&w.admin, &market_index_token_key(env, &market_tk), &index_tk);
+        ds_c.set_address(
+            &w.admin,
+            &market_index_token_key(env, &market_tk),
+            &index_tk,
+        );
         ds_c.set_address(&w.admin, &market_long_token_key(env, &market_tk), &long_tk);
-        ds_c.set_address(&w.admin, &market_short_token_key(env, &market_tk), &short_tk);
+        ds_c.set_address(
+            &w.admin,
+            &market_short_token_key(env, &market_tk),
+            &short_tk,
+        );
 
         let pool_size = 10_000 * tp as u128;
         let oi = 5_000 * fp as u128;
-        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market_tk, &long_tk), &pool_size);
-        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market_tk, &short_tk), &pool_size);
-        ds_c.set_u128(&w.admin, &open_interest_key(env, &market_tk, &long_tk, true), &oi);
-        ds_c.set_u128(&w.admin, &open_interest_key(env, &market_tk, &short_tk, false), &oi);
+        ds_c.set_u128(
+            &w.admin,
+            &pool_amount_key(env, &market_tk, &long_tk),
+            &pool_size,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &pool_amount_key(env, &market_tk, &short_tk),
+            &pool_size,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &open_interest_key(env, &market_tk, &long_tk, true),
+            &oi,
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &open_interest_key(env, &market_tk, &short_tk, false),
+            &oi,
+        );
 
         let price = fp;
         OClient::new(env, &w.oracle).set_prices_simple(
@@ -2401,9 +2706,21 @@ mod tests {
             &SdkVec::from_array(
                 env,
                 [
-                    TokenPrice { token: long_tk, min: price, max: price },
-                    TokenPrice { token: short_tk, min: price, max: price },
-                    TokenPrice { token: index_tk, min: price, max: price },
+                    TokenPrice {
+                        token: long_tk,
+                        min: price,
+                        max: price,
+                    },
+                    TokenPrice {
+                        token: short_tk,
+                        min: price,
+                        max: price,
+                    },
+                    TokenPrice {
+                        token: index_tk,
+                        min: price,
+                        max: price,
+                    },
                 ],
             ),
         );
@@ -2444,24 +2761,56 @@ mod tests {
         let index_tk = Address::generate(env);
         let ds_c = DsClient::new(env, &w.ds);
 
-        ds_c.set_address(&w.admin, &market_index_token_key(env, &market_tk), &index_tk);
+        ds_c.set_address(
+            &w.admin,
+            &market_index_token_key(env, &market_tk),
+            &index_tk,
+        );
         ds_c.set_address(&w.admin, &market_long_token_key(env, &market_tk), &long_tk);
-        ds_c.set_address(&w.admin, &market_short_token_key(env, &market_tk), &short_tk);
+        ds_c.set_address(
+            &w.admin,
+            &market_short_token_key(env, &market_tk),
+            &short_tk,
+        );
 
         // Large long pool, tiny short pool (extreme imbalance).
-        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market_tk, &long_tk), &(10_000 * tp as u128));
-        ds_c.set_u128(&w.admin, &pool_amount_key(env, &market_tk, &short_tk), &(10 * tp as u128));
+        ds_c.set_u128(
+            &w.admin,
+            &pool_amount_key(env, &market_tk, &long_tk),
+            &(10_000 * tp as u128),
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &pool_amount_key(env, &market_tk, &short_tk),
+            &(10 * tp as u128),
+        );
 
         // Very high long OI, low short OI.
-        ds_c.set_u128(&w.admin, &open_interest_key(env, &market_tk, &long_tk, true), &(50_000 * fp as u128));
-        ds_c.set_u128(&w.admin, &open_interest_key(env, &market_tk, &short_tk, false), &(1_000 * fp as u128));
+        ds_c.set_u128(
+            &w.admin,
+            &open_interest_key(env, &market_tk, &long_tk, true),
+            &(50_000 * fp as u128),
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &open_interest_key(env, &market_tk, &short_tk, false),
+            &(1_000 * fp as u128),
+        );
 
         // The impact itself has to be configured: with no swap impact factor,
         // impact is 0 and the swap trivially succeeds. Linear exponent and a
         // 100% negative factor: the pool imbalance grows from $9,990 to
         // $19,990, so impact ≈ -$10,000 against $5,000 in → output ≤ 0.
-        ds_c.set_u128(&w.admin, &gmx_keys::swap_impact_factor_key(env, &market_tk, false), &(fp as u128));
-        ds_c.set_u128(&w.admin, &gmx_keys::swap_impact_exponent_factor_key(env, &market_tk), &(fp as u128));
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::swap_impact_factor_key(env, &market_tk, false),
+            &(fp as u128),
+        );
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::swap_impact_exponent_factor_key(env, &market_tk),
+            &(fp as u128),
+        );
 
         let price = fp;
         OClient::new(env, &w.oracle).set_prices_simple(
@@ -2469,9 +2818,21 @@ mod tests {
             &SdkVec::from_array(
                 env,
                 [
-                    TokenPrice { token: long_tk.clone(), min: price, max: price },
-                    TokenPrice { token: short_tk, min: price, max: price },
-                    TokenPrice { token: index_tk, min: price, max: price },
+                    TokenPrice {
+                        token: long_tk.clone(),
+                        min: price,
+                        max: price,
+                    },
+                    TokenPrice {
+                        token: short_tk,
+                        min: price,
+                        max: price,
+                    },
+                    TokenPrice {
+                        token: index_tk,
+                        min: price,
+                        max: price,
+                    },
                 ],
             ),
         );
@@ -2480,13 +2841,8 @@ mod tests {
         let amount_in = 5_000 * tp as u128; // half the long pool
         let swap_path = SdkVec::from_array(env, [market_tk]);
 
-        let result = ReaderClient::new(env, &w.reader).estimate_swap_output(
-            &w.ds,
-            &w.oracle,
-            &long_tk,
-            &amount_in,
-            &swap_path,
-        );
+        let result = ReaderClient::new(env, &w.reader)
+            .estimate_swap_output(&w.ds, &w.oracle, &long_tk, &amount_in, &swap_path);
 
         // Should flag that execution would revert due to non-positive output.
         assert!(result.reverts_if_executed);
@@ -2555,9 +2911,21 @@ mod tests {
             &SdkVec::from_array(
                 &env,
                 [
-                    TokenPrice { token: index_tk.clone(), min: fp, max: fp },
-                    TokenPrice { token: long_tk.clone(), min: fp, max: fp },
-                    TokenPrice { token: short_tk.clone(), min: fp, max: fp },
+                    TokenPrice {
+                        token: index_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: long_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: short_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
                 ],
             ),
         );
@@ -2608,8 +2976,12 @@ mod tests {
         let pk1 = position_key(&env, &trader1, &market_tk, &long_tk, true);
         let pk2 = position_key(&env, &trader2, &market_tk, &long_tk, true);
         env.as_contract(&ord_handler, || {
-            env.storage().persistent().set(&PositionStorageKey::Position(pk1.clone()), &pos1);
-            env.storage().persistent().set(&PositionStorageKey::Position(pk2.clone()), &pos2);
+            env.storage()
+                .persistent()
+                .set(&PositionStorageKey::Position(pk1.clone()), &pos1);
+            env.storage()
+                .persistent()
+                .set(&PositionStorageKey::Position(pk2.clone()), &pos2);
         });
         // The reader scans data_store's global position list, so register both.
         let pos_list = position_list_key(&env);
@@ -2624,8 +2996,15 @@ mod tests {
             &((fp / 100) as u128),
         );
 
-        let result = ReaderClient::new(&env, &reader)
-            .get_liquidatable_positions(&ds, &oracle, &ord_handler, &market_tk, &true, &10, &0);
+        let result = ReaderClient::new(&env, &reader).get_liquidatable_positions(
+            &ds,
+            &oracle,
+            &ord_handler,
+            &market_tk,
+            &true,
+            &10,
+            &0,
+        );
 
         assert_eq!(result.len(), 1);
         let c = result.get(0).unwrap();
@@ -2650,7 +3029,8 @@ mod tests {
         let oh = Address::generate(&w.env);
 
         let rc = ReaderClient::new(&w.env, &w.reader);
-        let positions = rc.get_liquidatable_positions(&w.ds, &w.oracle, &oh, &market, &true, &10, &0);
+        let positions =
+            rc.get_liquidatable_positions(&w.ds, &w.oracle, &oh, &market, &true, &10, &0);
         assert_eq!(positions.len(), 0);
     }
 
@@ -2707,9 +3087,21 @@ mod tests {
             &SdkVec::from_array(
                 &env,
                 [
-                    TokenPrice { token: index_tk.clone(), min: fp, max: fp },
-                    TokenPrice { token: long_tk.clone(), min: fp, max: fp },
-                    TokenPrice { token: short_tk.clone(), min: fp, max: fp },
+                    TokenPrice {
+                        token: index_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: long_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: short_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
                 ],
             ),
         );
@@ -2775,7 +3167,15 @@ mod tests {
         });
 
         let result = ReaderClient::new(&env, &reader)
-            .get_claimable_funding_amount(&ds, &oracle, &ord_handler, &trader, &market_tk, &collateral_token, &is_long)
+            .get_claimable_funding_amount(
+                &ds,
+                &oracle,
+                &ord_handler,
+                &trader,
+                &market_tk,
+                &collateral_token,
+                &is_long,
+            )
             .unwrap();
 
         // long_token_amount = claimable[long] (5e8) - funding_fee_amount (3e8) = 2e8 (20 tokens)
@@ -2827,9 +3227,21 @@ mod tests {
             &SdkVec::from_array(
                 &env,
                 [
-                    TokenPrice { token: index_tk.clone(), min: fp, max: fp },
-                    TokenPrice { token: long_tk.clone(), min: fp, max: fp },
-                    TokenPrice { token: short_tk.clone(), min: fp, max: fp },
+                    TokenPrice {
+                        token: index_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: long_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: short_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
                 ],
             ),
         );
@@ -2894,7 +3306,15 @@ mod tests {
         });
 
         let result = ReaderClient::new(&env, &reader)
-            .get_claimable_funding_amount(&ds, &oracle, &ord_handler, &trader, &market_tk, &collateral_token, &is_long)
+            .get_claimable_funding_amount(
+                &ds,
+                &oracle,
+                &ord_handler,
+                &trader,
+                &market_tk,
+                &collateral_token,
+                &is_long,
+            )
             .unwrap();
 
         // long_token_amount = claimable[long] (2e8), untouched since collateral_token == short_tk
@@ -2927,7 +3347,10 @@ mod tests {
         assert_eq!(r.get_withdrawal_keys(&w.ds, &0, &10).len(), 0);
         assert_eq!(r.get_order_keys(&w.ds, &0, &10).len(), 0);
         assert_eq!(r.get_account_deposit_keys(&w.ds, &acct, &0, &10).len(), 0);
-        assert_eq!(r.get_account_withdrawal_keys(&w.ds, &acct, &0, &10).len(), 0);
+        assert_eq!(
+            r.get_account_withdrawal_keys(&w.ds, &acct, &0, &10).len(),
+            0
+        );
         assert_eq!(r.get_account_order_keys(&w.ds, &acct, &0, &10).len(), 0);
     }
 

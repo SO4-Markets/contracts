@@ -6,8 +6,9 @@ use gmx_keys::{
 };
 use gmx_market_utils::{get_open_interest_for_side, get_pool_value};
 use gmx_types::{MarketProps, PriceProps};
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env};
-
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, BytesN, Env,
+};
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -82,9 +83,12 @@ impl MarketUtilReader {
             pool.pool_value as u128
         };
 
-        let long_open_interest_usd = get_open_interest_for_side(&env, &data_store, &market_props, true);
-        let short_open_interest_usd = get_open_interest_for_side(&env, &data_store, &market_props, false);
-        let combined_open_interest_usd = long_open_interest_usd.saturating_add(short_open_interest_usd);
+        let long_open_interest_usd =
+            get_open_interest_for_side(&env, &data_store, &market_props, true);
+        let short_open_interest_usd =
+            get_open_interest_for_side(&env, &data_store, &market_props, false);
+        let combined_open_interest_usd =
+            long_open_interest_usd.saturating_add(short_open_interest_usd);
 
         let ds = DataStoreClient::new(&env, &data_store);
         let long_cap = ds.get_u128(&max_open_interest_key(&env, &market, true));
@@ -351,8 +355,14 @@ mod tests {
         // Pool value: 10_000 long tokens at $2000 + 5_000 short tokens at $1
         // = $20,000,000 + $5,000 = $20,005,000
         // In raw: 10_000_0000 * 2000 * fp / TOKEN_PRECISION + 5_000_0000 * fp / TOKEN_PRECISION
-        let long_usd = gmx_math::mul_div_wide(&w.env, 100_000_000_i128, 2000 * fp, gmx_math::TOKEN_PRECISION);
-        let short_usd = gmx_math::mul_div_wide(&w.env, 50_000_000_i128, fp, gmx_math::TOKEN_PRECISION);
+        let long_usd = gmx_math::mul_div_wide(
+            &w.env,
+            100_000_000_i128,
+            2000 * fp,
+            gmx_math::TOKEN_PRECISION,
+        );
+        let short_usd =
+            gmx_math::mul_div_wide(&w.env, 50_000_000_i128, fp, gmx_math::TOKEN_PRECISION);
         let expected_pool = (long_usd + short_usd) as u128;
 
         assert_eq!(result.pool_value_usd, expected_pool);
@@ -406,7 +416,10 @@ mod tests {
             .get_market_utilisation(&w.ds, &w.oracle, &w.market_tk);
 
         assert!(result.is_at_long_oi_cap, "long OI at cap should be true");
-        assert!(!result.is_at_short_oi_cap, "short OI cap not set → not at cap");
+        assert!(
+            !result.is_at_short_oi_cap,
+            "short OI cap not set → not at cap"
+        );
     }
 
     /// Zero pool value (empty pool) returns 0 for pool_value_usd and

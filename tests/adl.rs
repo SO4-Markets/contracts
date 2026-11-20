@@ -257,11 +257,7 @@ fn seed_pool(w: &TestWorld, long_amt: i128) {
 /// Open a long position for `trader` with the given collateral and size.
 fn open_long(w: &TestWorld, trader: &Address, collateral: i128, size_usd: i128) {
     StellarAssetClient::new(&w.env, &w.long_tk).mint(trader, &collateral);
-    soroban_sdk::token::Client::new(&w.env, &w.long_tk).transfer(
-        trader,
-        &w.ord_vault,
-        &collateral,
-    );
+    soroban_sdk::token::Client::new(&w.env, &w.long_tk).transfer(trader, &w.ord_vault, &collateral);
     let key = OHClient::new(&w.env, &w.ord_handler).create_order(
         trader,
         &CreateOrderParams {

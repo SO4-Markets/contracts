@@ -46,8 +46,11 @@ jobs:
 
       # ── Build HEAD (PR branch) ────────────────────────────────────────────
 
+      # Build only the deployable contracts ($(CONTRACTS) in mx/common.mk).
+      # A bare workspace build also compiles the test-only crates, which turn
+      # on soroban-sdk `testutils` for wasm and fail (see mx/build.mk).
       - name: Build contracts (PR)
-        run: cargo build --target wasm32v1-none --release
+        run: make build-wasm
 
       - name: Optimise WASM files (PR)
         run: |
@@ -71,7 +74,7 @@ jobs:
         run: git checkout "${{ github.base_ref }}"
 
       - name: Build contracts (base)
-        run: cargo build --target wasm32v1-none --release
+        run: make build-wasm
 
       - name: Optimise WASM files (base)
         run: |

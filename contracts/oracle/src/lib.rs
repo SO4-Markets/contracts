@@ -365,7 +365,10 @@ impl Oracle {
                 if price_is_stale(env.ledger().sequence(), s.ledger_seq) {
                     None
                 } else {
-                    Some(PriceProps { min: s.min, max: s.max })
+                    Some(PriceProps {
+                        min: s.min,
+                        max: s.max,
+                    })
                 }
             })
     }
@@ -426,15 +429,27 @@ impl Oracle {
         }
     }
 
-    /// Require that the stored price for `token` was signed for `expected_ledger_seq`.
-    /// Panics with `StalePrice` if the stored ledger sequence differs.
+    /// Require that the stored price for `token` is fresh relative to
+    /// `expected_ledger_seq` (callers pass the current ledger): it must have
+    /// been signed no later than that ledger and at most
+    /// `PRICE_FRESHNESS_WINDOW` ledgers before it.
+    ///
+    /// Exact equality (the previous rule) is unsatisfiable: the keeper signs at
+    /// the last closed ledger L, `set_prices` lands in L+1 or later, and
+    /// `execute_*` runs in a further transaction, so every deposit/withdrawal
+    /// reverted with `StalePrice` (SO4-Markets/so4-oracle#1205).
+    /// Panics with `StalePrice` otherwise.
     pub fn require_price_fresh(env: Env, token: Address, expected_ledger_seq: u32) -> PriceProps {
         let stored: StoredPrice = env
             .storage()
             .temporary()
             .get::<TempKey, StoredPrice>(&TempKey::Price(token))
             .unwrap_or_else(|| panic_with_error!(&env, Error::PriceNotFound));
-        if stored.ledger_seq != expected_ledger_seq {
+        if is_seq_stale(
+            expected_ledger_seq,
+            stored.ledger_seq,
+            PRICE_FRESHNESS_WINDOW,
+        ) {
             panic_with_error!(&env, Error::StalePrice);
         }
         PriceProps {
@@ -520,12 +535,7 @@ impl Oracle {
     /// After registration, `check_circuit_breaker` uses this index instead of
     /// scanning every market. Call this once per (token, market) pair when a
     /// market is deployed.
-    pub fn register_market_for_breaker(
-        env: Env,
-        caller: Address,
-        token: Address,
-        market: Address,
-    ) {
+    pub fn register_market_for_breaker(env: Env, caller: Address, token: Address, market: Address) {
         caller.require_auth();
         require_admin(&env, &caller);
         let data_store: Address = env
@@ -534,8 +544,11 @@ impl Oracle {
             .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let key = token_circuit_markets_key(&env, &token);
-        DataStoreClient::new(&env, &data_store)
-            .add_address_to_set(&env.current_contract_address(), &key, &market);
+        DataStoreClient::new(&env, &data_store).add_address_to_set(
+            &env.current_contract_address(),
+            &key,
+            &market,
+        );
     }
 
     /// Configure the circuit-breaker deviation threshold for a market, in
@@ -549,7 +562,12 @@ impl Oracle {
     /// parameter." This mirrors rotate_signer/register_market_for_breaker's
     /// admin-gated pattern, writing through the oracle's own CONTROLLER-held
     /// reference instead.
-    pub fn set_circuit_breaker_factor(env: Env, caller: Address, market: Address, factor_bps: u128) {
+    pub fn set_circuit_breaker_factor(
+        env: Env,
+        caller: Address,
+        market: Address,
+        factor_bps: u128,
+    ) {
         caller.require_auth();
         require_admin(&env, &caller);
         if factor_bps > MAX_CIRCUIT_BREAKER_FACTOR_BPS {
@@ -648,6 +666,13 @@ impl Oracle {
 /// Casts both values to u64 so the subtraction is always safe: when `submitted > current`
 /// (which happens after a u32 sequence wrap-around where a pre-wrap sequence numerically
 /// exceeds the post-wrap current) the first branch triggers and we treat it as stale.
+/// Max ledgers between the price's signing ledger and its use in
+/// `require_price_fresh` (~100s at 5s/ledger). Covers sign-at-L, `set_prices`
+/// confirmation, the keeper's post-confirmation delay and a cycle's sequential
+/// executions (50s cycle cap), while staying far tighter than the 60-ledger
+/// `set_prices` acceptance window (SO4-Markets/so4-oracle#1205).
+pub const PRICE_FRESHNESS_WINDOW: u32 = 20;
+
 fn is_seq_stale(current: u32, submitted: u32, window: u32) -> bool {
     let c = current as u64;
     let s = submitted as u64;
@@ -762,9 +787,18 @@ fn build_price_message(
     buf
 }
 
-fn check_circuit_breaker(env: &Env, data_store: &Address, token: &Address, new_min: i128, new_max: i128) {
+fn check_circuit_breaker(
+    env: &Env,
+    data_store: &Address,
+    token: &Address,
+    new_min: i128,
+    new_max: i128,
+) {
     let price_key = TempKey::Price(token.clone());
-    let prev_price_opt = env.storage().temporary().get::<TempKey, StoredPrice>(&price_key);
+    let prev_price_opt = env
+        .storage()
+        .temporary()
+        .get::<TempKey, StoredPrice>(&price_key);
 
     if let Some(prev_price) = prev_price_opt {
         let last_price = (prev_price.min + prev_price.max) / 2;
@@ -806,7 +840,11 @@ fn check_circuit_breaker(env: &Env, data_store: &Address, token: &Address, new_m
                 let market = markets.get(i).unwrap();
                 let threshold = ds.get_u128(&gmx_keys::circuit_breaker_factor_key(env, &market));
                 if threshold > 0 && deviation_bps > threshold {
-                    ds.set_bool(&env.current_contract_address(), &gmx_keys::is_market_paused_key(env, &market), &true);
+                    ds.set_bool(
+                        &env.current_contract_address(),
+                        &gmx_keys::is_market_paused_key(env, &market),
+                        &true,
+                    );
                     env.events().publish(
                         (soroban_sdk::symbol_short!("cb_trip"),),
                         CircuitBreakerTripped {
@@ -815,7 +853,7 @@ fn check_circuit_breaker(env: &Env, data_store: &Address, token: &Address, new_m
                             old_price: last_price,
                             new_price,
                             deviation_bps,
-                        }
+                        },
                     );
                 }
             }
@@ -967,7 +1005,14 @@ mod tests {
         let client = OracleClient::new(&env, &oracle_id);
 
         let token = Address::generate(&env);
-        let prices = Vec::from_array(&env, [TokenPrice { token: token.clone(), min: 100, max: 100 }]);
+        let prices = Vec::from_array(
+            &env,
+            [TokenPrice {
+                token: token.clone(),
+                min: 100,
+                max: 100,
+            }],
+        );
         client.set_prices_simple(&admin, &prices);
 
         // No ledger advancement: the price is 0 ledgers old, well under the
@@ -985,7 +1030,14 @@ mod tests {
         let client = OracleClient::new(&env, &oracle_id);
 
         let token = Address::generate(&env);
-        let prices = Vec::from_array(&env, [TokenPrice { token: token.clone(), min: 100, max: 100 }]);
+        let prices = Vec::from_array(
+            &env,
+            [TokenPrice {
+                token: token.clone(),
+                min: 100,
+                max: 100,
+            }],
+        );
         client.set_prices_simple(&admin, &prices);
 
         env.ledger()
@@ -1022,7 +1074,11 @@ mod tests {
         let t1 = Address::generate(&env);
         let t2 = Address::generate(&env);
         let mut prices = Vec::new(&env);
-        prices.push_back(TokenPrice { token: t1.clone(), min: 100, max: 100 });
+        prices.push_back(TokenPrice {
+            token: t1.clone(),
+            min: 100,
+            max: 100,
+        });
         client.set_prices_simple(&admin, &prices);
 
         // Advance past the minimum age for t1, then submit t2 fresh — a
@@ -1030,7 +1086,11 @@ mod tests {
         env.ledger()
             .with_mut(|li| li.sequence_number += MIN_PRICE_AGE_LEDGERS_BEFORE_CLEAR);
         let mut t2_prices = Vec::new(&env);
-        t2_prices.push_back(TokenPrice { token: t2.clone(), min: 200, max: 200 });
+        t2_prices.push_back(TokenPrice {
+            token: t2.clone(),
+            min: 200,
+            max: 200,
+        });
         client.set_prices_simple(&admin, &t2_prices);
 
         let mut tokens_to_clear = Vec::new(&env);
@@ -1078,6 +1138,39 @@ mod tests {
         client.clear_prices(&admin, &tokens);
     }
 
+    // ── so4-oracle#1205: require_price_fresh uses a window, not equality ─────
+
+    /// The keeper signs at closed ledger L; executions land a few ledgers later.
+    #[test]
+    fn price_freshness_window_accepts_keeper_flow_and_rejects_old_or_future() {
+        let signed_at = 1_000;
+        // set_prices lands in L+1, executions follow within the window.
+        for current in [
+            signed_at,
+            signed_at + 1,
+            signed_at + 5,
+            signed_at + PRICE_FRESHNESS_WINDOW,
+        ] {
+            assert!(
+                !is_seq_stale(current, signed_at, PRICE_FRESHNESS_WINDOW),
+                "price signed at {signed_at} must be fresh at {current}"
+            );
+        }
+        assert!(is_seq_stale(
+            signed_at + PRICE_FRESHNESS_WINDOW + 1,
+            signed_at,
+            PRICE_FRESHNESS_WINDOW
+        ));
+        // A price signed for a future ledger is never fresh.
+        assert!(is_seq_stale(
+            signed_at,
+            signed_at + 1,
+            PRICE_FRESHNESS_WINDOW
+        ));
+        // Stays tighter than the set_prices acceptance window.
+        const { assert!(PRICE_FRESHNESS_WINDOW < 60) };
+    }
+
     // ── Issue #172: ledger sequence wrap-around staleness ─────────────────────
 
     /// Post-wrap scenario: current_seq = 1, submitted = u32::MAX.
@@ -1086,9 +1179,15 @@ mod tests {
     #[test]
     fn seq_staleness_rejects_pre_wrap_sequence_as_stale() {
         assert!(is_seq_stale(1, u32::MAX, 60), "u32::MAX > 1 must be stale");
-        assert!(is_seq_stale(1, u32::MAX - 1, 60), "u32::MAX-1 > 1 must be stale");
+        assert!(
+            is_seq_stale(1, u32::MAX - 1, 60),
+            "u32::MAX-1 > 1 must be stale"
+        );
         // Edge: submitted exactly equals current — fresh (age = 0)
-        assert!(!is_seq_stale(1, 1, 60), "same-ledger submission must be fresh");
+        assert!(
+            !is_seq_stale(1, 1, 60),
+            "same-ledger submission must be fresh"
+        );
     }
 
     /// Normal (non-wrap) staleness check must still work after the refactor.
@@ -1192,7 +1291,13 @@ mod tests {
 
     // ── Issue #292: signer rotation ───────────────────────────────────────────
 
-    fn register_keeper_pubkey(env: &Env, ds: &Address, admin: &Address, index: u32, pubkey: &BytesN<32>) {
+    fn register_keeper_pubkey(
+        env: &Env,
+        ds: &Address,
+        admin: &Address,
+        index: u32,
+        pubkey: &BytesN<32>,
+    ) {
         let mut buf = Bytes::new(env);
         let prefix = keeper_public_key_prefix(env);
         buf.extend_from_array(&prefix.to_array());
@@ -1284,11 +1389,23 @@ mod tests {
         let t1 = Address::generate(&env);
         let t2 = Address::generate(&env);
         let t3 = Address::generate(&env);
-        
+
         let mut prices = Vec::new(&env);
-        prices.push_back(TokenPrice { token: t1.clone(), min: 100, max: 100 });
-        prices.push_back(TokenPrice { token: t2.clone(), min: 200, max: 200 });
-        prices.push_back(TokenPrice { token: t3.clone(), min: 300, max: 300 });
+        prices.push_back(TokenPrice {
+            token: t1.clone(),
+            min: 100,
+            max: 100,
+        });
+        prices.push_back(TokenPrice {
+            token: t2.clone(),
+            min: 200,
+            max: 200,
+        });
+        prices.push_back(TokenPrice {
+            token: t3.clone(),
+            min: 300,
+            max: 300,
+        });
 
         client.set_prices_simple(&admin, &prices);
 
@@ -1320,7 +1437,11 @@ mod tests {
 
         let t1 = Address::generate(&env);
         let mut prices = Vec::new(&env);
-        prices.push_back(TokenPrice { token: t1.clone(), min: 100, max: 100 });
+        prices.push_back(TokenPrice {
+            token: t1.clone(),
+            min: 100,
+            max: 100,
+        });
         client.set_prices_simple(&admin, &prices);
 
         let mut tokens_to_clear = Vec::new(&env);
@@ -1345,10 +1466,14 @@ mod tests {
 
         let token = Address::generate(&env);
         let ds = DataStoreClient::new(&env, &ds_id);
-        
+
         // i128::MAX + 1 stored as u128
         let overflow_val: u128 = (i128::MAX as u128) + 1;
-        ds.set_u128(&admin, &gmx_keys::stable_price_key(&env, &token), &overflow_val);
+        ds.set_u128(
+            &admin,
+            &gmx_keys::stable_price_key(&env, &token),
+            &overflow_val,
+        );
 
         assert_eq!(client.get_stable_price(&token), None);
     }
@@ -1362,12 +1487,20 @@ mod tests {
 
         let token = Address::generate(&env);
         let ds = DataStoreClient::new(&env, &ds_id);
-        
+
         let overflow_val: u128 = (i128::MAX as u128) + 1;
-        ds.set_u128(&admin, &gmx_keys::stable_price_key(&env, &token), &overflow_val);
+        ds.set_u128(
+            &admin,
+            &gmx_keys::stable_price_key(&env, &token),
+            &overflow_val,
+        );
 
         let mut prices = Vec::new(&env);
-        prices.push_back(TokenPrice { token: token.clone(), min: 1234, max: 1234 });
+        prices.push_back(TokenPrice {
+            token: token.clone(),
+            min: 1234,
+            max: 1234,
+        });
         client.set_prices_simple(&admin, &prices);
 
         let price = client.get_price_with_stable_fallback(&token);

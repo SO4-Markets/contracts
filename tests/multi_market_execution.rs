@@ -87,8 +87,12 @@ fn setup() -> World {
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
     // ── ETH/USD market ────────────────────────────────────────────────────────
-    let weth = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let usdc = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let weth = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let usdc = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
     let eth_idx = Address::generate(&env);
 
     let eth_market = env.register(MarketToken, ());
@@ -103,7 +107,9 @@ fn setup() -> World {
     );
 
     // ── BTC/USD market ────────────────────────────────────────────────────────
-    let wbtc = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let wbtc = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
     // BTC/USD also uses usdc as its short token
     let btc_idx = Address::generate(&env);
 
@@ -165,11 +171,31 @@ fn set_prices(w: &World, eth_usd: i128, btc_usd: i128) {
         &soroban_sdk::Vec::from_array(
             &w.env,
             [
-                TokenPrice { token: w.weth.clone(), min: eth_usd * ONE_USD, max: eth_usd * ONE_USD },
-                TokenPrice { token: w.wbtc.clone(), min: btc_usd * ONE_USD, max: btc_usd * ONE_USD },
-                TokenPrice { token: w.usdc.clone(), min: ONE_USD, max: ONE_USD },
-                TokenPrice { token: w.eth_idx.clone(), min: eth_usd * ONE_USD, max: eth_usd * ONE_USD },
-                TokenPrice { token: w.btc_idx.clone(), min: btc_usd * ONE_USD, max: btc_usd * ONE_USD },
+                TokenPrice {
+                    token: w.weth.clone(),
+                    min: eth_usd * ONE_USD,
+                    max: eth_usd * ONE_USD,
+                },
+                TokenPrice {
+                    token: w.wbtc.clone(),
+                    min: btc_usd * ONE_USD,
+                    max: btc_usd * ONE_USD,
+                },
+                TokenPrice {
+                    token: w.usdc.clone(),
+                    min: ONE_USD,
+                    max: ONE_USD,
+                },
+                TokenPrice {
+                    token: w.eth_idx.clone(),
+                    min: eth_usd * ONE_USD,
+                    max: eth_usd * ONE_USD,
+                },
+                TokenPrice {
+                    token: w.btc_idx.clone(),
+                    min: btc_usd * ONE_USD,
+                    max: btc_usd * ONE_USD,
+                },
             ],
         ),
     );
@@ -214,8 +240,11 @@ fn keeper_executes_orders_on_two_markets_in_same_ledger() {
     // ── Order A: long ETH/USD ─────────────────────────────────────────────────
     let eth_collateral = 200 * ONE_TOKEN; // 200 USDC
     StellarAssetClient::new(env, &w.usdc).mint(&eth_trader, &eth_collateral);
-    soroban_sdk::token::Client::new(env, &w.usdc)
-        .transfer(&eth_trader, &w.ord_vault, &eth_collateral);
+    soroban_sdk::token::Client::new(env, &w.usdc).transfer(
+        &eth_trader,
+        &w.ord_vault,
+        &eth_collateral,
+    );
 
     set_prices(&w, 2_000, 50_000);
 
@@ -242,8 +271,11 @@ fn keeper_executes_orders_on_two_markets_in_same_ledger() {
     // ── Order B: short BTC/USD ────────────────────────────────────────────────
     let btc_collateral = 500 * ONE_TOKEN; // 500 USDC
     StellarAssetClient::new(env, &w.usdc).mint(&btc_trader, &btc_collateral);
-    soroban_sdk::token::Client::new(env, &w.usdc)
-        .transfer(&btc_trader, &w.ord_vault, &btc_collateral);
+    soroban_sdk::token::Client::new(env, &w.usdc).transfer(
+        &btc_trader,
+        &w.ord_vault,
+        &btc_collateral,
+    );
 
     let order_b = OHClient::new(env, &w.ord_handler).create_order(
         &btc_trader,
@@ -273,25 +305,43 @@ fn keeper_executes_orders_on_two_markets_in_same_ledger() {
     // ── Assertions: ETH/USD long OI ──────────────────────────────────────────
     let ds_c = DsClient::new(env, &w.ds);
     let eth_long_oi = ds_c.get_u128(&open_interest_key(env, &w.eth_market, &w.usdc, true));
-    assert!(eth_long_oi > 0, "ETH/USD long OI must be nonzero after order A");
+    assert!(
+        eth_long_oi > 0,
+        "ETH/USD long OI must be nonzero after order A"
+    );
 
     // ── Assertions: BTC/USD short OI ─────────────────────────────────────────
     let btc_short_oi = ds_c.get_u128(&open_interest_key(env, &w.btc_market, &w.usdc, false));
-    assert!(btc_short_oi > 0, "BTC/USD short OI must be nonzero after order B");
+    assert!(
+        btc_short_oi > 0,
+        "BTC/USD short OI must be nonzero after order B"
+    );
 
     // ── Assertions: no cross-market contamination ─────────────────────────────
     let eth_short_oi = ds_c.get_u128(&open_interest_key(env, &w.eth_market, &w.usdc, false));
     let btc_long_oi = ds_c.get_u128(&open_interest_key(env, &w.btc_market, &w.usdc, true));
-    assert_eq!(eth_short_oi, 0, "ETH/USD short OI must not be contaminated by BTC order");
-    assert_eq!(btc_long_oi, 0, "BTC/USD long OI must not be contaminated by ETH order");
+    assert_eq!(
+        eth_short_oi, 0,
+        "ETH/USD short OI must not be contaminated by BTC order"
+    );
+    assert_eq!(
+        btc_long_oi, 0,
+        "BTC/USD long OI must not be contaminated by ETH order"
+    );
 
     // ── Assertions: both positions exist with correct keys ────────────────────
     let eth_pos_key = position_key(env, &eth_trader, &w.eth_market, &w.usdc, true);
     let btc_pos_key = position_key(env, &btc_trader, &w.btc_market, &w.usdc, false);
     let eth_pos = OHClient::new(env, &w.ord_handler).get_position(&eth_pos_key);
     let btc_pos = OHClient::new(env, &w.ord_handler).get_position(&btc_pos_key);
-    assert!(eth_pos.is_some(), "ETH/USD long position must exist after order A");
-    assert!(btc_pos.is_some(), "BTC/USD short position must exist after order B");
+    assert!(
+        eth_pos.is_some(),
+        "ETH/USD long position must exist after order A"
+    );
+    assert!(
+        btc_pos.is_some(),
+        "BTC/USD short position must exist after order B"
+    );
 
     // Pool amounts are independent
     let eth_pool = ds_c.get_u128(&pool_amount_key(env, &w.eth_market, &w.usdc));
@@ -302,10 +352,36 @@ fn keeper_executes_orders_on_two_markets_in_same_ledger() {
     // (#531 — the pool only receives LP fees), so segregation shows up there:
     // each market's collateral_sum must equal exactly its own position's
     // collateral, with nothing leaking across markets.
-    let eth_col_sum = ds_c.get_u128(&gmx_keys::collateral_sum_key(env, &w.eth_market, &w.usdc, true));
-    let btc_col_sum = ds_c.get_u128(&gmx_keys::collateral_sum_key(env, &w.btc_market, &w.usdc, false));
+    let eth_col_sum = ds_c.get_u128(&gmx_keys::collateral_sum_key(
+        env,
+        &w.eth_market,
+        &w.usdc,
+        true,
+    ));
+    let btc_col_sum = ds_c.get_u128(&gmx_keys::collateral_sum_key(
+        env,
+        &w.btc_market,
+        &w.usdc,
+        false,
+    ));
     assert_eq!(eth_col_sum as i128, eth_pos.unwrap().collateral_amount);
     assert_eq!(btc_col_sum as i128, btc_pos.unwrap().collateral_amount);
-    assert_eq!(ds_c.get_u128(&gmx_keys::collateral_sum_key(env, &w.eth_market, &w.usdc, false)), 0);
-    assert_eq!(ds_c.get_u128(&gmx_keys::collateral_sum_key(env, &w.btc_market, &w.usdc, true)), 0);
+    assert_eq!(
+        ds_c.get_u128(&gmx_keys::collateral_sum_key(
+            env,
+            &w.eth_market,
+            &w.usdc,
+            false
+        )),
+        0
+    );
+    assert_eq!(
+        ds_c.get_u128(&gmx_keys::collateral_sum_key(
+            env,
+            &w.btc_market,
+            &w.usdc,
+            true
+        )),
+        0
+    );
 }

@@ -420,7 +420,13 @@ mod tests {
         id
     }
 
-    fn deploy_market_token(env: &Env, admin: &Address, role_store: &Address, long_token: &Address, short_token: &Address) -> Address {
+    fn deploy_market_token(
+        env: &Env,
+        admin: &Address,
+        role_store: &Address,
+        long_token: &Address,
+        short_token: &Address,
+    ) -> Address {
         let id = env.register(MarketToken, ());
         let client = MarketTokenClient::new(env, &id);
         client.initialize(

@@ -17,9 +17,14 @@
 #![allow(deprecated)]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use gmx_keys::{account_position_list_key, collateral_sum_key, cumulative_borrowing_factor_key, funding_amount_per_size_key, max_position_size_usd_key, pool_amount_key, claimable_fee_amount_key, position_key, position_list_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET};
+use gmx_keys::{
+    account_position_list_key, collateral_sum_key, cumulative_borrowing_factor_key,
+    funding_amount_per_size_key, max_position_size_usd_key, pool_amount_key, position_key,
+    position_list_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET,
+};
 use gmx_market_utils::{
-    apply_delta_to_open_interest, apply_delta_to_open_interest_in_tokens,
+    apply_delta_to_claimable_fee_amount, apply_delta_to_open_interest,
+    apply_delta_to_open_interest_in_tokens,
 };
 use gmx_math::{mul_div_wide, TOKEN_PRECISION};
 use gmx_position_utils::get_position_fees;
@@ -167,11 +172,14 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
     if lp_fee_amount > 0 {
         let pool_key = pool_amount_key(env, &p.market.market_token, p.collateral_token);
         ds.apply_delta_to_u128(p.caller, &pool_key, &lp_fee_amount);
-        // Track claimable fees for claim_fees entrypoint
-        ds.apply_delta_to_u128(
+        // Track claimable fees (per market and global total) for claim_fees
+        apply_delta_to_claimable_fee_amount(
+            env,
+            p.data_store,
             p.caller,
-            &claimable_fee_amount_key(env, &p.market.market_token, p.collateral_token),
-            &lp_fee_amount,
+            &p.market.market_token,
+            p.collateral_token,
+            lp_fee_amount,
         );
     }
     // Net change to the position's collateral: supplied collateral minus all
@@ -182,7 +190,8 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
     // Keep collateral_sum in step with the position's collateral so
     // decrease_position_utils (which debits it on close) never underflows.
     if collateral_delta != 0 {
-        let col_sum_key = collateral_sum_key(env, &p.market.market_token, p.collateral_token, p.is_long);
+        let col_sum_key =
+            collateral_sum_key(env, &p.market.market_token, p.collateral_token, p.is_long);
         ds.apply_delta_to_u128(p.caller, &col_sum_key, &collateral_delta);
     }
 
@@ -497,8 +506,12 @@ mod tests {
 
     /// Long increase on `w.long_tk` collateral at a flat `index_price`.
     fn increase(w: &World, size_delta: i128, collateral: i128, index_price: i128) -> PositionProps {
-        let market = gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
-        let index_price_props = gmx_types::PriceProps { min: index_price, max: index_price };
+        let market =
+            gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
+        let index_price_props = gmx_types::PriceProps {
+            min: index_price,
+            max: index_price,
+        };
         w.env.as_contract(&w.admin, || {
             increase_position(
                 &w.env,
@@ -526,7 +539,11 @@ mod tests {
         let ds_c = DsClient::new(&w.env, &w.ds);
         (
             ds_c.get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk)) as i128,
-            ds_c.get_u128(&gmx_keys::claimable_fee_amount_key(&w.env, &w.market_tk, &w.long_tk)) as i128,
+            ds_c.get_u128(&gmx_keys::claimable_fee_amount_key(
+                &w.env,
+                &w.market_tk,
+                &w.long_tk,
+            )) as i128,
         )
     }
 
@@ -586,7 +603,10 @@ mod tests {
         // Borrowing factor snapshot must match current cumulative value
         let cum_borrow_key = gmx_keys::cumulative_borrowing_factor_key(&w.env, &w.market_tk, true);
         let cum_factor = DsClient::new(&w.env, &w.ds).get_u128(&cum_borrow_key) as i128;
-        assert!(cum_factor > 0, "fixture must seed a non-zero cumulative factor");
+        assert!(
+            cum_factor > 0,
+            "fixture must seed a non-zero cumulative factor"
+        );
         assert_eq!(
             position.borrowing_factor, cum_factor,
             "position borrowing_factor snapshot must equal current cumulative factor"
@@ -642,7 +662,10 @@ mod tests {
         // Funding snapshot must match current funding-per-size
         let fnd_key = gmx_keys::funding_amount_per_size_key(&w.env, &w.market_tk, &w.long_tk, true);
         let current_fnd = DsClient::new(&w.env, &w.ds).get_i128(&fnd_key);
-        assert!(current_fnd > 0, "fixture must seed non-zero funding-per-size");
+        assert!(
+            current_fnd > 0,
+            "fixture must seed non-zero funding-per-size"
+        );
         assert_eq!(
             position.funding_fee_amount_per_size, current_fnd,
             "position funding snapshot must equal current funding-per-size"
@@ -1014,8 +1037,12 @@ mod tests {
             &(50_000u128 * fp as u128),
         );
 
-        let market = gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
-        let price_props = gmx_types::PriceProps { min: index_price, max: index_price };
+        let market =
+            gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
+        let price_props = gmx_types::PriceProps {
+            min: index_price,
+            max: index_price,
+        };
 
         // 60,000 USD position against a 50,000 USD cap must revert.
         w.env.as_contract(&w.admin, || {
@@ -1045,8 +1072,12 @@ mod tests {
             &(50_000u128 * fp as u128),
         );
 
-        let market = gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
-        let price_props = gmx_types::PriceProps { min: index_price, max: index_price };
+        let market =
+            gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
+        let price_props = gmx_types::PriceProps {
+            min: index_price,
+            max: index_price,
+        };
 
         let trader_a = Address::generate(&w.env);
         let params_a = IncreasePositionParams {
@@ -1065,13 +1096,29 @@ mod tests {
             current_time: 1_000,
             for_positive_impact: true,
         };
-        let pos_a = w.env.as_contract(&w.admin, || increase_position(&w.env, &params_a));
-        assert_eq!(pos_a.size_in_usd, 40_000 * fp, "trader A's 40,000 USD position must succeed");
+        let pos_a = w
+            .env
+            .as_contract(&w.admin, || increase_position(&w.env, &params_a));
+        assert_eq!(
+            pos_a.size_in_usd,
+            40_000 * fp,
+            "trader A's 40,000 USD position must succeed"
+        );
 
         let trader_b = Address::generate(&w.env);
-        let params_b = IncreasePositionParams { account: &trader_b, receiver: &trader_b, ..params_a };
-        let pos_b = w.env.as_contract(&w.admin, || increase_position(&w.env, &params_b));
-        assert_eq!(pos_b.size_in_usd, 40_000 * fp, "trader B's own 40,000 USD position must independently succeed");
+        let params_b = IncreasePositionParams {
+            account: &trader_b,
+            receiver: &trader_b,
+            ..params_a
+        };
+        let pos_b = w
+            .env
+            .as_contract(&w.admin, || increase_position(&w.env, &params_b));
+        assert_eq!(
+            pos_b.size_in_usd,
+            40_000 * fp,
+            "trader B's own 40,000 USD position must independently succeed"
+        );
     }
 
     // ── Issue #284: maker/taker fee tier differentiation ─────────────────────
@@ -1110,49 +1157,59 @@ mod tests {
         set_prices(&w, index_price);
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(ONE_TOKEN * 200));
 
-        let market = gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
-        let price_props = gmx_types::PriceProps { min: index_price, max: index_price };
+        let market =
+            gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
+        let price_props = gmx_types::PriceProps {
+            min: index_price,
+            max: index_price,
+        };
         let collateral = ONE_TOKEN * 10;
         let size_delta = 1_000 * fp;
 
         // Maker position
         let maker_pos = w.env.as_contract(&w.admin, || {
-            increase_position(&w.env, &IncreasePositionParams {
-                data_store: &w.ds,
-                caller: &w.admin,
-                account: &w.user,
-                receiver: &w.user,
-                market: &market,
-                collateral_token: &w.long_tk,
-                size_delta_usd: size_delta,
-                collateral_amount: collateral,
-                acceptable_price: 0,
-                is_long: true,
-                index_token_price: &price_props,
-                collateral_price: index_price,
-                current_time: 1_000,
-                for_positive_impact: true,
-            })
+            increase_position(
+                &w.env,
+                &IncreasePositionParams {
+                    data_store: &w.ds,
+                    caller: &w.admin,
+                    account: &w.user,
+                    receiver: &w.user,
+                    market: &market,
+                    collateral_token: &w.long_tk,
+                    size_delta_usd: size_delta,
+                    collateral_amount: collateral,
+                    acceptable_price: 0,
+                    is_long: true,
+                    index_token_price: &price_props,
+                    collateral_price: index_price,
+                    current_time: 1_000,
+                    for_positive_impact: true,
+                },
+            )
         });
 
         // Taker position (separate account, same collateral and size)
         let taker_pos = w.env.as_contract(&w.admin, || {
-            increase_position(&w.env, &IncreasePositionParams {
-                data_store: &w.ds,
-                caller: &w.admin,
-                account: &Address::generate(&w.env),
-                receiver: &w.user,
-                market: &market,
-                collateral_token: &w.long_tk,
-                size_delta_usd: size_delta,
-                collateral_amount: collateral,
-                acceptable_price: 0,
-                is_long: true,
-                index_token_price: &price_props,
-                collateral_price: index_price,
-                current_time: 1_000,
-                for_positive_impact: false,
-            })
+            increase_position(
+                &w.env,
+                &IncreasePositionParams {
+                    data_store: &w.ds,
+                    caller: &w.admin,
+                    account: &Address::generate(&w.env),
+                    receiver: &w.user,
+                    market: &market,
+                    collateral_token: &w.long_tk,
+                    size_delta_usd: size_delta,
+                    collateral_amount: collateral,
+                    acceptable_price: 0,
+                    is_long: true,
+                    index_token_price: &price_props,
+                    collateral_price: index_price,
+                    current_time: 1_000,
+                    for_positive_impact: false,
+                },
+            )
         });
 
         // Taker pays 3× the fee, so has less collateral remaining
@@ -1176,52 +1233,61 @@ mod tests {
         set_prices(&w, index_price);
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(ONE_TOKEN * 200));
 
-        let market = gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
-        let price_props = gmx_types::PriceProps { min: index_price, max: index_price };
+        let market =
+            gmx_types::MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
+        let price_props = gmx_types::PriceProps {
+            min: index_price,
+            max: index_price,
+        };
         let collateral = ONE_TOKEN * 10;
         let size_delta = 1_000 * fp;
 
         let maker_pos = w.env.as_contract(&w.admin, || {
-            increase_position(&w.env, &IncreasePositionParams {
-                data_store: &w.ds,
-                caller: &w.admin,
-                account: &w.user,
-                receiver: &w.user,
-                market: &market,
-                collateral_token: &w.long_tk,
-                size_delta_usd: size_delta,
-                collateral_amount: collateral,
-                acceptable_price: 0,
-                is_long: true,
-                index_token_price: &price_props,
-                collateral_price: index_price,
-                current_time: 1_000,
-                for_positive_impact: true,
-            })
+            increase_position(
+                &w.env,
+                &IncreasePositionParams {
+                    data_store: &w.ds,
+                    caller: &w.admin,
+                    account: &w.user,
+                    receiver: &w.user,
+                    market: &market,
+                    collateral_token: &w.long_tk,
+                    size_delta_usd: size_delta,
+                    collateral_amount: collateral,
+                    acceptable_price: 0,
+                    is_long: true,
+                    index_token_price: &price_props,
+                    collateral_price: index_price,
+                    current_time: 1_000,
+                    for_positive_impact: true,
+                },
+            )
         });
 
         let taker_pos = w.env.as_contract(&w.admin, || {
-            increase_position(&w.env, &IncreasePositionParams {
-                data_store: &w.ds,
-                caller: &w.admin,
-                account: &Address::generate(&w.env),
-                receiver: &w.user,
-                market: &market,
-                collateral_token: &w.long_tk,
-                size_delta_usd: size_delta,
-                collateral_amount: collateral,
-                acceptable_price: 0,
-                is_long: true,
-                index_token_price: &price_props,
-                collateral_price: index_price,
-                current_time: 1_000,
-                for_positive_impact: false,
-            })
+            increase_position(
+                &w.env,
+                &IncreasePositionParams {
+                    data_store: &w.ds,
+                    caller: &w.admin,
+                    account: &Address::generate(&w.env),
+                    receiver: &w.user,
+                    market: &market,
+                    collateral_token: &w.long_tk,
+                    size_delta_usd: size_delta,
+                    collateral_amount: collateral,
+                    acceptable_price: 0,
+                    is_long: true,
+                    index_token_price: &price_props,
+                    collateral_price: index_price,
+                    current_time: 1_000,
+                    for_positive_impact: false,
+                },
+            )
         });
 
         assert_eq!(
-            maker_pos.collateral_amount,
-            taker_pos.collateral_amount,
+            maker_pos.collateral_amount, taker_pos.collateral_amount,
             "equal fee rates must produce equal net collateral for maker and taker"
         );
     }
@@ -1252,7 +1318,11 @@ mod tests {
             0,
             "no borrowing fee may be re-charged for an interval already snapshotted"
         );
-        assert_eq!(position.collateral_amount, ONE_TOKEN * 20, "collateral must not be eaten by a phantom fee");
+        assert_eq!(
+            position.collateral_amount,
+            ONE_TOKEN * 20,
+            "collateral must not be eaten by a phantom fee"
+        );
     }
 
     /// Defect A (funding side): once the position has snapshotted the funding
@@ -1270,7 +1340,11 @@ mod tests {
         increase(&w, 1_000 * fp, ONE_TOKEN * 10, price);
         let position = increase(&w, 1_000 * fp, ONE_TOKEN * 10, price);
 
-        assert_eq!(position.collateral_amount, ONE_TOKEN * 20, "funding must be charged at most once per interval");
+        assert_eq!(
+            position.collateral_amount,
+            ONE_TOKEN * 20,
+            "funding must be charged at most once per interval"
+        );
     }
 
     /// Defect B: fees larger than the collateral available must revert rather
@@ -1303,8 +1377,15 @@ mod tests {
         let (pool_after, claimable_after) = pool_and_claimable(&w);
 
         let fee = opened.collateral_amount - position.collateral_amount;
-        assert!(fee > 0, "the position fee must be collected from existing collateral");
-        assert_eq!(pool_after - pool_before, fee, "pool grows by exactly the collected fee");
+        assert!(
+            fee > 0,
+            "the position fee must be collected from existing collateral"
+        );
+        assert_eq!(
+            pool_after - pool_before,
+            fee,
+            "pool grows by exactly the collected fee"
+        );
         assert_eq!(claimable_after - claimable_before, fee);
     }
 
@@ -1325,8 +1406,17 @@ mod tests {
         let position = increase(&w, 1_000 * fp, ONE_TOKEN * 10, price);
         let (pool_after, claimable_after) = pool_and_claimable(&w);
 
-        assert!(position.collateral_amount < ONE_TOKEN * 20, "funding must still be charged to the trader");
-        assert_eq!(pool_after, pool_before, "funding must not be booked into pool_amount");
-        assert_eq!(claimable_after, claimable_before, "funding must not be booked into claimable_fee_amount");
+        assert!(
+            position.collateral_amount < ONE_TOKEN * 20,
+            "funding must still be charged to the trader"
+        );
+        assert_eq!(
+            pool_after, pool_before,
+            "funding must not be booked into pool_amount"
+        );
+        assert_eq!(
+            claimable_after, claimable_before,
+            "funding must not be booked into claimable_fee_amount"
+        );
     }
 }

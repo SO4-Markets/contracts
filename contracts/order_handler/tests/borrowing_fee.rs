@@ -63,8 +63,12 @@ fn setup() -> World {
     let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
     OClient::new(&env, &oracle_addr).initialize(&admin, &rs, &ds, &passphrase);
 
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let long_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let short_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
 
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
@@ -85,21 +89,43 @@ fn setup() -> World {
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
     let dep_handler = env.register(DepositHandler, ());
-    DepositHandlerClient::new(&env, &dep_handler)
-        .initialize(&admin, &rs, &ds, &oracle_addr, &dep_vault);
+    DepositHandlerClient::new(&env, &dep_handler).initialize(
+        &admin,
+        &rs,
+        &ds,
+        &oracle_addr,
+        &dep_vault,
+    );
     rs_c.grant_role(&admin, &dep_handler, &roles::controller(&env));
 
     let ord_handler = env.register(OrderHandler, ());
-    OrderHandlerClient::new(&env, &ord_handler)
-        .initialize(&admin, &rs, &ds, &oracle_addr, &ord_vault);
+    OrderHandlerClient::new(&env, &ord_handler).initialize(
+        &admin,
+        &rs,
+        &ds,
+        &oracle_addr,
+        &ord_vault,
+    );
     rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
 
     let index_tk = Address::generate(&env);
 
     let ds_c = DsClient::new(&env, &ds);
-    ds_c.set_address(&admin, &gmx_keys::market_index_token_key(&env, &market_tk), &index_tk);
-    ds_c.set_address(&admin, &gmx_keys::market_long_token_key(&env, &market_tk), &long_tk);
-    ds_c.set_address(&admin, &gmx_keys::market_short_token_key(&env, &market_tk), &short_tk);
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_index_token_key(&env, &market_tk),
+        &index_tk,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_long_token_key(&env, &market_tk),
+        &long_tk,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_short_token_key(&env, &market_tk),
+        &short_tk,
+    );
 
     World {
         env,
@@ -124,9 +150,21 @@ fn set_prices(w: &World, index_usd: i128) {
         &Vec::from_array(
             &w.env,
             [
-                TokenPrice { token: w.long_tk.clone(), min: index_usd, max: index_usd },
-                TokenPrice { token: w.short_tk.clone(), min: FLOAT_PRECISION, max: FLOAT_PRECISION },
-                TokenPrice { token: w.index_tk.clone(), min: index_usd, max: index_usd },
+                TokenPrice {
+                    token: w.long_tk.clone(),
+                    min: index_usd,
+                    max: index_usd,
+                },
+                TokenPrice {
+                    token: w.short_tk.clone(),
+                    min: FLOAT_PRECISION,
+                    max: FLOAT_PRECISION,
+                },
+                TokenPrice {
+                    token: w.index_tk.clone(),
+                    min: index_usd,
+                    max: index_usd,
+                },
             ],
         ),
     );
@@ -346,7 +384,9 @@ fn position_borrowing_factor_snapshot_updated_on_partial_decrease() {
 
     // Position must still be open (partially closed)
     let pos_key = position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true);
-    let position = hc.get_position(&pos_key).expect("position must remain open after partial close");
+    let position = hc
+        .get_position(&pos_key)
+        .expect("position must remain open after partial close");
 
     // position.borrowing_factor must equal the current cumulative factor (snapshot refreshed)
     let cum_key = gmx_keys::cumulative_borrowing_factor_key(&w.env, &w.market_tk, true);
@@ -454,5 +494,8 @@ fn pool_receives_borrowing_fee_on_position_decrease() {
     // cumulative borrowing factor must have changed
     let cum_key = gmx_keys::cumulative_borrowing_factor_key(&w.env, &w.market_tk, true);
     let cum_final = ds_c.get_u128(&cum_key);
-    assert!(cum_final > 0, "cumulative borrowing factor must be nonzero after time advance");
+    assert!(
+        cum_final > 0,
+        "cumulative borrowing factor must be nonzero after time advance"
+    );
 }

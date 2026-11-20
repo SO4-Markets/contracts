@@ -12,11 +12,7 @@
 //! group so they can be pasted into docs/performance.md.
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
-use soroban_sdk::{
-    testutils::Address as _,
-    token::StellarAssetClient,
-    Address, Bytes, Env, Vec,
-};
+use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Bytes, Env, Vec};
 
 use data_store::{DataStore, DataStoreClient};
 use market_token::{MarketToken, MarketTokenClient};
@@ -73,8 +69,12 @@ fn setup() -> World {
     let vault = env.register(OrderVault, ());
     OrderVaultClient::new(&env, &vault).initialize(&admin, &rs);
 
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let long_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let short_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
 
     let market_tk = env.register(MarketToken, ());
     MarketTokenClient::new(&env, &market_tk).initialize(
@@ -88,18 +88,28 @@ fn setup() -> World {
     );
 
     let handler = env.register(OrderHandler, ());
-    OrderHandlerClient::new(&env, &handler).initialize(
-        &admin, &rs, &ds, &oracle_addr, &vault,
-    );
+    OrderHandlerClient::new(&env, &handler).initialize(&admin, &rs, &ds, &oracle_addr, &vault);
 
     rs_c.grant_role(&admin, &handler, &roles::controller(&env));
 
     let index_tk = Address::generate(&env);
 
     let ds_c = DataStoreClient::new(&env, &ds);
-    ds_c.set_address(&handler, &gmx_keys::market_index_token_key(&env, &market_tk), &index_tk);
-    ds_c.set_address(&handler, &gmx_keys::market_long_token_key(&env, &market_tk), &long_tk);
-    ds_c.set_address(&handler, &gmx_keys::market_short_token_key(&env, &market_tk), &short_tk);
+    ds_c.set_address(
+        &handler,
+        &gmx_keys::market_index_token_key(&env, &market_tk),
+        &index_tk,
+    );
+    ds_c.set_address(
+        &handler,
+        &gmx_keys::market_long_token_key(&env, &market_tk),
+        &long_tk,
+    );
+    ds_c.set_address(
+        &handler,
+        &gmx_keys::market_short_token_key(&env, &market_tk),
+        &short_tk,
+    );
 
     // max leverage: 50× (in FLOAT_PRECISION units)
     ds_c.set_u128(
@@ -112,20 +122,41 @@ fn setup() -> World {
     let prices = Vec::from_array(
         &env,
         [
-            TokenPrice { token: index_tk.clone(), min: INDEX_PRICE, max: INDEX_PRICE },
-            TokenPrice { token: long_tk.clone(),  min: TOKEN_PRECISION, max: TOKEN_PRECISION },
-            TokenPrice { token: short_tk.clone(), min: TOKEN_PRECISION, max: TOKEN_PRECISION },
+            TokenPrice {
+                token: index_tk.clone(),
+                min: INDEX_PRICE,
+                max: INDEX_PRICE,
+            },
+            TokenPrice {
+                token: long_tk.clone(),
+                min: TOKEN_PRECISION,
+                max: TOKEN_PRECISION,
+            },
+            TokenPrice {
+                token: short_tk.clone(),
+                min: TOKEN_PRECISION,
+                max: TOKEN_PRECISION,
+            },
         ],
     );
     OracleClient::new(&env, &oracle_addr).set_prices_simple(&admin, &prices);
 
-    World { env, keeper, handler, ds, market_tk, long_tk, short_tk, index_tk, oracle: oracle_addr }
+    World {
+        env,
+        keeper,
+        handler,
+        ds,
+        market_tk,
+        long_tk,
+        short_tk,
+        index_tk,
+        oracle: oracle_addr,
+    }
 }
 
 fn do_create_order(w: &World, user: &Address) -> soroban_sdk::BytesN<32> {
     StellarAssetClient::new(&w.env, &w.long_tk).mint(user, &COLLATERAL_AMOUNT);
-    OrderVaultClient::new(&w.env, &w.handler)
-        .record_transfer_in(&w.handler, &w.long_tk); // simulate vault receipt
+    OrderVaultClient::new(&w.env, &w.handler).record_transfer_in(&w.handler, &w.long_tk); // simulate vault receipt
 
     OrderHandlerClient::new(&w.env, &w.handler).create_order(
         user,
@@ -159,9 +190,7 @@ fn bench_create_order(c: &mut Criterion) {
                 let user = Address::generate(&w.env);
                 (w, user)
             },
-            |(w, user)| {
-                do_create_order(&w, &user)
-            },
+            |(w, user)| do_create_order(&w, &user),
             BatchSize::SmallInput,
         )
     });
@@ -190,10 +219,7 @@ fn bench_execute_order(c: &mut Criterion) {
                 let key = do_create_order(&w, &user);
                 (w, key)
             },
-            |(w, key)| {
-                OrderHandlerClient::new(&w.env, &w.handler)
-                    .execute_order(&w.keeper, &key)
-            },
+            |(w, key)| OrderHandlerClient::new(&w.env, &w.handler).execute_order(&w.keeper, &key),
             BatchSize::SmallInput,
         )
     });
@@ -243,8 +269,7 @@ fn bench_full_cycle(c: &mut Criterion) {
                         on_behalf_of: None,
                     },
                 );
-                OrderHandlerClient::new(&w.env, &w.handler)
-                    .execute_order(&w.keeper, &close_key)
+                OrderHandlerClient::new(&w.env, &w.handler).execute_order(&w.keeper, &close_key)
             },
             BatchSize::SmallInput,
         )
@@ -282,5 +307,10 @@ fn bench_full_cycle(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_create_order, bench_execute_order, bench_full_cycle);
+criterion_group!(
+    benches,
+    bench_create_order,
+    bench_execute_order,
+    bench_full_cycle
+);
 criterion_main!(benches);

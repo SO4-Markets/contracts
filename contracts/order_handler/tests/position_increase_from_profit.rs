@@ -25,11 +25,7 @@ use oracle::{Oracle, OracleClient as OClient};
 use order_handler::{CreateOrderParams, OrderHandler, OrderHandlerClient};
 use order_vault::{OrderVault, OrderVaultClient as OVClient};
 use role_store::{RoleStore, RoleStoreClient as RsClient};
-use soroban_sdk::{
-    testutils::Address as _,
-    token::StellarAssetClient,
-    Address, Env, Vec,
-};
+use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env, Vec};
 
 struct World {
     env: Env,
@@ -68,8 +64,12 @@ fn setup() -> World {
     let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
     OClient::new(&env, &oracle_addr).initialize(&admin, &rs, &ds, &passphrase);
 
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let long_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let short_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
 
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
@@ -90,21 +90,43 @@ fn setup() -> World {
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
     let dep_handler = env.register(DepositHandler, ());
-    DepositHandlerClient::new(&env, &dep_handler)
-        .initialize(&admin, &rs, &ds, &oracle_addr, &dep_vault);
+    DepositHandlerClient::new(&env, &dep_handler).initialize(
+        &admin,
+        &rs,
+        &ds,
+        &oracle_addr,
+        &dep_vault,
+    );
     rs_c.grant_role(&admin, &dep_handler, &roles::controller(&env));
 
     let ord_handler = env.register(OrderHandler, ());
-    OrderHandlerClient::new(&env, &ord_handler)
-        .initialize(&admin, &rs, &ds, &oracle_addr, &ord_vault);
+    OrderHandlerClient::new(&env, &ord_handler).initialize(
+        &admin,
+        &rs,
+        &ds,
+        &oracle_addr,
+        &ord_vault,
+    );
     rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
 
     let index_tk = Address::generate(&env);
 
     let ds_c = DsClient::new(&env, &ds);
-    ds_c.set_address(&admin, &gmx_keys::market_index_token_key(&env, &market_tk), &index_tk);
-    ds_c.set_address(&admin, &gmx_keys::market_long_token_key(&env, &market_tk), &long_tk);
-    ds_c.set_address(&admin, &gmx_keys::market_short_token_key(&env, &market_tk), &short_tk);
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_index_token_key(&env, &market_tk),
+        &index_tk,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_long_token_key(&env, &market_tk),
+        &long_tk,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_short_token_key(&env, &market_tk),
+        &short_tk,
+    );
 
     World {
         env,
@@ -128,9 +150,21 @@ fn set_prices(w: &World, index_usd: i128) {
         &Vec::from_array(
             &w.env,
             [
-                TokenPrice { token: w.long_tk.clone(), min: index_usd, max: index_usd },
-                TokenPrice { token: w.short_tk.clone(), min: FLOAT_PRECISION, max: FLOAT_PRECISION },
-                TokenPrice { token: w.index_tk.clone(), min: index_usd, max: index_usd },
+                TokenPrice {
+                    token: w.long_tk.clone(),
+                    min: index_usd,
+                    max: index_usd,
+                },
+                TokenPrice {
+                    token: w.short_tk.clone(),
+                    min: FLOAT_PRECISION,
+                    max: FLOAT_PRECISION,
+                },
+                TokenPrice {
+                    token: w.index_tk.clone(),
+                    min: index_usd,
+                    max: index_usd,
+                },
             ],
         ),
     );
@@ -190,7 +224,7 @@ fn weighted_avg_entry_price_after_increase_from_profit() {
             market: w.market_tk.clone(),
             initial_collateral_token: w.long_tk.clone(),
             swap_path: Vec::new(&w.env),
-            size_delta_usd: 2_000 * fp,      // $2 000 notional → 1 token at $2 000
+            size_delta_usd: 2_000 * fp, // $2 000 notional → 1 token at $2 000
             collateral_delta_amount: collateral1,
             trigger_price: 0,
             acceptable_price: 0,
@@ -207,10 +241,18 @@ fn weighted_avg_entry_price_after_increase_from_profit() {
 
     // Verify open position
     let pos_key = position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true);
-    let pos_after_open = hc.get_position(&pos_key)
+    let pos_after_open = hc
+        .get_position(&pos_key)
         .expect("position must exist after open");
-    assert_eq!(pos_after_open.size_in_usd, 2_000 * fp, "initial size_in_usd");
-    assert_eq!(pos_after_open.size_in_tokens, tp, "initial size_in_tokens = 1 token");
+    assert_eq!(
+        pos_after_open.size_in_usd,
+        2_000 * fp,
+        "initial size_in_usd"
+    );
+    assert_eq!(
+        pos_after_open.size_in_tokens, tp,
+        "initial size_in_tokens = 1 token"
+    );
 
     // ── Price moves from $2 000 → $2 200 (unrealised PnL = $200 per token) ──
     // (collateral_sum_key was already credited by increase_position during the
@@ -229,7 +271,7 @@ fn weighted_avg_entry_price_after_increase_from_profit() {
             market: w.market_tk.clone(),
             initial_collateral_token: w.long_tk.clone(),
             swap_path: Vec::new(&w.env),
-            size_delta_usd: 2_200 * fp,      // $2 200 notional → 1 token at $2 200
+            size_delta_usd: 2_200 * fp, // $2 200 notional → 1 token at $2 200
             collateral_delta_amount: collateral2,
             trigger_price: 0,
             acceptable_price: 0,
@@ -245,7 +287,8 @@ fn weighted_avg_entry_price_after_increase_from_profit() {
     hc.execute_order(&w.keeper, &increase_key);
 
     // ── Verify weighted average entry price ───────────────────────────────────
-    let pos = hc.get_position(&pos_key)
+    let pos = hc
+        .get_position(&pos_key)
         .expect("position must still exist after second increase");
 
     // size_in_usd: 2 000 + 2 200 = 4 200 USD (in FLOAT_PRECISION)
@@ -335,7 +378,7 @@ fn position_pnl_is_positive_after_price_increase() {
     // pnl_int = position_value_int - size_in_usd / fp
     let exit_price_usd = 2_200i128;
     let position_value_int = pos.size_in_tokens * exit_price_usd / tp; // in integer USD
-    let size_int = pos.size_in_usd / fp;                                // in integer USD
+    let size_int = pos.size_in_usd / fp; // in integer USD
     let pnl = position_value_int - size_int;
 
     assert!(
@@ -412,7 +455,9 @@ fn position_size_doubles_after_equal_notional_increase() {
     hc.execute_order(&w.keeper, &k2);
 
     let pos_key = position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true);
-    let pos = hc.get_position(&pos_key).expect("position must exist after second increase");
+    let pos = hc
+        .get_position(&pos_key)
+        .expect("position must exist after second increase");
 
     // size_in_usd should be roughly double the original
     assert!(

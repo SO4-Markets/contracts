@@ -100,12 +100,14 @@ Do not treat a green CI run as evidence your change is sound. As currently confi
 
 | Workflow | Runs | Covers |
 |---|---|---|
-| `lint.yml` | `cargo fmt --check`, `cargo clippy --workspace --all-targets` | Library and test code |
-| `test.yml` | `cargo build --target wasm32v1-none --release`, `cargo test --workspace` | WASM build + all tests |
+| `ci.yml` | Jobs `rustfmt` (`cargo fmt --check`), `clippy (all targets)` (`cargo clippy --workspace --all-targets -D warnings`), `build contracts` (`make build-wasm`: every contract in `CONTRACTS` for `wasm32v1-none`), `cargo test` (`make test`), and `CI passed`, which fails unless all four succeed | Library, test and contract code |
 | `wasm-size.yml` | `cargo build --target ... --release` | Build + size budget (PR only — compares against base) |
 | `auth-audit.yml` | `docs/auth-audit.md` sync check | Docs only |
+| `resource-bench.yml` | `tests/resource_bench.rs` + `scripts/bench_compare.py` | Soroban resource regressions vs `docs/benchmarks/resource-baseline.json`, bounded-constant guard |
 
-`lint.yml`, `test.yml` and `auth-audit.yml` run on both `pull_request` and `push` to `main`.
+`ci.yml`, `auth-audit.yml` and `resource-bench.yml` run on both `pull_request` and `push` to `main`;
+`ci.yml` never cancels a run on `main`, so every push to `main` leaves a visible pass/fail result.
+Mark the `CI passed` check as required in branch protection.
 CI still does not run `stellar contract build`, deploy, or `make testnet-smoke` — verify deploy-path
 changes locally as described above.
 

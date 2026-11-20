@@ -69,8 +69,12 @@ fn setup() -> World {
     let ord_vault = env.register(OrderVault, ());
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let long_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let short_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
     let index_tk = Address::generate(&env);
 
     let market_tk = env.register(MarketToken, ());
@@ -98,9 +102,21 @@ fn setup() -> World {
     rs_c.grant_role(&admin, &fee_handler, &roles::controller(&env));
 
     let ds_c = DsClient::new(&env, &ds);
-    ds_c.set_address(&admin, &gmx_keys::market_index_token_key(&env, &market_tk), &index_tk);
-    ds_c.set_address(&admin, &gmx_keys::market_long_token_key(&env, &market_tk), &long_tk);
-    ds_c.set_address(&admin, &gmx_keys::market_short_token_key(&env, &market_tk), &short_tk);
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_index_token_key(&env, &market_tk),
+        &index_tk,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_long_token_key(&env, &market_tk),
+        &long_tk,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_short_token_key(&env, &market_tk),
+        &short_tk,
+    );
 
     World {
         env,
@@ -125,9 +141,21 @@ fn set_prices(w: &World, eth_usd: i128) {
         &Vec::from_array(
             &w.env,
             [
-                TokenPrice { token: w.long_tk.clone(), min: eth_usd * ONE_USD, max: eth_usd * ONE_USD },
-                TokenPrice { token: w.short_tk.clone(), min: ONE_USD, max: ONE_USD },
-                TokenPrice { token: w.index_tk.clone(), min: eth_usd * ONE_USD, max: eth_usd * ONE_USD },
+                TokenPrice {
+                    token: w.long_tk.clone(),
+                    min: eth_usd * ONE_USD,
+                    max: eth_usd * ONE_USD,
+                },
+                TokenPrice {
+                    token: w.short_tk.clone(),
+                    min: ONE_USD,
+                    max: ONE_USD,
+                },
+                TokenPrice {
+                    token: w.index_tk.clone(),
+                    min: eth_usd * ONE_USD,
+                    max: eth_usd * ONE_USD,
+                },
             ],
         ),
     );
@@ -218,16 +246,48 @@ fn funding_conserves_real_token_balances_between_two_opposite_side_positions() {
     let market_props = MarketProps::new(&w.market_tk, &w.index_tk, &w.long_tk, &w.short_tk);
     let ds_c = DsClient::new(env, &w.ds);
     let fp = FLOAT_PRECISION as u128;
-    ds_c.set_i128(&w.admin, &gmx_keys::saved_funding_factor_per_second_key(env, &w.market_tk), &(FLOAT_PRECISION / 10));
-    ds_c.set_u128(&w.admin, &gmx_keys::funding_updated_at_key(env, &w.market_tk), &0u128);
-    ds_c.set_u128_instance(&w.admin, &gmx_keys::funding_factor_key(env, &w.market_tk), &fp);
-    ds_c.set_u128_instance(&w.admin, &gmx_keys::funding_exponent_factor_key(env, &w.market_tk), &fp);
+    ds_c.set_i128(
+        &w.admin,
+        &gmx_keys::saved_funding_factor_per_second_key(env, &w.market_tk),
+        &(FLOAT_PRECISION / 10),
+    );
+    ds_c.set_u128(
+        &w.admin,
+        &gmx_keys::funding_updated_at_key(env, &w.market_tk),
+        &0u128,
+    );
+    ds_c.set_u128_instance(
+        &w.admin,
+        &gmx_keys::funding_factor_key(env, &w.market_tk),
+        &fp,
+    );
+    ds_c.set_u128_instance(
+        &w.admin,
+        &gmx_keys::funding_exponent_factor_key(env, &w.market_tk),
+        &fp,
+    );
     let ramp: u128 = 1_000u128 * fp;
-    ds_c.set_u128_instance(&w.admin, &gmx_keys::funding_increase_factor_per_second_key(env, &w.market_tk), &ramp);
-    ds_c.set_u128_instance(&w.admin, &gmx_keys::funding_decrease_factor_per_second_key(env, &w.market_tk), &ramp);
+    ds_c.set_u128_instance(
+        &w.admin,
+        &gmx_keys::funding_increase_factor_per_second_key(env, &w.market_tk),
+        &ramp,
+    );
+    ds_c.set_u128_instance(
+        &w.admin,
+        &gmx_keys::funding_decrease_factor_per_second_key(env, &w.market_tk),
+        &ramp,
+    );
     let bound: i128 = 1_000_000_i128 * FLOAT_PRECISION;
-    ds_c.set_i128_instance(&w.admin, &gmx_keys::min_funding_factor_per_second_key(env, &w.market_tk), &(-bound));
-    ds_c.set_i128_instance(&w.admin, &gmx_keys::max_funding_factor_per_second_key(env, &w.market_tk), &bound);
+    ds_c.set_i128_instance(
+        &w.admin,
+        &gmx_keys::min_funding_factor_per_second_key(env, &w.market_tk),
+        &(-bound),
+    );
+    ds_c.set_i128_instance(
+        &w.admin,
+        &gmx_keys::max_funding_factor_per_second_key(env, &w.market_tk),
+        &bound,
+    );
 
     update_funding_state(env, &w.ds, &w.admin, &market_props, 100_000);
 
@@ -235,7 +295,9 @@ fn funding_conserves_real_token_balances_between_two_opposite_side_positions() {
 
     // Alice (paying side) closes her long fully.
     let alice_pos_key = position_key(env, &alice, &w.market_tk, &w.long_tk, true);
-    let alice_pos = OHClient::new(env, &w.ord_handler).get_position(&alice_pos_key).unwrap();
+    let alice_pos = OHClient::new(env, &w.ord_handler)
+        .get_position(&alice_pos_key)
+        .unwrap();
     let alice_long_before_close = StellarAssetClient::new(env, &w.long_tk).balance(&alice);
     let alice_close = OHClient::new(env, &w.ord_handler).create_order(
         &alice,
@@ -257,7 +319,8 @@ fn funding_conserves_real_token_balances_between_two_opposite_side_positions() {
         },
     );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &alice_close);
-    let alice_payout = StellarAssetClient::new(env, &w.long_tk).balance(&alice) - alice_long_before_close;
+    let alice_payout =
+        StellarAssetClient::new(env, &w.long_tk).balance(&alice) - alice_long_before_close;
 
     // Alice (paying side) must never receive back more than her full collateral —
     // any nonzero funding fee only ever reduces her payout, never inflates it.
@@ -268,7 +331,9 @@ fn funding_conserves_real_token_balances_between_two_opposite_side_positions() {
 
     // Bob (receiving side) closes his short, then claims his accrued funding.
     let bob_pos_key = position_key(env, &bob, &w.market_tk, &w.short_tk, false);
-    let bob_pos = OHClient::new(env, &w.ord_handler).get_position(&bob_pos_key).unwrap();
+    let bob_pos = OHClient::new(env, &w.ord_handler)
+        .get_position(&bob_pos_key)
+        .unwrap();
     let bob_close = OHClient::new(env, &w.ord_handler).create_order(
         &bob,
         &CreateOrderParams {
@@ -291,10 +356,15 @@ fn funding_conserves_real_token_balances_between_two_opposite_side_positions() {
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &bob_close);
 
     let bob_short_before_claim = StellarAssetClient::new(env, &w.short_tk).balance(&bob);
-    let claimed = FHClient::new(env, &w.fee_handler).claim_funding_fees(&bob, &w.market_tk, &w.short_tk);
-    let bob_claim_payout = StellarAssetClient::new(env, &w.short_tk).balance(&bob) - bob_short_before_claim;
+    let claimed =
+        FHClient::new(env, &w.fee_handler).claim_funding_fees(&bob, &w.market_tk, &w.short_tk);
+    let bob_claim_payout =
+        StellarAssetClient::new(env, &w.short_tk).balance(&bob) - bob_short_before_claim;
 
-    assert!(claimed > 0, "Bob (receiving side) must have a nonzero claimable funding amount");
+    assert!(
+        claimed > 0,
+        "Bob (receiving side) must have a nonzero claimable funding amount"
+    );
     assert_eq!(
         bob_claim_payout, claimed as i128,
         "Bob's real token balance increase must exactly match the claimed amount"

@@ -27,11 +27,7 @@ use oracle::{Oracle, OracleClient as OClient};
 use order_handler::{CreateOrderParams, OrderHandler, OrderHandlerClient};
 use order_vault::{OrderVault, OrderVaultClient as OVClient};
 use role_store::{RoleStore, RoleStoreClient as RsClient};
-use soroban_sdk::{
-    testutils::Address as _,
-    token::StellarAssetClient,
-    Address, Env, Vec,
-};
+use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env, Vec};
 
 /// 10% min-collateral factor expressed in FLOAT_PRECISION units.
 const MIN_COLLATERAL_FACTOR_10PCT: u128 = FLOAT_PRECISION as u128 / 10;
@@ -75,8 +71,12 @@ fn setup() -> World {
     let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
     OClient::new(&env, &oracle_addr).initialize(&admin, &rs, &ds, &passphrase);
 
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let long_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let short_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
 
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
@@ -97,21 +97,43 @@ fn setup() -> World {
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
     let dep_handler = env.register(DepositHandler, ());
-    DepositHandlerClient::new(&env, &dep_handler)
-        .initialize(&admin, &rs, &ds, &oracle_addr, &dep_vault);
+    DepositHandlerClient::new(&env, &dep_handler).initialize(
+        &admin,
+        &rs,
+        &ds,
+        &oracle_addr,
+        &dep_vault,
+    );
     rs_c.grant_role(&admin, &dep_handler, &roles::controller(&env));
 
     let ord_handler = env.register(OrderHandler, ());
-    OrderHandlerClient::new(&env, &ord_handler)
-        .initialize(&admin, &rs, &ds, &oracle_addr, &ord_vault);
+    OrderHandlerClient::new(&env, &ord_handler).initialize(
+        &admin,
+        &rs,
+        &ds,
+        &oracle_addr,
+        &ord_vault,
+    );
     rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
 
     let index_tk = Address::generate(&env);
 
     let ds_c = DsClient::new(&env, &ds);
-    ds_c.set_address(&admin, &gmx_keys::market_index_token_key(&env, &market_tk), &index_tk);
-    ds_c.set_address(&admin, &gmx_keys::market_long_token_key(&env, &market_tk), &long_tk);
-    ds_c.set_address(&admin, &gmx_keys::market_short_token_key(&env, &market_tk), &short_tk);
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_index_token_key(&env, &market_tk),
+        &index_tk,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_long_token_key(&env, &market_tk),
+        &long_tk,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_short_token_key(&env, &market_tk),
+        &short_tk,
+    );
 
     World {
         env,
@@ -137,9 +159,21 @@ fn set_prices(w: &World, index_usd: i128) {
         &Vec::from_array(
             &w.env,
             [
-                TokenPrice { token: w.long_tk.clone(), min: index_usd, max: index_usd },
-                TokenPrice { token: w.short_tk.clone(), min: FLOAT_PRECISION, max: FLOAT_PRECISION },
-                TokenPrice { token: w.index_tk.clone(), min: index_usd, max: index_usd },
+                TokenPrice {
+                    token: w.long_tk.clone(),
+                    min: index_usd,
+                    max: index_usd,
+                },
+                TokenPrice {
+                    token: w.short_tk.clone(),
+                    min: FLOAT_PRECISION,
+                    max: FLOAT_PRECISION,
+                },
+                TokenPrice {
+                    token: w.index_tk.clone(),
+                    min: index_usd,
+                    max: index_usd,
+                },
             ],
         ),
     );
@@ -210,7 +244,7 @@ fn validate_position_rejects_below_min_collateral() {
         market: w.market_tk.clone(),
         collateral_token: w.short_tk.clone(),
         size_in_usd: 100 * fp,
-        size_in_tokens: tp,       // 1 token at $100
+        size_in_tokens: tp,        // 1 token at $100
         collateral_amount: 9 * tp, // 9 USDC = $9
         pending_impact_amount: 0,
         borrowing_factor: 0,
@@ -223,7 +257,10 @@ fn validate_position_rejects_below_min_collateral() {
     };
 
     let _collateral_price = PriceProps { min: fp, max: fp }; // $1 USDC
-    let index_price = PriceProps { min: 100 * fp, max: 100 * fp };
+    let index_price = PriceProps {
+        min: 100 * fp,
+        max: 100 * fp,
+    };
 
     // Must panic: $9 collateral < $10 minimum (10% of $100 size)
     validate_position(&w.env, &w.ds, &position, &market, fp, &index_price);
@@ -401,8 +438,8 @@ fn insufficient_collateral_position_is_liquidatable() {
     };
 
     let collateral_amount = 20 * tp; // $20
-    let size_in_usd = 1_000 * fp;            // $1 000 position
-    let size_in_tokens = 10 * tp;    // 10 tokens at $100
+    let size_in_usd = 1_000 * fp; // $1 000 position
+    let size_in_tokens = 10 * tp; // 10 tokens at $100
 
     let position = PositionProps {
         account: w.user.clone(),
@@ -421,14 +458,17 @@ fn insufficient_collateral_position_is_liquidatable() {
         is_long: true,
     };
 
-    let index_price = PriceProps { min: 100 * fp, max: 100 * fp }; // $100
+    let index_price = PriceProps {
+        min: 100 * fp,
+        max: 100 * fp,
+    }; // $100
 
     let liquidatable = is_liquidatable(
         &w.env,
         &w.ds,
         &position,
         &market,
-        fp,       // collateral_token_price: i128 = $1 USDC
+        fp, // collateral_token_price: i128 = $1 USDC
         &index_price,
     );
 

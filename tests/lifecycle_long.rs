@@ -23,7 +23,9 @@ use gmx_keys::{
     position_key, roles,
 };
 use gmx_math::FLOAT_PRECISION;
-use gmx_types::{CreateDepositParams, CreateOrderParams, CreateWithdrawalParams, OrderType, TokenPrice};
+use gmx_types::{
+    CreateDepositParams, CreateOrderParams, CreateWithdrawalParams, OrderType, TokenPrice,
+};
 use market_token::{MarketToken, MarketTokenClient as MtClient};
 use oracle::{Oracle, OracleClient as OClient};
 use order_handler::{OrderHandler, OrderHandlerClient as OHClient};
@@ -219,7 +221,11 @@ fn full_lifecycle_deposit_long_close_withdraw() {
     let ds_c = DsClient::new(env, &w.ds);
     let long_pool = ds_c.get_u128(&pool_amount_key(env, &w.market_tk, &w.long_tk));
     let short_pool = ds_c.get_u128(&pool_amount_key(env, &w.market_tk, &w.short_tk));
-    assert_eq!(long_pool, (ONE_TOKEN as u128), "long pool must reflect Alice's deposit");
+    assert_eq!(
+        long_pool,
+        (ONE_TOKEN as u128),
+        "long pool must reflect Alice's deposit"
+    );
     assert!(short_pool > 0, "short pool must reflect Alice's deposit");
 
     // ── Step 2: Bob opens a long position ────────────────────────────────────
@@ -231,21 +237,22 @@ fn full_lifecycle_deposit_long_close_withdraw() {
     let open_key = OHClient::new(env, &w.ord_handler).create_order(
         &bob,
         &CreateOrderParams {
-        receiver: bob.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.short_tk.clone(),
-        swap_path: Vec::new(env),
-        size_delta_usd: 2000 * ONE_USD,   // 1 ETH notional at $2000
-        collateral_delta_amount: 200 * ONE_TOKEN,
-        trigger_price: 0,
-        acceptable_price: 2100 * ONE_USD, // accept up to $2100
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::MarketIncrease,
-        is_long: true,
-        expiry_ledger: None,
-        on_behalf_of: None,
-    });
+            receiver: bob.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.short_tk.clone(),
+            swap_path: Vec::new(env),
+            size_delta_usd: 2000 * ONE_USD, // 1 ETH notional at $2000
+            collateral_delta_amount: 200 * ONE_TOKEN,
+            trigger_price: 0,
+            acceptable_price: 2100 * ONE_USD, // accept up to $2100
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketIncrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &open_key);
 
     // Position must exist
@@ -261,26 +268,30 @@ fn full_lifecycle_deposit_long_close_withdraw() {
     let close_key = OHClient::new(env, &w.ord_handler).create_order(
         &bob,
         &CreateOrderParams {
-        receiver: bob.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.short_tk.clone(),
-        swap_path: Vec::new(env),
-        size_delta_usd: pos.size_in_usd, // full close
-        collateral_delta_amount: pos.collateral_amount,
-        trigger_price: 0,
-        acceptable_price: 2100 * ONE_USD, // accept down to $2100
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::MarketDecrease,
-        is_long: true,
-        expiry_ledger: None,
-        on_behalf_of: None,
-    });
+            receiver: bob.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.short_tk.clone(),
+            swap_path: Vec::new(env),
+            size_delta_usd: pos.size_in_usd, // full close
+            collateral_delta_amount: pos.collateral_amount,
+            trigger_price: 0,
+            acceptable_price: 2100 * ONE_USD, // accept down to $2100
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketDecrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
     OHClient::new(env, &w.ord_handler).execute_order(&w.keeper, &close_key);
 
     // Position must be gone
     let pos_after = OHClient::new(env, &w.ord_handler).get_position(&pos_key);
-    assert!(pos_after.is_none(), "Bob's position must be cleared after full close");
+    assert!(
+        pos_after.is_none(),
+        "Bob's position must be cleared after full close"
+    );
 
     // Bob should have received more short tokens than he started with (PnL)
     let bob_final_short = StellarAssetClient::new(env, &w.short_tk).balance(&bob);
@@ -307,16 +318,28 @@ fn full_lifecycle_deposit_long_close_withdraw() {
 
     // ── Final assertions ──────────────────────────────────────────────────────
     let gm_supply = MtClient::new(env, &w.market_tk).total_supply();
-    assert_eq!(gm_supply, 0, "GM total supply must return to 0 after Alice withdraws");
+    assert_eq!(
+        gm_supply, 0,
+        "GM total supply must return to 0 after Alice withdraws"
+    );
 
     // Alice must have received tokens back
     let alice_long_back = StellarAssetClient::new(env, &w.long_tk).balance(&alice);
     let alice_short_back = StellarAssetClient::new(env, &w.short_tk).balance(&alice);
-    assert!(alice_long_back > 0 || alice_short_back > 0, "Alice must receive pool tokens back");
+    assert!(
+        alice_long_back > 0 || alice_short_back > 0,
+        "Alice must receive pool tokens back"
+    );
 
     // Pool must be empty
     let long_pool_final = ds_c.get_u128(&pool_amount_key(env, &w.market_tk, &w.long_tk));
     let short_pool_final = ds_c.get_u128(&pool_amount_key(env, &w.market_tk, &w.short_tk));
-    assert_eq!(long_pool_final, 0, "long pool must be zero after full withdrawal");
-    assert_eq!(short_pool_final, 0, "short pool must be zero after full withdrawal");
+    assert_eq!(
+        long_pool_final, 0,
+        "long pool must be zero after full withdrawal"
+    );
+    assert_eq!(
+        short_pool_final, 0,
+        "short pool must be zero after full withdrawal"
+    );
 }

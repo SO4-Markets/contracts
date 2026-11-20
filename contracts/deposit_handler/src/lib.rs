@@ -24,9 +24,7 @@ use gmx_keys::{
     market_index_token_key, market_long_token_key, market_short_token_key, min_deposit_usd_key,
     roles, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET,
 };
-use gmx_market_utils::{
-    apply_delta_to_pool_amount, get_market_token_price, validate_pool_amount,
-};
+use gmx_market_utils::{apply_delta_to_pool_amount, get_market_token_price, validate_pool_amount};
 use gmx_math::{mul_div_wide, TOKEN_PRECISION};
 pub use gmx_types::CreateDepositParams;
 use gmx_types::{DepositProps, MarketProps};
@@ -121,7 +119,11 @@ trait IDataStore {
 #[soroban_sdk::contractclient(name = "OracleClient")]
 trait IOracle {
     fn get_primary_price(env: Env, token: Address) -> gmx_types::PriceProps;
-    fn require_price_fresh(env: Env, token: Address, expected_ledger_seq: u32) -> gmx_types::PriceProps;
+    fn require_price_fresh(
+        env: Env,
+        token: Address,
+        expected_ledger_seq: u32,
+    ) -> gmx_types::PriceProps;
 }
 
 #[allow(dead_code)]
@@ -216,14 +218,14 @@ impl DepositHandler {
             }
         }
         let old_oracle: Address = env.storage().instance().get(&InstanceKey::Oracle).unwrap();
-        env.storage().instance().set(&InstanceKey::Oracle, &new_oracle);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Oracle, &new_oracle);
         // Issue #605: the oracle address every subsequent price validation
         // relies on just changed — emit an event so off-chain monitoring has
         // an audit trail for this admin action.
-        env.events().publish(
-            (symbol_short!("orcl_set"),),
-            (old_oracle, new_oracle),
-        );
+        env.events()
+            .publish((symbol_short!("orcl_set"),), (old_oracle, new_oracle));
     }
 
     // ── Create deposit ────────────────────────────────────────────────────────
@@ -282,12 +284,22 @@ impl DepositHandler {
             let oracle_client = OracleClient::new(&env, &oracle);
             let mut deposit_usd: i128 = 0;
             if params.long_token_amount > 0 {
-                let long_price = oracle_client.get_primary_price(&market.long_token).mid_price();
-                deposit_usd += mul_div_wide(&env, params.long_token_amount, long_price, TOKEN_PRECISION);
+                let long_price = oracle_client
+                    .get_primary_price(&market.long_token)
+                    .mid_price();
+                deposit_usd +=
+                    mul_div_wide(&env, params.long_token_amount, long_price, TOKEN_PRECISION);
             }
             if params.short_token_amount > 0 {
-                let short_price = oracle_client.get_primary_price(&market.short_token).mid_price();
-                deposit_usd += mul_div_wide(&env, params.short_token_amount, short_price, TOKEN_PRECISION);
+                let short_price = oracle_client
+                    .get_primary_price(&market.short_token)
+                    .mid_price();
+                deposit_usd += mul_div_wide(
+                    &env,
+                    params.short_token_amount,
+                    short_price,
+                    TOKEN_PRECISION,
+                );
             }
             if deposit_usd < min_deposit_usd {
                 panic_with_error!(&env, Error::BelowMinimumDeposit);
@@ -431,12 +443,11 @@ impl DepositHandler {
         // than a stale one still sitting in temporary storage from an earlier ledger.
         let oracle_client = OracleClient::new(&env, &oracle);
         let current_seq = env.ledger().sequence();
-        let long_price_props = oracle_client
-            .require_price_fresh(&market.long_token, &current_seq);
-        let short_price_props = oracle_client
-            .require_price_fresh(&market.short_token, &current_seq);
-        let index_price_props = oracle_client
-            .require_price_fresh(&market.index_token, &current_seq);
+        let long_price_props = oracle_client.require_price_fresh(&market.long_token, &current_seq);
+        let short_price_props =
+            oracle_client.require_price_fresh(&market.short_token, &current_seq);
+        let index_price_props =
+            oracle_client.require_price_fresh(&market.index_token, &current_seq);
         let long_price = long_price_props.mid_price();
         let short_price = short_price_props.mid_price();
 
@@ -1045,9 +1056,12 @@ mod tests {
             },
         );
 
-        // Ledger advances with no fresh price submitted — the stored price is now stale.
+        // Ledger advances past the oracle's freshness window with no fresh price
+        // submitted — the stored price is now stale (oracle#1205 accepts prices
+        // for PRICE_FRESHNESS_WINDOW ledgers, so a single-ledger step is not enough).
         let seq = env.ledger().sequence();
-        env.ledger().set_sequence_number(seq + 1);
+        env.ledger()
+            .set_sequence_number(seq + oracle::PRICE_FRESHNESS_WINDOW + 1);
 
         hc.execute_deposit(&w.keeper, &dep_key);
     }
@@ -1452,17 +1466,18 @@ mod tests {
             },
         );
 
-        let pool_before =
-            ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.long_tk));
+        let pool_before = ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.long_tk));
         let vault_before = token::Client::new(env, &w.long_tk).balance(&w.vault);
 
         // Must fail with InsufficientLpOut
         let result = hc.try_execute_deposit(&w.keeper, &key);
-        assert!(result.is_err(), "execute_deposit must fail when mint_amount < min_market_tokens");
+        assert!(
+            result.is_err(),
+            "execute_deposit must fail when mint_amount < min_market_tokens"
+        );
 
         // Pool amount unchanged — apply_delta_to_pool_amount was reverted
-        let pool_after =
-            ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.long_tk));
+        let pool_after = ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.long_tk));
         assert_eq!(
             pool_before, pool_after,
             "pool amount must be unchanged after failed execute"
@@ -2119,8 +2134,7 @@ mod tests {
     #[should_panic]
     fn update_oracle_rejects_self_address() {
         let w = setup();
-        DepositHandlerClient::new(&w.env, &w.handler)
-            .update_oracle(&w.admin, &w.handler);
+        DepositHandlerClient::new(&w.env, &w.handler).update_oracle(&w.admin, &w.handler);
     }
 
     /// update_oracle must reject a no-op call (new_oracle == current oracle).
@@ -2128,8 +2142,7 @@ mod tests {
     #[should_panic]
     fn update_oracle_rejects_noop() {
         let w = setup();
-        DepositHandlerClient::new(&w.env, &w.handler)
-            .update_oracle(&w.admin, &w.oracle);
+        DepositHandlerClient::new(&w.env, &w.handler).update_oracle(&w.admin, &w.oracle);
     }
 
     /// update_oracle must reject the deposit_vault's address — a plausible
@@ -2138,8 +2151,7 @@ mod tests {
     #[should_panic]
     fn update_oracle_rejects_sibling_vault_address() {
         let w = setup();
-        DepositHandlerClient::new(&w.env, &w.handler)
-            .update_oracle(&w.admin, &w.vault);
+        DepositHandlerClient::new(&w.env, &w.handler).update_oracle(&w.admin, &w.vault);
     }
 
     /// A genuinely different oracle address must succeed.
@@ -2147,8 +2159,7 @@ mod tests {
     fn update_oracle_accepts_valid_new_address() {
         let w = setup();
         let new_oracle = Address::generate(&w.env);
-        DepositHandlerClient::new(&w.env, &w.handler)
-            .update_oracle(&w.admin, &new_oracle);
+        DepositHandlerClient::new(&w.env, &w.handler).update_oracle(&w.admin, &new_oracle);
     }
 
     // ── Issue #110: upgrade smoke tests ───────────────────────────────────────
@@ -2316,7 +2327,10 @@ mod tests {
         hc.execute_deposit(&w.keeper, &key);
 
         let lp = MtClient::new(env, &w.market_tk).balance(&user);
-        assert!(lp > 0, "normal deposit must still mint LP tokens after vault check added");
+        assert!(
+            lp > 0,
+            "normal deposit must still mint LP tokens after vault check added"
+        );
     }
 
     // ── Issue #368: negative amount validation ──────────────────────────────

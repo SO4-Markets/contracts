@@ -25,8 +25,8 @@
 
 use data_store::{DataStore, DataStoreClient as DsClient};
 use gmx_keys::{
-    market_index_token_key, market_long_token_key, market_short_token_key,
-    max_open_interest_key, roles,
+    market_index_token_key, market_long_token_key, market_short_token_key, max_open_interest_key,
+    roles,
 };
 use gmx_math::FLOAT_PRECISION;
 use gmx_types::CreateOrderParams;
@@ -268,11 +268,28 @@ fn oi_cap_exact_boundary_succeeds_one_over_fails() {
     );
 
     // Real prior order brings long OI to 499,000 USD.
-    open_real_position(&w, &w.trader1, &w.long_tk, 600 * ONE_TOKEN, 499_000 * ONE_USD, true);
+    open_real_position(
+        &w,
+        &w.trader1,
+        &w.long_tk,
+        600 * ONE_TOKEN,
+        499_000 * ONE_USD,
+        true,
+    );
 
     // A further 2,000 USD increase would exceed the cap (501,000 > 500,000).
-    let succeeded = try_real_increase(&w, &w.trader1, &w.long_tk, 100 * ONE_TOKEN, 2_000 * ONE_USD, true);
-    assert!(!succeeded, "position increase that exceeds OI cap should fail");
+    let succeeded = try_real_increase(
+        &w,
+        &w.trader1,
+        &w.long_tk,
+        100 * ONE_TOKEN,
+        2_000 * ONE_USD,
+        true,
+    );
+    assert!(
+        !succeeded,
+        "position increase that exceeds OI cap should fail"
+    );
 }
 
 #[test]
@@ -287,11 +304,28 @@ fn oi_cap_exactly_at_cap_succeeds() {
     );
 
     // Real prior order brings long OI to 499,000 USD.
-    open_real_position(&w, &w.trader1, &w.long_tk, 600 * ONE_TOKEN, 499_000 * ONE_USD, true);
+    open_real_position(
+        &w,
+        &w.trader1,
+        &w.long_tk,
+        600 * ONE_TOKEN,
+        499_000 * ONE_USD,
+        true,
+    );
 
     // Increase by exactly 1,000 USD hits the cap exactly at 500,000.
-    let succeeded = try_real_increase(&w, &w.trader1, &w.long_tk, 50 * ONE_TOKEN, 1_000 * ONE_USD, true);
-    assert!(succeeded, "position increase that hits cap exactly should succeed");
+    let succeeded = try_real_increase(
+        &w,
+        &w.trader1,
+        &w.long_tk,
+        50 * ONE_TOKEN,
+        1_000 * ONE_USD,
+        true,
+    );
+    assert!(
+        succeeded,
+        "position increase that hits cap exactly should succeed"
+    );
 }
 
 #[test]
@@ -312,11 +346,28 @@ fn oi_cap_short_independent_of_long() {
     );
 
     // Max out long OI with a real order.
-    open_real_position(&w, &w.trader1, &w.long_tk, 600 * ONE_TOKEN, 500_000 * ONE_USD, true);
+    open_real_position(
+        &w,
+        &w.trader1,
+        &w.long_tk,
+        600 * ONE_TOKEN,
+        500_000 * ONE_USD,
+        true,
+    );
 
     // A short position should succeed even though long is fully at cap.
-    let succeeded = try_real_increase(&w, &w.trader1, &w.long_tk, 100 * ONE_TOKEN, 10_000 * ONE_USD, false);
-    assert!(succeeded, "short position should succeed when only long cap is hit");
+    let succeeded = try_real_increase(
+        &w,
+        &w.trader1,
+        &w.long_tk,
+        100 * ONE_TOKEN,
+        10_000 * ONE_USD,
+        false,
+    );
+    assert!(
+        succeeded,
+        "short position should succeed when only long cap is hit"
+    );
 }
 
 #[test]
@@ -325,8 +376,18 @@ fn oi_cap_zero_means_uncapped() {
     // OI cap defaults to 0 (uncapped) — max_open_interest_key intentionally left unset.
 
     // A very large position should succeed with no cap configured.
-    let succeeded = try_real_increase(&w, &w.trader1, &w.long_tk, 5_000 * ONE_TOKEN, 1_000_000 * ONE_USD, true);
-    assert!(succeeded, "position increase should succeed when OI cap is 0 (uncapped)");
+    let succeeded = try_real_increase(
+        &w,
+        &w.trader1,
+        &w.long_tk,
+        5_000 * ONE_TOKEN,
+        1_000_000 * ONE_USD,
+        true,
+    );
+    assert!(
+        succeeded,
+        "position increase should succeed when OI cap is 0 (uncapped)"
+    );
 }
 
 #[test]
@@ -340,7 +401,14 @@ fn oi_cap_decrease_always_allowed() {
         &max_open_interest_key(&w.env, &w.market_tk, true),
         &(500_000 * ONE_USD as u128),
     );
-    open_real_position(&w, &w.trader1, &w.long_tk, 600 * ONE_TOKEN, 500_000 * ONE_USD, true);
+    open_real_position(
+        &w,
+        &w.trader1,
+        &w.long_tk,
+        600 * ONE_TOKEN,
+        500_000 * ONE_USD,
+        true,
+    );
 
     // Decreasing the position should always be allowed, even while at the cap.
     let oh_c = OHClient::new(&w.env, &w.ord_handler);
@@ -393,13 +461,27 @@ fn oi_cap_boundary_via_real_multi_trader_multi_collateral_orders_reverts_over_ca
 
     // trader1 opens a real long position collateralized in long_tk, bringing
     // long-side OI (long_tk bucket) to just under the cap.
-    open_real_position(&w, &w.trader1, &w.long_tk, 600 * ONE_TOKEN, 499_000 * ONE_USD, true);
+    open_real_position(
+        &w,
+        &w.trader1,
+        &w.long_tk,
+        600 * ONE_TOKEN,
+        499_000 * ONE_USD,
+        true,
+    );
 
     // trader2 opens a real long position collateralized in short_tk (a
     // different collateral token, same market, same direction) that would
     // push the aggregate long OI (long_tk bucket + short_tk bucket) over the
     // cap: 499,000 + 2,000 = 501,000 > 500,000.
-    let succeeded = try_real_increase(&w, &w.trader2, &w.short_tk, 100 * ONE_TOKEN, 2_000 * ONE_USD, true);
+    let succeeded = try_real_increase(
+        &w,
+        &w.trader2,
+        &w.short_tk,
+        100 * ONE_TOKEN,
+        2_000 * ONE_USD,
+        true,
+    );
     assert!(
         !succeeded,
         "second trader's order in a different collateral token must still be blocked \
@@ -419,11 +501,25 @@ fn oi_cap_boundary_via_real_multi_trader_multi_collateral_orders_exact_boundary_
     );
 
     // trader1 opens a real long position collateralized in long_tk: 499,000 USD.
-    open_real_position(&w, &w.trader1, &w.long_tk, 600 * ONE_TOKEN, 499_000 * ONE_USD, true);
+    open_real_position(
+        &w,
+        &w.trader1,
+        &w.long_tk,
+        600 * ONE_TOKEN,
+        499_000 * ONE_USD,
+        true,
+    );
 
     // trader2 opens a real long position collateralized in short_tk that fits
     // exactly at the boundary: 499,000 + 1,000 = 500,000 == cap.
-    let succeeded = try_real_increase(&w, &w.trader2, &w.short_tk, 50 * ONE_TOKEN, 1_000 * ONE_USD, true);
+    let succeeded = try_real_increase(
+        &w,
+        &w.trader2,
+        &w.short_tk,
+        50 * ONE_TOKEN,
+        1_000 * ONE_USD,
+        true,
+    );
     assert!(
         succeeded,
         "second trader's order in a different collateral token that lands exactly on the \
@@ -433,5 +529,8 @@ fn oi_cap_boundary_via_real_multi_trader_multi_collateral_orders_exact_boundary_
     // A further increase from either trader, in either collateral token, must
     // now revert — the aggregate is exactly at the cap.
     let over = try_real_increase(&w, &w.trader1, &w.long_tk, 10 * ONE_TOKEN, ONE_USD, true);
-    assert!(!over, "any further long increase once the aggregate cap is hit must fail");
+    assert!(
+        !over,
+        "any further long increase once the aggregate cap is hit must fail"
+    );
 }

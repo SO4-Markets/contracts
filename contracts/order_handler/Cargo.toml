@@ -34,6 +34,8 @@ referral-storage  = { path = "../referral_storage" }
 gmx-types         = { path = "../../libs/types" }
 gmx-keys          = { path = "../../libs/keys" }
 gmx-math          = { path = "../../libs/math" }
+settlement_invariants = { path = "../../libs/settlement_invariants" }
+rollback_harness  = { path = "../../libs/rollback_harness" }
 criterion         = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]

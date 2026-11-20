@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+clob-model  = { path = "../libs/clob_model" }
 gmx-types = { path = "../libs/types" }
 gmx-keys = { path = "../libs/keys" }
 gmx-math = { path = "../libs/math" }
@@ -108,3 +109,27 @@ path = "order_cleanup.rs"
 [[test]]
 name = "router_and_factory_coverage"
 path = "router_and_factory_coverage.rs"
+
+[[test]]
+name = "resource_bench"
+path = "resource_bench.rs"
+
+[[test]]
+name = "clob_model"
+path = "clob_model.rs"
+
+[[test]]
+name = "clob_properties"
+path = "clob_properties.rs"
+
+[[test]]
+name = "privileged_auth_matrix"
+path = "privileged_auth_matrix.rs"
+
+[[test]]
+name = "fee_receiver_routing"
+path = "fee_receiver_routing.rs"
+
+[[test]]
+name = "shared_quote_token_fees"
+path = "shared_quote_token_fees.rs"

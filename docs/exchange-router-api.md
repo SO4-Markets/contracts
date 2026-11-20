@@ -22,9 +22,12 @@ Direct single-action helpers (`cancel_order`, `create_deposit`, …) are also ex
 | 2 | `NotInitialized` | Any function called before `initialize` |
 | 3 | `Unauthorized` | `upgrade` or admin function called by non-admin |
 | 4 | `Paused` | A non-cancel action is called while the protocol is paused |
-| 5 | `BatchSizeLimitExceeded` | Reserved for a batch-size limit on `multicall`; not currently raised by any `exchange_router` function |
+| 5 | `BatchSizeLimitExceeded` | `multicall` called with more than 20 actions |
 | 6 | `TimelockNotExpired` | `execute_unpause` called before the scheduled unpause ledger |
 | 7 | `UnpauseNotScheduled` | `execute_unpause` called without a prior `schedule_unpause` |
+| 8 | `InvalidWithdrawalHandler` | `update_*_handler` called with the router's own address or a handler already registered to a different slot |
+| 9 | `MismatchedBatchLength` | `claim_funding_fees` (standalone or via `ClaimFundingFees` action) called with `markets.len() != tokens.len()` |
+| 10 | `InvalidAmount` | `SendTokens` action called with `amount <= 0` |
 
 ---
 
@@ -52,6 +55,15 @@ multicall(env: Env, caller: Address, actions: Vec<RouterAction>) -> Vec<BytesN<3
 **Side effects:** Exactly those of each sub-action; see individual entries below.
 
 **Errors:** Propagates any error from any sub-action (whole batch reverts).
+
+**Diagnostic events (issue #1163):** Before dispatching each action `i`, `multicall` emits a `mc_begin` event whose data field is the `u32` index `i`. When an action traps, the last `mc_begin` entry in the host error log identifies the failing element. Example output for a three-action batch that fails on action 2:
+
+```
+[event] topic=(mc_begin,) data=0
+[event] topic=(mc_begin,) data=1
+[event] topic=(mc_begin,) data=2   ← last seen before the host error
+HostError: ...
+```
 
 **Example**
 ```bash

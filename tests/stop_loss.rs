@@ -16,8 +16,7 @@
 
 use data_store::{DataStore, DataStoreClient as DsClient};
 use gmx_keys::{
-    market_index_token_key, market_long_token_key, market_short_token_key,
-    position_key, roles,
+    market_index_token_key, market_long_token_key, market_short_token_key, position_key, roles,
 };
 use gmx_math::FLOAT_PRECISION;
 use gmx_types::{CreateOrderParams, OrderType, TokenPrice};
@@ -158,25 +157,34 @@ fn open_long(w: &TestWorld) {
         &(200 * ONE_TOKEN),
     );
     let oh_c = OHClient::new(&w.env, &w.ord_handler);
-    let key = oh_c.create_order(&w.trader, &CreateOrderParams {
-        receiver: w.trader.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: 2000 * ONE_USD,
-        collateral_delta_amount: 200 * ONE_TOKEN,
-        trigger_price: 0,
-        acceptable_price: 2100 * ONE_USD,
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::MarketIncrease,
-        is_long: true,
-        expiry_ledger: None,
-        on_behalf_of: None,
-    });
+    let key = oh_c.create_order(
+        &w.trader,
+        &CreateOrderParams {
+            receiver: w.trader.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: 2000 * ONE_USD,
+            collateral_delta_amount: 200 * ONE_TOKEN,
+            trigger_price: 0,
+            acceptable_price: 2100 * ONE_USD,
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::MarketIncrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
     oh_c.execute_order(&w.keeper, &key);
     assert!(oh_c
-        .get_position(&position_key(&w.env, &w.trader, &w.market_tk, &w.long_tk, true))
+        .get_position(&position_key(
+            &w.env,
+            &w.trader,
+            &w.market_tk,
+            &w.long_tk,
+            true
+        ))
         .is_some());
 }
 
@@ -193,39 +201,48 @@ fn stop_loss_not_triggered_above_trigger_price() {
     open_long(&w);
 
     // Step 2: Create stop-loss decrease order
-    let order_key = oh_c.create_order(&w.trader, &CreateOrderParams {
-        receiver: w.trader.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: 2000 * ONE_USD, // Close 1 ETH position
-        collateral_delta_amount: 200 * ONE_TOKEN,
-        trigger_price: 1900 * ONE_USD,
-        acceptable_price: 1880 * ONE_USD,
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::StopLossDecrease,
-        is_long: true,
-        expiry_ledger: None,
-        on_behalf_of: None,
-    });
+    let order_key = oh_c.create_order(
+        &w.trader,
+        &CreateOrderParams {
+            receiver: w.trader.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: 2000 * ONE_USD, // Close 1 ETH position
+            collateral_delta_amount: 200 * ONE_TOKEN,
+            trigger_price: 1900 * ONE_USD,
+            acceptable_price: 1880 * ONE_USD,
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::StopLossDecrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
 
     // Step 3: Oracle submits price above trigger (1,950 USD)
     oracle_c.set_prices_simple(
         &w.keeper,
-        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
-            token: w.index_tk.clone(),
-            min: 1950 * ONE_USD,
-            max: 1950 * ONE_USD,
-        }]),
+        &soroban_sdk::Vec::from_array(
+            &w.env,
+            [TokenPrice {
+                token: w.index_tk.clone(),
+                min: 1950 * ONE_USD,
+                max: 1950 * ONE_USD,
+            }],
+        ),
     );
     oracle_c.set_prices_simple(
         &w.keeper,
-        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
-            token: w.long_tk.clone(),
-            min: ONE_USD,
-            max: ONE_USD,
-        }]),
+        &soroban_sdk::Vec::from_array(
+            &w.env,
+            [TokenPrice {
+                token: w.long_tk.clone(),
+                min: ONE_USD,
+                max: ONE_USD,
+            }],
+        ),
     );
 
     // Step 4: Try to execute - should fail (price not low enough)
@@ -247,47 +264,59 @@ fn stop_loss_triggers_at_exact_trigger_price() {
     open_long(&w);
 
     // Create stop-loss decrease order
-    let order_key = oh_c.create_order(&w.trader, &CreateOrderParams {
-        receiver: w.trader.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: 2000 * ONE_USD,
-        collateral_delta_amount: 200 * ONE_TOKEN,
-        trigger_price: 1900 * ONE_USD,
-        acceptable_price: 1880 * ONE_USD,
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::StopLossDecrease,
-        is_long: true,
-        expiry_ledger: None,
-        on_behalf_of: None,
-    });
+    let order_key = oh_c.create_order(
+        &w.trader,
+        &CreateOrderParams {
+            receiver: w.trader.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: 2000 * ONE_USD,
+            collateral_delta_amount: 200 * ONE_TOKEN,
+            trigger_price: 1900 * ONE_USD,
+            acceptable_price: 1880 * ONE_USD,
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::StopLossDecrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
 
     // Create a mock position first (simplified)
     let _pos_key = position_key(&w.env, &w.trader, &w.market_tk, &w.long_tk, true);
-    
+
     // Oracle submits price at trigger (1,900 USD)
     oracle_c.set_prices_simple(
         &w.keeper,
-        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
-            token: w.index_tk.clone(),
-            min: 1900 * ONE_USD,
-            max: 1900 * ONE_USD,
-        }]),
+        &soroban_sdk::Vec::from_array(
+            &w.env,
+            [TokenPrice {
+                token: w.index_tk.clone(),
+                min: 1900 * ONE_USD,
+                max: 1900 * ONE_USD,
+            }],
+        ),
     );
     oracle_c.set_prices_simple(
         &w.keeper,
-        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
-            token: w.long_tk.clone(),
-            min: ONE_USD,
-            max: ONE_USD,
-        }]),
+        &soroban_sdk::Vec::from_array(
+            &w.env,
+            [TokenPrice {
+                token: w.long_tk.clone(),
+                min: ONE_USD,
+                max: ONE_USD,
+            }],
+        ),
     );
 
     // Execute order - should succeed
     let result = oh_c.try_execute_order(&w.keeper, &order_key);
-    assert!(result.is_ok(), "Order should trigger at exact trigger price");
+    assert!(
+        result.is_ok(),
+        "Order should trigger at exact trigger price"
+    );
 }
 
 #[test]
@@ -299,39 +328,48 @@ fn stop_loss_triggers_below_trigger_price() {
     open_long(&w);
 
     // Create stop-loss decrease order
-    let order_key = oh_c.create_order(&w.trader, &CreateOrderParams {
-        receiver: w.trader.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: 2000 * ONE_USD,
-        collateral_delta_amount: 200 * ONE_TOKEN,
-        trigger_price: 1900 * ONE_USD,
-        acceptable_price: 1880 * ONE_USD,
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::StopLossDecrease,
-        is_long: true,
-        expiry_ledger: None,
-        on_behalf_of: None,
-    });
+    let order_key = oh_c.create_order(
+        &w.trader,
+        &CreateOrderParams {
+            receiver: w.trader.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: 2000 * ONE_USD,
+            collateral_delta_amount: 200 * ONE_TOKEN,
+            trigger_price: 1900 * ONE_USD,
+            acceptable_price: 1880 * ONE_USD,
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::StopLossDecrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
 
     // Oracle submits price below trigger (1,890 USD)
     oracle_c.set_prices_simple(
         &w.keeper,
-        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
-            token: w.index_tk.clone(),
-            min: 1890 * ONE_USD,
-            max: 1890 * ONE_USD,
-        }]),
+        &soroban_sdk::Vec::from_array(
+            &w.env,
+            [TokenPrice {
+                token: w.index_tk.clone(),
+                min: 1890 * ONE_USD,
+                max: 1890 * ONE_USD,
+            }],
+        ),
     );
     oracle_c.set_prices_simple(
         &w.keeper,
-        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
-            token: w.long_tk.clone(),
-            min: ONE_USD,
-            max: ONE_USD,
-        }]),
+        &soroban_sdk::Vec::from_array(
+            &w.env,
+            [TokenPrice {
+                token: w.long_tk.clone(),
+                min: ONE_USD,
+                max: ONE_USD,
+            }],
+        ),
     );
 
     // Execute order - should succeed
@@ -348,39 +386,48 @@ fn stop_loss_slippage_protection_rejects_worse_price() {
     open_long(&w);
 
     // Create stop-loss order with tight acceptable price
-    let order_key = oh_c.create_order(&w.trader, &CreateOrderParams {
-        receiver: w.trader.clone(),
-        market: w.market_tk.clone(),
-        initial_collateral_token: w.long_tk.clone(),
-        swap_path: soroban_sdk::Vec::new(&w.env),
-        size_delta_usd: 2000 * ONE_USD,
-        collateral_delta_amount: 200 * ONE_TOKEN,
-        trigger_price: 1900 * ONE_USD,
-        acceptable_price: 1850 * ONE_USD, // Minimum acceptable
-        execution_fee: 0,
-        min_output_amount: 0,
-        order_type: OrderType::StopLossDecrease,
-        is_long: true,
-        expiry_ledger: None,
-        on_behalf_of: None,
-    });
+    let order_key = oh_c.create_order(
+        &w.trader,
+        &CreateOrderParams {
+            receiver: w.trader.clone(),
+            market: w.market_tk.clone(),
+            initial_collateral_token: w.long_tk.clone(),
+            swap_path: soroban_sdk::Vec::new(&w.env),
+            size_delta_usd: 2000 * ONE_USD,
+            collateral_delta_amount: 200 * ONE_TOKEN,
+            trigger_price: 1900 * ONE_USD,
+            acceptable_price: 1850 * ONE_USD, // Minimum acceptable
+            execution_fee: 0,
+            min_output_amount: 0,
+            order_type: OrderType::StopLossDecrease,
+            is_long: true,
+            expiry_ledger: None,
+            on_behalf_of: None,
+        },
+    );
 
     // Oracle submits price below acceptable (1,840 USD - worse than 1,850)
     oracle_c.set_prices_simple(
         &w.keeper,
-        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
-            token: w.index_tk.clone(),
-            min: 1840 * ONE_USD,
-            max: 1840 * ONE_USD,
-        }]),
+        &soroban_sdk::Vec::from_array(
+            &w.env,
+            [TokenPrice {
+                token: w.index_tk.clone(),
+                min: 1840 * ONE_USD,
+                max: 1840 * ONE_USD,
+            }],
+        ),
     );
     oracle_c.set_prices_simple(
         &w.keeper,
-        &soroban_sdk::Vec::from_array(&w.env, [TokenPrice {
-            token: w.long_tk.clone(),
-            min: ONE_USD,
-            max: ONE_USD,
-        }]),
+        &soroban_sdk::Vec::from_array(
+            &w.env,
+            [TokenPrice {
+                token: w.long_tk.clone(),
+                min: ONE_USD,
+                max: ONE_USD,
+            }],
+        ),
     );
 
     // Execute order - should fail due to slippage

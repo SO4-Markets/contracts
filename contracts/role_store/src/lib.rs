@@ -510,7 +510,7 @@ mod tests {
         let keeper = Address::generate(&env);
 
         client.grant_role(&admin, &keeper, &ctrl);
-        
+
         assert_eq!(
             env.events().all().filter_by_contract(&contract_id),
             [RoleGranted {
@@ -522,7 +522,7 @@ mod tests {
         );
 
         client.revoke_role(&admin, &keeper, &ctrl);
-        
+
         assert_eq!(
             env.events().all().filter_by_contract(&contract_id),
             [RoleRevoked {

@@ -2,8 +2,10 @@
 //!
 //! This contract is intentionally small and delegates each individual claim to the
 //! canonical `fee_handler::claim_fees` entry point so existing accounting,
-//! zero-balance skipping, pool-balance caps, and FEE_KEEPER role checks remain the
-//! single source of truth.
+//! zero-balance skipping, pool-balance caps, FEE_KEEPER role checks, and the
+//! configured fee recipient remain the single source of truth. The sweeper takes no
+//! destination argument: each pair pays out to the recipient `fee_handler` has
+//! configured for that market.
 #![no_std]
 
 use fee_handler::FeeHandlerClient;
@@ -25,7 +27,6 @@ pub enum Error {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BatchFeesClaimed {
     pub keeper: Address,
-    pub receiver: Address,
     pub market_count: u32,
     pub token_count: u32,
     pub total_claimed: u128,
@@ -50,14 +51,14 @@ pub struct FeeBatchSweeper;
 impl FeeBatchSweeper {
     /// Claim protocol fees across all market/token combinations in one call.
     ///
-    /// `fee_handler` remains responsible for the actual transfer and the
-    /// FEE_KEEPER authorization check. Zero balances are skipped because
-    /// `fee_handler::claim_fees` returns `0` for them.
+    /// `fee_handler` remains responsible for the actual transfer, the
+    /// FEE_KEEPER authorization check, and choosing the configured recipient.
+    /// Zero balances are skipped because `fee_handler::claim_fees` returns `0`
+    /// for them; a market with no configured recipient is reported in `failed`.
     pub fn claim_all_fees(
         env: Env,
         fee_handler: Address,
         keeper: Address,
-        receiver: Address,
         markets: Vec<Address>,
         tokens: Vec<Address>,
     ) -> BatchClaimResult {
@@ -87,7 +88,7 @@ impl FeeBatchSweeper {
                 // InsufficientPoolBalance guard, a paused token, or a market missing the
                 // sweeper's controller role) is isolated to that pair instead of
                 // reverting the whole batch and every fee already claimed in this call.
-                match fee_handler_client.try_claim_fees(&keeper, &market, &token, &receiver) {
+                match fee_handler_client.try_claim_fees(&keeper, &market, &token) {
                     Ok(Ok(claimed)) => {
                         total_claimed = total_claimed.saturating_add(claimed);
                     }
@@ -100,7 +101,6 @@ impl FeeBatchSweeper {
 
         env.events().publish_event(&BatchFeesClaimed {
             keeper,
-            receiver,
             market_count,
             token_count,
             total_claimed,
@@ -136,7 +136,6 @@ mod tests {
         let result = client.claim_all_fees(
             &Address::generate(&env),
             &Address::generate(&env),
-            &Address::generate(&env),
             &Vec::new(&env),
             &Vec::new(&env),
         );
@@ -161,7 +160,6 @@ mod tests {
         let result = client.try_claim_all_fees(
             &Address::generate(&env),
             &Address::generate(&env),
-            &Address::generate(&env),
             &markets,
             &tokens,
         );
@@ -182,7 +180,6 @@ mod tests {
         }
 
         let result = client.try_claim_all_fees(
-            &Address::generate(&env),
             &Address::generate(&env),
             &Address::generate(&env),
             &markets,
@@ -207,7 +204,6 @@ mod tests {
         }
 
         let result = client.try_claim_all_fees(
-            &Address::generate(&env),
             &Address::generate(&env),
             &Address::generate(&env),
             &markets,
@@ -236,7 +232,7 @@ mod tests {
 
         let admin = Address::generate(&env);
         let keeper = Address::generate(&env);
-        let receiver = Address::generate(&env);
+        let treasury = Address::generate(&env);
 
         let rs = env.register(RoleStore, ());
         let rs_c = RsClient::new(&env, &rs);
@@ -274,6 +270,7 @@ mod tests {
 
         let handler = env.register(FeeHandler, ());
         FeeHandlerClient::new(&env, &handler).initialize(&admin, &rs, &ds);
+        FeeHandlerClient::new(&env, &handler).set_fee_receiver(&treasury);
         rs_c.grant_role(&admin, &handler, &roles::controller(&env));
 
         let ds_c = DsClient::new(&env, &ds);
@@ -284,6 +281,12 @@ mod tests {
             &admin,
             &gmx_keys::claimable_fee_amount_key(&env, &bad_market, &token),
             &bad_claimable,
+        );
+        // Accrual moves the global fee total with the per-market ledger.
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::total_claimable_fee_amount_key(&env, &token),
+            &(bad_claimable as i128),
         );
         ds_c.set_u128(
             &admin,
@@ -297,6 +300,12 @@ mod tests {
             &admin,
             &gmx_keys::claimable_fee_amount_key(&env, &good_market, &token),
             &good_claimable,
+        );
+        // Accrual moves the global fee total with the per-market ledger.
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::total_claimable_fee_amount_key(&env, &token),
+            &(good_claimable as i128),
         );
         ds_c.set_u128(
             &admin,
@@ -312,7 +321,7 @@ mod tests {
         let tokens = soroban_sdk::vec![&env, token.clone()];
 
         // Must NOT panic even though the bad pair would panic in fee_handler directly.
-        let result = client.claim_all_fees(&handler, &keeper, &receiver, &markets, &tokens);
+        let result = client.claim_all_fees(&handler, &keeper, &markets, &tokens);
 
         assert_eq!(
             result.total_claimed, good_claimable,
@@ -325,7 +334,98 @@ mod tests {
             "the failing pair must be reported rather than silently dropped"
         );
 
-        let recv_bal = soroban_sdk::token::Client::new(&env, &token).balance(&receiver);
+        let recv_bal = soroban_sdk::token::Client::new(&env, &token).balance(&treasury);
         assert_eq!(recv_bal as u128, good_claimable);
+    }
+
+    /// Each market pays out to its own configured recipient: a market with an
+    /// override goes to that override, the rest go to the protocol treasury, and
+    /// the keeper running the sweep has no say in either destination.
+    #[test]
+    fn batch_routes_each_market_to_its_configured_recipient() {
+        use data_store::{DataStore, DataStoreClient as DsClient};
+        use fee_handler::{FeeHandler, FeeHandlerClient};
+        use gmx_keys::roles;
+        use market_token::{MarketToken, MarketTokenClient as MtClient};
+        use role_store::{RoleStore, RoleStoreClient as RsClient};
+        use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let keeper = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let partner = Address::generate(&env);
+
+        let rs = env.register(RoleStore, ());
+        let rs_c = RsClient::new(&env, &rs);
+        rs_c.initialize(&admin);
+        rs_c.grant_role(&admin, &admin, &roles::controller(&env));
+        rs_c.grant_role(&admin, &keeper, &roles::fee_keeper(&env));
+
+        let ds = env.register(DataStore, ());
+        DsClient::new(&env, &ds).initialize(&admin, &rs);
+        let ds_c = DsClient::new(&env, &ds);
+
+        let token = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+
+        let make_market = |name: &str, fees: u128| {
+            let market_tk = env.register(MarketToken, ());
+            MtClient::new(&env, &market_tk).initialize(
+                &admin,
+                &rs,
+                &7u32,
+                &soroban_sdk::String::from_str(&env, name),
+                &soroban_sdk::String::from_str(&env, "GM"),
+                &token,
+                &token,
+            );
+            rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
+            ds_c.set_u128(
+                &admin,
+                &gmx_keys::claimable_fee_amount_key(&env, &market_tk, &token),
+                &fees,
+            );
+            // Accrual moves the global fee total with the per-market ledger.
+            ds_c.apply_delta_to_u128(
+                &admin,
+                &gmx_keys::total_claimable_fee_amount_key(&env, &token),
+                &(fees as i128),
+            );
+            ds_c.set_u128(
+                &admin,
+                &gmx_keys::pool_amount_key(&env, &market_tk, &token),
+                &fees,
+            );
+            StellarAssetClient::new(&env, &token).mint(&market_tk, &(fees as i128));
+            market_tk
+        };
+        let protocol_market = make_market("Protocol Market", 300);
+        let partner_market = make_market("Partner Market", 700);
+
+        let handler = env.register(FeeHandler, ());
+        let fh_c = FeeHandlerClient::new(&env, &handler);
+        fh_c.initialize(&admin, &rs, &ds);
+        rs_c.grant_role(&admin, &handler, &roles::controller(&env));
+        fh_c.set_fee_receiver(&treasury);
+        fh_c.set_market_fee_receiver(&partner_market, &Some(partner.clone()));
+
+        let client = FeeBatchSweeperClient::new(&env, &env.register(FeeBatchSweeper, ()));
+        let result = client.claim_all_fees(
+            &handler,
+            &keeper,
+            &soroban_sdk::vec![&env, protocol_market, partner_market],
+            &soroban_sdk::vec![&env, token.clone()],
+        );
+
+        assert_eq!(result.total_claimed, 1_000);
+        assert_eq!(result.failed.len(), 0);
+        let tk = TokenClient::new(&env, &token);
+        assert_eq!(tk.balance(&treasury), 300);
+        assert_eq!(tk.balance(&partner), 700);
+        assert_eq!(tk.balance(&keeper), 0, "the keeper must not receive fees");
     }
 }

@@ -248,7 +248,9 @@ impl DataStore {
         env.storage()
             .persistent()
             .extend_ttl(&dk, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
-        env.storage().instance().set(&DataKey::InstanceU128(key), &value);
+        env.storage()
+            .instance()
+            .set(&DataKey::InstanceU128(key), &value);
         value
     }
 
@@ -539,14 +541,14 @@ impl DataStore {
             .unwrap_or(Vec::new(&env));
         if !vec_contains_b32(&set, &value) {
             set.push_back(value);
-            env.storage()
-                .persistent()
-                .set(&data_key, &set);
+            env.storage().persistent().set(&data_key, &set);
         }
         // Extend TTL on the set entry to keep enumeration index alive alongside primary keys
-        env.storage()
-            .persistent()
-            .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        env.storage().persistent().extend_ttl(
+            &data_key,
+            MIN_BUMP_THRESHOLD,
+            PERSISTENT_BUMP_TARGET,
+        );
     }
 
     pub fn remove_bytes32_from_set(
@@ -564,13 +566,13 @@ impl DataStore {
             .get(&data_key)
             .unwrap_or(Vec::new(&env));
         vec_remove_b32(&mut set, &value);
-        env.storage()
-            .persistent()
-            .set(&data_key, &set);
+        env.storage().persistent().set(&data_key, &set);
         // Extend TTL on the set entry to keep enumeration index alive alongside primary keys
-        env.storage()
-            .persistent()
-            .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+        env.storage().persistent().extend_ttl(
+            &data_key,
+            MIN_BUMP_THRESHOLD,
+            PERSISTENT_BUMP_TARGET,
+        );
     }
 
     pub fn get_bytes32_set_count(env: Env, set_key: BytesN<32>) -> u32 {
@@ -583,9 +585,11 @@ impl DataStore {
         // extend_ttl on an absent key traps (MissingValue), so only bump sets
         // that actually exist — an empty/never-written set must read as empty.
         if env.storage().persistent().has(&data_key) {
-            env.storage()
-                .persistent()
-                .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+            env.storage().persistent().extend_ttl(
+                &data_key,
+                MIN_BUMP_THRESHOLD,
+                PERSISTENT_BUMP_TARGET,
+            );
         }
         set.len()
     }
@@ -603,9 +607,11 @@ impl DataStore {
             .get(&data_key)
             .unwrap_or(Vec::new(&env));
         if env.storage().persistent().has(&data_key) {
-            env.storage()
-                .persistent()
-                .extend_ttl(&data_key, MIN_BUMP_THRESHOLD, PERSISTENT_BUMP_TARGET);
+            env.storage().persistent().extend_ttl(
+                &data_key,
+                MIN_BUMP_THRESHOLD,
+                PERSISTENT_BUMP_TARGET,
+            );
         }
         paginate_b32(&env, &set, start, end)
     }
@@ -701,7 +707,10 @@ impl DataStore {
         if threshold == 0 {
             return false;
         }
-        let slash = Self::get_u128(env.clone(), gmx_keys::keeper_slash_amount_key(&env, &keeper));
+        let slash = Self::get_u128(
+            env.clone(),
+            gmx_keys::keeper_slash_amount_key(&env, &keeper),
+        );
         slash >= threshold
     }
 
@@ -719,7 +728,12 @@ impl DataStore {
     /// Set a position manager for a given owner and market.
     /// Only the owner can call this. Returns the manager that was set.
     /// Revoke with remove_position_manager.
-    pub fn set_position_manager(env: Env, owner: Address, market: Address, manager: Address) -> Address {
+    pub fn set_position_manager(
+        env: Env,
+        owner: Address,
+        market: Address,
+        manager: Address,
+    ) -> Address {
         owner.require_auth();
         // Note: We don't check for CONTROLLER role here because the owner can revoke their own manager.
         // Setting a manager is an authorization, not a state modification done by the protocol.
@@ -743,7 +757,8 @@ impl DataStore {
         let key = DataKey::Addr(position_manager_key(&env, &owner, &market));
         let existed = env.storage().persistent().has(&key);
         env.storage().persistent().remove(&key);
-        env.events().publish_event(&PositionManagerRemoved { owner, market });
+        env.events()
+            .publish_event(&PositionManagerRemoved { owner, market });
         existed
     }
 
@@ -760,7 +775,12 @@ impl DataStore {
     /// Set the liquidation execution fee for a given market (admin-only). Capped at
     /// MAX_LIQUIDATION_EXECUTION_FEE so a fat-fingered/misused value can't seize a
     /// liquidated position's entire collateral as keeper fee (issue #633).
-    pub fn set_liquidation_execution_fee(env: Env, caller: Address, market: Address, fee: u128) -> u128 {
+    pub fn set_liquidation_execution_fee(
+        env: Env,
+        caller: Address,
+        market: Address,
+        fee: u128,
+    ) -> u128 {
         caller.require_auth();
         require_controller(&env, &caller);
         if fee > MAX_LIQUIDATION_EXECUTION_FEE {
@@ -1441,7 +1461,11 @@ mod tests {
         client.set_u128(&admin, &key, &999u128);
         assert_eq!(client.get_u128(&key), 999);
         client.remove_u128(&admin, &key);
-        assert_eq!(client.get_u128(&key), 0, "get_u128 must return 0 after remove_u128");
+        assert_eq!(
+            client.get_u128(&key),
+            0,
+            "get_u128 must return 0 after remove_u128"
+        );
     }
 
     /// remove_u128 must reject a caller that does not hold CONTROLLER.

@@ -19,11 +19,7 @@ use oracle::{Oracle, OracleClient as OClient};
 use order_handler::{CreateOrderParams, OrderHandler, OrderHandlerClient};
 use order_vault::{OrderVault, OrderVaultClient as OVClient};
 use role_store::{RoleStore, RoleStoreClient as RsClient};
-use soroban_sdk::{
-    testutils::Address as _,
-    token::StellarAssetClient,
-    Address, Env, Vec,
-};
+use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env, Vec};
 
 #[allow(dead_code)]
 struct World {
@@ -74,18 +70,34 @@ fn setup() -> World {
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
     let dep_handler = env.register(DepositHandler, ());
-    DepositHandlerClient::new(&env, &dep_handler)
-        .initialize(&admin, &rs, &ds, &oracle_addr, &dep_vault);
+    DepositHandlerClient::new(&env, &dep_handler).initialize(
+        &admin,
+        &rs,
+        &ds,
+        &oracle_addr,
+        &dep_vault,
+    );
     rs_c.grant_role(&admin, &dep_handler, &roles::controller(&env));
 
     let ord_handler = env.register(OrderHandler, ());
-    OrderHandlerClient::new(&env, &ord_handler)
-        .initialize(&admin, &rs, &ds, &oracle_addr, &ord_vault);
+    OrderHandlerClient::new(&env, &ord_handler).initialize(
+        &admin,
+        &rs,
+        &ds,
+        &oracle_addr,
+        &ord_vault,
+    );
     rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
 
-    let weth = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let usdc = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let wbtc = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let weth = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let usdc = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let wbtc = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
 
     // Market 1: WETH/USDC — long=WETH, short=USDC
     let market1_tk = env.register(MarketToken, ());
@@ -101,9 +113,21 @@ fn setup() -> World {
     rs_c.grant_role(&admin, &market1_tk, &roles::controller(&env));
 
     let ds_c = DsClient::new(&env, &ds);
-    ds_c.set_address(&admin, &gmx_keys::market_index_token_key(&env, &market1_tk), &weth);
-    ds_c.set_address(&admin, &gmx_keys::market_long_token_key(&env, &market1_tk), &weth);
-    ds_c.set_address(&admin, &gmx_keys::market_short_token_key(&env, &market1_tk), &usdc);
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_index_token_key(&env, &market1_tk),
+        &weth,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_long_token_key(&env, &market1_tk),
+        &weth,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_short_token_key(&env, &market1_tk),
+        &usdc,
+    );
 
     // Market 2: WBTC/USDC — long=WBTC, short=USDC
     let market2_tk = env.register(MarketToken, ());
@@ -118,9 +142,21 @@ fn setup() -> World {
     );
     rs_c.grant_role(&admin, &market2_tk, &roles::controller(&env));
 
-    ds_c.set_address(&admin, &gmx_keys::market_index_token_key(&env, &market2_tk), &wbtc);
-    ds_c.set_address(&admin, &gmx_keys::market_long_token_key(&env, &market2_tk), &wbtc);
-    ds_c.set_address(&admin, &gmx_keys::market_short_token_key(&env, &market2_tk), &usdc);
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_index_token_key(&env, &market2_tk),
+        &wbtc,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_long_token_key(&env, &market2_tk),
+        &wbtc,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_short_token_key(&env, &market2_tk),
+        &usdc,
+    );
 
     World {
         env,
@@ -148,9 +184,21 @@ fn set_prices(w: &World) {
         &Vec::from_array(
             &w.env,
             [
-                TokenPrice { token: w.weth.clone(), min: 2000 * FLOAT_PRECISION, max: 2000 * FLOAT_PRECISION },
-                TokenPrice { token: w.usdc.clone(), min: FLOAT_PRECISION, max: FLOAT_PRECISION },
-                TokenPrice { token: w.wbtc.clone(), min: 30000 * FLOAT_PRECISION, max: 30000 * FLOAT_PRECISION },
+                TokenPrice {
+                    token: w.weth.clone(),
+                    min: 2000 * FLOAT_PRECISION,
+                    max: 2000 * FLOAT_PRECISION,
+                },
+                TokenPrice {
+                    token: w.usdc.clone(),
+                    min: FLOAT_PRECISION,
+                    max: FLOAT_PRECISION,
+                },
+                TokenPrice {
+                    token: w.wbtc.clone(),
+                    min: 30000 * FLOAT_PRECISION,
+                    max: 30000 * FLOAT_PRECISION,
+                },
             ],
         ),
     );
@@ -212,10 +260,16 @@ fn two_hop_swap_weth_to_wbtc() {
     let collateral = 10 * TOKEN_PRECISION; // 10 WETH ≈ $20,000
     StellarAssetClient::new(&w.env, &w.weth).mint(&w.ord_vault, &collateral);
 
-    let weth_pool_before = DsClient::new(&w.env, &w.ds)
-        .get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market1_tk, &w.weth));
-    let wbtc_pool_before = DsClient::new(&w.env, &w.ds)
-        .get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market2_tk, &w.wbtc));
+    let weth_pool_before = DsClient::new(&w.env, &w.ds).get_u128(&gmx_keys::pool_amount_key(
+        &w.env,
+        &w.market1_tk,
+        &w.weth,
+    ));
+    let wbtc_pool_before = DsClient::new(&w.env, &w.ds).get_u128(&gmx_keys::pool_amount_key(
+        &w.env,
+        &w.market2_tk,
+        &w.wbtc,
+    ));
 
     let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
     let key = hc.create_order(
@@ -243,26 +297,38 @@ fn two_hop_swap_weth_to_wbtc() {
 
     // User receives WBTC
     let wbtc_received = soroban_sdk::token::Client::new(&w.env, &w.wbtc).balance(&w.user);
-    assert!(wbtc_received > 0, "user should receive WBTC after two-hop swap");
+    assert!(
+        wbtc_received > 0,
+        "user should receive WBTC after two-hop swap"
+    );
 
     // market1 WETH pool grew (WETH went in)
-    let weth_pool_after = DsClient::new(&w.env, &w.ds)
-        .get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market1_tk, &w.weth));
+    let weth_pool_after = DsClient::new(&w.env, &w.ds).get_u128(&gmx_keys::pool_amount_key(
+        &w.env,
+        &w.market1_tk,
+        &w.weth,
+    ));
     assert!(
         weth_pool_after > weth_pool_before,
         "market1 WETH pool must increase after receiving WETH input"
     );
 
     // market2 WBTC pool shrank (WBTC went out)
-    let wbtc_pool_after = DsClient::new(&w.env, &w.ds)
-        .get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market2_tk, &w.wbtc));
+    let wbtc_pool_after = DsClient::new(&w.env, &w.ds).get_u128(&gmx_keys::pool_amount_key(
+        &w.env,
+        &w.market2_tk,
+        &w.wbtc,
+    ));
     assert!(
         wbtc_pool_after < wbtc_pool_before,
         "market2 WBTC pool must decrease after sending WBTC output"
     );
 
     // Order is removed after execution
-    assert!(hc.get_order(&key).is_none(), "order must be removed after execution");
+    assert!(
+        hc.get_order(&key).is_none(),
+        "order must be removed after execution"
+    );
 }
 
 /// min_output_amount guard: if swap output < min_output_amount, execution reverts.
@@ -373,5 +439,8 @@ fn single_hop_swap_weth_to_usdc() {
     hc.execute_order(&w.keeper, &key);
 
     let usdc_received = soroban_sdk::token::Client::new(&w.env, &w.usdc).balance(&w.user);
-    assert!(usdc_received > 0, "user should receive USDC after single-hop swap");
+    assert!(
+        usdc_received > 0,
+        "user should receive USDC after single-hop swap"
+    );
 }

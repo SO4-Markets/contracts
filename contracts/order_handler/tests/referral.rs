@@ -24,11 +24,7 @@ use order_handler::{CreateOrderParams, OrderHandler, OrderHandlerClient};
 use order_vault::{OrderVault, OrderVaultClient as OVClient};
 use referral_storage::{ReferralStorage, ReferralStorageClient, TierConfig};
 use role_store::{RoleStore, RoleStoreClient as RsClient};
-use soroban_sdk::{
-    testutils::Address as _,
-    token::StellarAssetClient,
-    Address, Bytes, Env, Vec,
-};
+use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Bytes, Env, Vec};
 
 #[allow(dead_code)]
 struct World {
@@ -70,8 +66,12 @@ fn setup() -> World {
     let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
     OClient::new(&env, &oracle_addr).initialize(&admin, &rs, &ds, &passphrase);
 
-    let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let long_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let short_tk = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
 
     let market_tk = env.register(MarketToken, ());
     MtClient::new(&env, &market_tk).initialize(
@@ -92,13 +92,23 @@ fn setup() -> World {
     OVClient::new(&env, &ord_vault).initialize(&admin, &rs);
 
     let dep_handler = env.register(DepositHandler, ());
-    DepositHandlerClient::new(&env, &dep_handler)
-        .initialize(&admin, &rs, &ds, &oracle_addr, &dep_vault);
+    DepositHandlerClient::new(&env, &dep_handler).initialize(
+        &admin,
+        &rs,
+        &ds,
+        &oracle_addr,
+        &dep_vault,
+    );
     rs_c.grant_role(&admin, &dep_handler, &roles::controller(&env));
 
     let ord_handler = env.register(OrderHandler, ());
-    OrderHandlerClient::new(&env, &ord_handler)
-        .initialize(&admin, &rs, &ds, &oracle_addr, &ord_vault);
+    OrderHandlerClient::new(&env, &ord_handler).initialize(
+        &admin,
+        &rs,
+        &ds,
+        &oracle_addr,
+        &ord_vault,
+    );
     rs_c.grant_role(&admin, &ord_handler, &roles::controller(&env));
 
     // Referral storage
@@ -113,9 +123,21 @@ fn setup() -> World {
     let index_tk = Address::generate(&env);
 
     let ds_c = DsClient::new(&env, &ds);
-    ds_c.set_address(&admin, &gmx_keys::market_index_token_key(&env, &market_tk), &index_tk);
-    ds_c.set_address(&admin, &gmx_keys::market_long_token_key(&env, &market_tk), &long_tk);
-    ds_c.set_address(&admin, &gmx_keys::market_short_token_key(&env, &market_tk), &short_tk);
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_index_token_key(&env, &market_tk),
+        &index_tk,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_long_token_key(&env, &market_tk),
+        &long_tk,
+    );
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_short_token_key(&env, &market_tk),
+        &short_tk,
+    );
 
     World {
         env,
@@ -141,9 +163,21 @@ fn set_prices(w: &World, index_usd: i128) {
         &Vec::from_array(
             &w.env,
             [
-                TokenPrice { token: w.long_tk.clone(), min: index_usd, max: index_usd },
-                TokenPrice { token: w.short_tk.clone(), min: FLOAT_PRECISION, max: FLOAT_PRECISION },
-                TokenPrice { token: w.index_tk.clone(), min: index_usd, max: index_usd },
+                TokenPrice {
+                    token: w.long_tk.clone(),
+                    min: index_usd,
+                    max: index_usd,
+                },
+                TokenPrice {
+                    token: w.short_tk.clone(),
+                    min: FLOAT_PRECISION,
+                    max: FLOAT_PRECISION,
+                },
+                TokenPrice {
+                    token: w.index_tk.clone(),
+                    min: index_usd,
+                    max: index_usd,
+                },
             ],
         ),
     );
@@ -192,7 +226,10 @@ fn discount_bps_computed_correctly_for_linked_trader() {
     ref_c.set_tier_config(
         &w.admin,
         &1u32,
-        &TierConfig { total_rebate_bps: 2_000, discount_share_bps: 5_000 },
+        &TierConfig {
+            total_rebate_bps: 2_000,
+            discount_share_bps: 5_000,
+        },
     );
 
     // Set Alice to tier 1
@@ -285,8 +322,7 @@ fn execute_order_increments_referrer_volume() {
     // Alice's volume must equal the position's size_delta_usd
     let alice_volume = ref_c.get_referrer_cumulative_volume(&alice);
     assert_eq!(
-        alice_volume,
-        size_delta_usd as u128,
+        alice_volume, size_delta_usd as u128,
         "Alice's cumulative volume must equal the position's size_delta_usd"
     );
 }
@@ -459,7 +495,14 @@ fn auto_tier_upgrade_via_execute_order_volume() {
 
     // Tier 1 upgrade threshold: 1_000 * FP (1000 USD)
     ref_c.set_tier_upgrade_threshold(&w.admin, &1u32, &(1_000 * fp as u128));
-    ref_c.set_tier_config(&w.admin, &1u32, &TierConfig { total_rebate_bps: 500, discount_share_bps: 5_000 });
+    ref_c.set_tier_config(
+        &w.admin,
+        &1u32,
+        &TierConfig {
+            total_rebate_bps: 500,
+            discount_share_bps: 5_000,
+        },
+    );
 
     set_prices(&w, price);
     seed_pool(&w);

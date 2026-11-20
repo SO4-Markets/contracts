@@ -7,14 +7,15 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use gmx_keys::{
-    borrowing_exponent_factor_key, borrowing_factor_key, cumulative_borrowing_factor_key,
-    cumulative_borrowing_factor_updated_at_key, funding_amount_per_size_key,
-    funding_decrease_factor_per_second_key, funding_exponent_factor_key, funding_factor_key,
-    funding_increase_factor_per_second_key, funding_updated_at_key,
-    max_funding_factor_per_second_key, max_open_interest_key, max_pnl_factor_for_adl_key,
-    max_pool_amount_key, min_funding_factor_per_second_key, open_interest_in_tokens_key,
-    open_interest_key, pool_amount_key, position_impact_pool_amount_key,
-    saved_funding_factor_per_second_key, swap_impact_pool_amount_key,
+    borrowing_exponent_factor_key, borrowing_factor_key, claimable_fee_amount_key,
+    cumulative_borrowing_factor_key, cumulative_borrowing_factor_updated_at_key,
+    funding_amount_per_size_key, funding_decrease_factor_per_second_key,
+    funding_exponent_factor_key, funding_factor_key, funding_increase_factor_per_second_key,
+    funding_updated_at_key, max_funding_factor_per_second_key, max_open_interest_key,
+    max_pnl_factor_for_adl_key, max_pool_amount_key, min_funding_factor_per_second_key,
+    open_interest_in_tokens_key, open_interest_key, pool_amount_key,
+    position_impact_pool_amount_key, saved_funding_factor_per_second_key,
+    swap_impact_pool_amount_key, total_claimable_fee_amount_key,
 };
 use gmx_math::{mul_div_wide, pow_factor, FLOAT_PRECISION, TOKEN_PRECISION};
 use gmx_types::{MarketProps, PoolValueInfo, PriceProps};
@@ -64,6 +65,28 @@ pub fn apply_delta_to_pool_amount(
 ) -> u128 {
     let key = pool_amount_key(env, &market.market_token, token);
     DataStoreClient::new(env, ds).apply_delta_to_u128(caller, &key, &delta)
+}
+
+/// Accrue (`delta > 0`) or release (`delta < 0`) protocol fees for
+/// `(market_token, token)`. The per-market ledger and the global
+/// `total_claimable_fee_amount(token)` move together in the same call, so the
+/// global total always equals the sum of the per-market ledgers. This is the
+/// single implementation every fee accrual path uses.
+pub fn apply_delta_to_claimable_fee_amount(
+    env: &Env,
+    ds: &Address,
+    caller: &Address,
+    market_token: &Address,
+    token: &Address,
+    delta: i128,
+) -> u128 {
+    let ds_c = DataStoreClient::new(env, ds);
+    ds_c.apply_delta_to_u128(caller, &total_claimable_fee_amount_key(env, token), &delta);
+    ds_c.apply_delta_to_u128(
+        caller,
+        &claimable_fee_amount_key(env, market_token, token),
+        &delta,
+    )
 }
 
 pub fn get_swap_impact_pool_amount(
@@ -213,9 +236,11 @@ pub fn is_adl_required(
     index_price: &PriceProps,
     is_long: bool,
 ) -> bool {
-    let max_pnl_factor = DataStoreClient::new(env, ds)
-        .get_u128(&max_pnl_factor_for_adl_key(env, &market.market_token, is_long))
-        as i128;
+    let max_pnl_factor = DataStoreClient::new(env, ds).get_u128(&max_pnl_factor_for_adl_key(
+        env,
+        &market.market_token,
+        is_long,
+    )) as i128;
     if max_pnl_factor == 0 {
         return false;
     }
@@ -371,12 +396,8 @@ pub fn update_funding_state(
     for is_long in [true, false] {
         let delta = if is_long { long_delta } else { short_delta };
         for collateral_token in [&market.long_token, &market.short_token] {
-            let fnd_key = funding_amount_per_size_key(
-                env,
-                &market.market_token,
-                collateral_token,
-                is_long,
-            );
+            let fnd_key =
+                funding_amount_per_size_key(env, &market.market_token, collateral_token, is_long);
             ds_client.apply_delta_to_i128(caller, &fnd_key, &delta);
         }
     }
@@ -393,12 +414,12 @@ pub fn update_funding_state(
             (soroban_sdk::symbol_short!("fnd_flip"),),
             (
                 market.market_token.clone(),
-                next_factor > 0i128,                       // is_long_paying
-                current_factor.saturating_mul(3600i128),   // old_rate_per_hour (FLOAT_PRECISION)
-                next_factor.saturating_mul(3600i128),      // new_rate_per_hour (FLOAT_PRECISION)
-                long_oi as u128,                           // long_oi_usd
-                short_oi as u128,                          // short_oi_usd
-                env.ledger().sequence() as u64,            // ledger
+                next_factor > 0i128,                     // is_long_paying
+                current_factor.saturating_mul(3600i128), // old_rate_per_hour (FLOAT_PRECISION)
+                next_factor.saturating_mul(3600i128),    // new_rate_per_hour (FLOAT_PRECISION)
+                long_oi as u128,                         // long_oi_usd
+                short_oi as u128,                        // short_oi_usd
+                env.ledger().sequence() as u64,          // ledger
             ),
         );
     }
@@ -515,19 +536,19 @@ pub fn get_pool_value(
     ];
     let batch = DataStoreClient::new(env, ds).get_u128_batch(&keys);
 
-    let long_pool          = batch.get(0).unwrap_or(0) as i128;
-    let short_pool         = batch.get(1).unwrap_or(0) as i128;
+    let long_pool = batch.get(0).unwrap_or(0) as i128;
+    let short_pool = batch.get(1).unwrap_or(0) as i128;
     let impact_pool_tokens = batch.get(2).unwrap_or(0) as i128;
 
     // open interest in USD
-    let oi_long_lt  = batch.get(3).unwrap_or(0) as i128;
-    let oi_long_st  = batch.get(4).unwrap_or(0) as i128;
+    let oi_long_lt = batch.get(3).unwrap_or(0) as i128;
+    let oi_long_st = batch.get(4).unwrap_or(0) as i128;
     let oi_short_lt = batch.get(5).unwrap_or(0) as i128;
     let oi_short_st = batch.get(6).unwrap_or(0) as i128;
 
     // open interest in tokens
-    let oit_long_lt  = batch.get(7).unwrap_or(0) as i128;
-    let oit_long_st  = batch.get(8).unwrap_or(0) as i128;
+    let oit_long_lt = batch.get(7).unwrap_or(0) as i128;
+    let oit_long_st = batch.get(8).unwrap_or(0) as i128;
     let oit_short_lt = batch.get(9).unwrap_or(0) as i128;
     let oit_short_st = batch.get(10).unwrap_or(0) as i128;
 
@@ -541,13 +562,18 @@ pub fn get_pool_value(
     let short_pnl_price = index_token_price.pick_price_for_pnl(false, !maximize);
 
     // USD value of pool tokens
-    let long_usd       = mul_div_wide(env, long_pool, long_price, TOKEN_PRECISION);
-    let short_usd      = mul_div_wide(env, short_pool, short_price, TOKEN_PRECISION);
-    let impact_pool_usd = mul_div_wide(env, impact_pool_tokens, index_price_for_assets, TOKEN_PRECISION);
+    let long_usd = mul_div_wide(env, long_pool, long_price, TOKEN_PRECISION);
+    let short_usd = mul_div_wide(env, short_pool, short_price, TOKEN_PRECISION);
+    let impact_pool_usd = mul_div_wide(
+        env,
+        impact_pool_tokens,
+        index_price_for_assets,
+        TOKEN_PRECISION,
+    );
 
     // Inline PnL calculation for longs
     let long_pnl = {
-        let oi_usd    = oi_long_lt + oi_long_st;
+        let oi_usd = oi_long_lt + oi_long_st;
         let oi_tokens = oit_long_lt + oit_long_st;
         if oi_tokens == 0 {
             0
@@ -559,7 +585,7 @@ pub fn get_pool_value(
 
     // Inline PnL calculation for shorts
     let short_pnl = {
-        let oi_usd    = oi_short_lt + oi_short_st;
+        let oi_usd = oi_short_lt + oi_short_st;
         let oi_tokens = oit_short_lt + oit_short_st;
         if oi_tokens == 0 {
             0
@@ -770,7 +796,10 @@ mod tests {
         env.mock_all_auths();
         let (_admin, ds, mt, it, lt, st) = make_market(&env);
         let market = make_market_props(&mt, &it, &lt, &st);
-        let price = PriceProps { min: FLOAT_PRECISION, max: FLOAT_PRECISION };
+        let price = PriceProps {
+            min: FLOAT_PRECISION,
+            max: FLOAT_PRECISION,
+        };
         let info = get_pool_value(&env, &ds, &market, &price, &price, &price, true);
         assert_eq!(info.pool_value, 0);
         assert_eq!(info.net_pnl, 0);
@@ -786,18 +815,56 @@ mod tests {
         let fp = FLOAT_PRECISION;
 
         // Pool: 5 long tokens @ spread, 4000 short stable
-        ds_c.apply_delta_to_u128(&admin, &gmx_keys::pool_amount_key(&env, &mt, &lt), &(5 * 10_000_000));
-        ds_c.apply_delta_to_u128(&admin, &gmx_keys::pool_amount_key(&env, &mt, &st), &(4_000 * 10_000_000));
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::pool_amount_key(&env, &mt, &lt),
+            &(5 * 10_000_000),
+        );
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::pool_amount_key(&env, &mt, &st),
+            &(4_000 * 10_000_000),
+        );
         // Open interest: 5 long tokens opened at $2000, current size $10_000*FP
-        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &lt, true), &(10_000 * fp));
-        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_in_tokens_key(&env, &mt, &lt, true), &(5 * 10_000_000));
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::open_interest_key(&env, &mt, &lt, true),
+            &(10_000 * fp),
+        );
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::open_interest_in_tokens_key(&env, &mt, &lt, true),
+            &(5 * 10_000_000),
+        );
         // Price spread: long $1800 .. $2200, short $1 stable, index $1800 .. $2200
-        let long_price = PriceProps { min: 1_800 * fp, max: 2_200 * fp };
+        let long_price = PriceProps {
+            min: 1_800 * fp,
+            max: 2_200 * fp,
+        };
         let short_price = PriceProps { min: fp, max: fp };
-        let index_price = PriceProps { min: 1_800 * fp, max: 2_200 * fp };
+        let index_price = PriceProps {
+            min: 1_800 * fp,
+            max: 2_200 * fp,
+        };
 
-        let info_min = get_pool_value(&env, &ds, &market, &long_price, &short_price, &index_price, false);
-        let info_max = get_pool_value(&env, &ds, &market, &long_price, &short_price, &index_price, true);
+        let info_min = get_pool_value(
+            &env,
+            &ds,
+            &market,
+            &long_price,
+            &short_price,
+            &index_price,
+            false,
+        );
+        let info_max = get_pool_value(
+            &env,
+            &ds,
+            &market,
+            &long_price,
+            &short_price,
+            &index_price,
+            true,
+        );
 
         assert_ne!(
             info_min.pool_value, info_max.pool_value,
@@ -808,7 +875,8 @@ mod tests {
         assert!(
             info_max.pool_value > info_min.pool_value,
             "max pool value must exceed min: max={}, min={}",
-            info_max.pool_value, info_min.pool_value
+            info_max.pool_value,
+            info_min.pool_value
         );
     }
 
@@ -1046,9 +1114,15 @@ mod tests {
             &short_pool,
         );
 
-        let long_price = PriceProps { min: 2_000_i128 * fp, max: 2_000_i128 * fp }; // $2 000
+        let long_price = PriceProps {
+            min: 2_000_i128 * fp,
+            max: 2_000_i128 * fp,
+        }; // $2 000
         let short_price = PriceProps { min: fp, max: fp }; // $1 (stablecoin)
-        let index_price = PriceProps { min: 2_000_i128 * fp, max: 2_000_i128 * fp };
+        let index_price = PriceProps {
+            min: 2_000_i128 * fp,
+            max: 2_000_i128 * fp,
+        };
 
         let info = get_pool_value(
             &env,
@@ -1132,19 +1206,39 @@ mod tests {
         let ds_c = DsClient::new(env, ds);
         let fp = FLOAT_PRECISION as u128;
         // saved_factor and last-updated timestamp are in persistent storage
-        ds_c.set_i128(admin, &gmx_keys::saved_funding_factor_per_second_key(env, mt), &saved_factor);
+        ds_c.set_i128(
+            admin,
+            &gmx_keys::saved_funding_factor_per_second_key(env, mt),
+            &saved_factor,
+        );
         ds_c.set_u128(admin, &gmx_keys::funding_updated_at_key(env, mt), &0u128);
         // Config params are in instance storage (read via get_u128_instance / get_i128_instance)
         ds_c.set_u128_instance(admin, &gmx_keys::funding_factor_key(env, mt), &fp);
         ds_c.set_u128_instance(admin, &gmx_keys::funding_exponent_factor_key(env, mt), &fp);
         // Ramp = 1000 × FLOAT_PRECISION per second → a single-second step can cross zero
         let ramp: u128 = 1_000u128 * fp;
-        ds_c.set_u128_instance(admin, &gmx_keys::funding_increase_factor_per_second_key(env, mt), &ramp);
-        ds_c.set_u128_instance(admin, &gmx_keys::funding_decrease_factor_per_second_key(env, mt), &ramp);
+        ds_c.set_u128_instance(
+            admin,
+            &gmx_keys::funding_increase_factor_per_second_key(env, mt),
+            &ramp,
+        );
+        ds_c.set_u128_instance(
+            admin,
+            &gmx_keys::funding_decrease_factor_per_second_key(env, mt),
+            &ramp,
+        );
         // Wide clamp so clamping never interferes with sign crossing
         let bound: i128 = 1_000_000i128 * FLOAT_PRECISION;
-        ds_c.set_i128_instance(admin, &gmx_keys::min_funding_factor_per_second_key(env, mt), &(-bound));
-        ds_c.set_i128_instance(admin, &gmx_keys::max_funding_factor_per_second_key(env, mt), &bound);
+        ds_c.set_i128_instance(
+            admin,
+            &gmx_keys::min_funding_factor_per_second_key(env, mt),
+            &(-bound),
+        );
+        ds_c.set_i128_instance(
+            admin,
+            &gmx_keys::max_funding_factor_per_second_key(env, mt),
+            &bound,
+        );
     }
 
     /// Shift from long-dominated to short-dominated OI.
@@ -1241,8 +1335,16 @@ mod tests {
         // negative since short dominates. Seed saved_factor at exactly that value.
         setup_funding_params(&env, &ds, &admin, &mt, -6 * FLOAT_PRECISION / 10);
 
-        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &lt, true), &(2_000_000 * FLOAT_PRECISION));
-        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &st, false), &(8_000_000 * FLOAT_PRECISION));
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::open_interest_key(&env, &mt, &lt, true),
+            &(2_000_000 * FLOAT_PRECISION),
+        );
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::open_interest_key(&env, &mt, &st, false),
+            &(8_000_000 * FLOAT_PRECISION),
+        );
 
         let market = make_market_props(&mt, &it, &lt, &st);
         let result = update_funding_state(&env, &ds, &admin, &market, 100);
@@ -1277,8 +1379,16 @@ mod tests {
         // $8M long vs $2M short OI → same 0.6 ratio, positive since long dominates.
         setup_funding_params(&env, &ds, &admin, &mt, 6 * FLOAT_PRECISION / 10);
 
-        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &lt, true), &(8_000_000 * FLOAT_PRECISION));
-        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &st, false), &(2_000_000 * FLOAT_PRECISION));
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::open_interest_key(&env, &mt, &lt, true),
+            &(8_000_000 * FLOAT_PRECISION),
+        );
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::open_interest_key(&env, &mt, &st, false),
+            &(2_000_000 * FLOAT_PRECISION),
+        );
 
         let market = make_market_props(&mt, &it, &lt, &st);
         let result = update_funding_state(&env, &ds, &admin, &market, 100);
@@ -1314,8 +1424,16 @@ mod tests {
 
         let long_oi: i128 = 3_000_000 * FLOAT_PRECISION;
         let short_oi: i128 = 7_000_000 * FLOAT_PRECISION;
-        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &lt, true), &long_oi);
-        ds_c.apply_delta_to_u128(&admin, &gmx_keys::open_interest_key(&env, &mt, &st, false), &short_oi);
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::open_interest_key(&env, &mt, &lt, true),
+            &long_oi,
+        );
+        ds_c.apply_delta_to_u128(
+            &admin,
+            &gmx_keys::open_interest_key(&env, &mt, &st, false),
+            &short_oi,
+        );
 
         let market = make_market_props(&mt, &it, &lt, &st);
         let result = update_funding_state(&env, &ds, &admin, &market, 100);
@@ -1326,8 +1444,18 @@ mod tests {
         assert!(result.short_funding_per_size_delta != 0);
 
         // Aggregate each side's per-size delta back to a USD amount over its full OI.
-        let long_usd = mul_div_wide(&env, long_oi, result.long_funding_per_size_delta, FLOAT_PRECISION);
-        let short_usd = mul_div_wide(&env, short_oi, result.short_funding_per_size_delta, FLOAT_PRECISION);
+        let long_usd = mul_div_wide(
+            &env,
+            long_oi,
+            result.long_funding_per_size_delta,
+            FLOAT_PRECISION,
+        );
+        let short_usd = mul_div_wide(
+            &env,
+            short_oi,
+            result.short_funding_per_size_delta,
+            FLOAT_PRECISION,
+        );
         let net = long_usd + short_usd;
 
         // Each side's per-size delta is floor-rounded independently, so re-aggregating
@@ -1370,11 +1498,11 @@ mod tests {
     #[test]
     fn test_borrowing_extreme_no_panic() {
         let env = Env::default();
-        let bf   = i128::MAX / 2;
+        let bf = i128::MAX / 2;
         let util = FLOAT_PRECISION;
-        let dt   = 100_000i128;
+        let dt = 100_000i128;
 
         let delta_per_sec = mul_div_wide(&env, bf, util, FLOAT_PRECISION);
-        let _delta        = mul_div_wide(&env, delta_per_sec, dt, FLOAT_PRECISION);
+        let _delta = mul_div_wide(&env, delta_per_sec, dt, FLOAT_PRECISION);
     }
 }

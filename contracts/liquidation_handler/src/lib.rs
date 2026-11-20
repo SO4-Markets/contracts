@@ -19,8 +19,8 @@ use gmx_keys::{
 use gmx_position_utils::is_liquidatable;
 use gmx_types::{MarketProps, PositionProps, PriceProps};
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    BytesN, Env,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
+    symbol_short, Address, BytesN, Env,
 };
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
@@ -229,14 +229,14 @@ impl LiquidationHandler {
             }
         }
         let old_oracle: Address = env.storage().instance().get(&InstanceKey::Oracle).unwrap();
-        env.storage().instance().set(&InstanceKey::Oracle, &new_oracle);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Oracle, &new_oracle);
         // Issue #605: the oracle address every subsequent price validation
         // relies on just changed — emit an event so off-chain monitoring has
         // an audit trail for this admin action.
-        env.events().publish(
-            (symbol_short!("orcl_set"),),
-            (old_oracle, new_oracle),
-        );
+        env.events()
+            .publish((symbol_short!("orcl_set"),), (old_oracle, new_oracle));
     }
 
     /// Check if a position is currently liquidatable.
@@ -265,8 +265,8 @@ impl LiquidationHandler {
 
         let market_props = load_market_props(&env, &data_store, &market);
         let oracle_client = OracleClient::new(&env, &oracle);
-        let index_price = oracle_client
-            .require_price_fresh(&market_props.index_token, &env.ledger().sequence());
+        let index_price =
+            oracle_client.require_price_fresh(&market_props.index_token, &env.ledger().sequence());
         let collateral_price = oracle_client
             .require_price_fresh(&collateral_token, &env.ledger().sequence())
             .mid_price();
@@ -336,8 +336,8 @@ impl LiquidationHandler {
 
         let market_props = load_market_props(&env, &data_store, &market);
         let oracle_client = OracleClient::new(&env, &oracle);
-        let index_price = oracle_client
-            .require_price_fresh(&market_props.index_token, &env.ledger().sequence());
+        let index_price =
+            oracle_client.require_price_fresh(&market_props.index_token, &env.ledger().sequence());
         let collateral_price = oracle_client
             .require_price_fresh(&collateral_token, &env.ledger().sequence())
             .mid_price();
@@ -441,8 +441,8 @@ impl LiquidationHandler {
 
         let market_props = load_market_props(&env, &data_store, &market);
         let oracle_client = OracleClient::new(&env, &oracle);
-        let index_price = oracle_client
-            .require_price_fresh(&market_props.index_token, &env.ledger().sequence());
+        let index_price =
+            oracle_client.require_price_fresh(&market_props.index_token, &env.ledger().sequence());
         let collateral_price = oracle_client
             .require_price_fresh(&collateral_token, &env.ledger().sequence())
             .mid_price();
@@ -564,11 +564,7 @@ mod tests {
     use order_handler::{OrderHandler, OrderHandlerClient as OHClient};
     use order_vault::{OrderVault, OrderVaultClient as OVClient};
     use role_store::{RoleStore, RoleStoreClient as RsClient};
-    use soroban_sdk::{
-        testutils::Address as _,
-        token::StellarAssetClient,
-        BytesN, Env,
-    };
+    use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, BytesN, Env};
 
     const ONE_TOKEN: i128 = 10_000_000; // 10^7 (Stellar 7-decimal precision)
 
@@ -899,7 +895,11 @@ mod tests {
 
         let ds_c = DsClient::new(&w.env, &w.ds);
         let key = last_keeper_activity_key(&w.env, &roles::liquidation_keeper(&w.env));
-        assert_eq!(ds_c.get_u128(&key), 0, "no activity recorded before liquidation");
+        assert_eq!(
+            ds_c.get_u128(&key),
+            0,
+            "no activity recorded before liquidation"
+        );
 
         LiquidationHandlerClient::new(&w.env, &w.liq_handler).liquidate_position(
             &w.liq_keeper,
@@ -979,7 +979,13 @@ mod tests {
         // The opening position fee is taken from the deposit, so the position
         // holds slightly less than `collateral`; that stored amount is the cap.
         let position_collateral = OHClient::new(&w.env, &w.ord_handler)
-            .get_position(&gmx_keys::position_key(&w.env, &w.user, &w.market_tk, &w.long_tk, true))
+            .get_position(&gmx_keys::position_key(
+                &w.env,
+                &w.user,
+                &w.market_tk,
+                &w.long_tk,
+                true,
+            ))
             .expect("position must exist")
             .collateral_amount;
         assert!(position_collateral > 0 && position_collateral <= collateral);

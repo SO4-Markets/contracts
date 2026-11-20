@@ -29,6 +29,7 @@ pub enum Error {
     AlreadyInitialized = 3,
     NotInitialized = 4,
     Unauthorized = 5,
+    BatchLimitExceeded = 6,
 }
 
 #[allow(dead_code)]
@@ -178,7 +179,10 @@ impl OrderCleanup {
         let order = OrderHandlerClient::new(&env, &order_handler).get_order(&key);
         if let Some(order) = order {
             let expiry = expiry_for_order(&env, &data_store, &order.order_type);
-            let age = env.ledger().timestamp().saturating_sub(order.updated_at_time);
+            let age = env
+                .ledger()
+                .timestamp()
+                .saturating_sub(order.updated_at_time);
             ExpiredOrderPreview {
                 exists: true,
                 is_expired: age >= expiry,
@@ -195,6 +199,81 @@ impl OrderCleanup {
                 cleanup_fee: 0,
             }
         }
+    }
+
+    // Issue #980: Permissionless cleanup of expired orders.
+    // Anyone can call this — no auth required. Validates expiry from ledger state.
+    // Collateral returned to owner, never caller. Emits event.
+    pub fn clean_expired_order(
+        env: Env,
+        data_store: Address,
+        order_handler: Address,
+        caller: Address,
+        key: BytesN<32>,
+    ) {
+        let order_client = OrderHandlerClient::new(&env, &order_handler);
+        let order = order_client
+            .get_order(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::OrderNotFound));
+
+        let expiry = expiry_for_order(&env, &data_store, &order.order_type);
+        let now = env.ledger().timestamp();
+        let age = now.saturating_sub(order.updated_at_time);
+        if age < expiry {
+            panic_with_error!(&env, Error::NotYetExpired);
+        }
+
+        let cleanup_fee = cleanup_fee_from_execution_fee(order.execution_fee);
+        order_client.cleanup_expired_order(&caller, &key);
+
+        env.events().publish_event(&ExpiredOrderCancelled {
+            key,
+            account: order.account,
+            caller,
+            age,
+            expiry,
+            cleanup_fee,
+        });
+    }
+
+    // Bounded batch cleanup: up to 100 orders per call.
+    // Returns count of successfully cleaned orders.
+    // Non-expired orders are skipped (not reverted).
+    pub fn clean_expired_orders_batch(
+        env: Env,
+        data_store: Address,
+        order_handler: Address,
+        caller: Address,
+        keys: soroban_sdk::Vec<BytesN<32>>,
+    ) -> u32 {
+        const BATCH_LIMIT: u32 = 100;
+        if keys.len() > BATCH_LIMIT {
+            panic_with_error!(&env, Error::BatchLimitExceeded);
+        }
+
+        let mut cleaned = 0u32;
+        for key in keys.iter() {
+            let order_client = OrderHandlerClient::new(&env, &order_handler);
+            if let Some(order) = order_client.get_order(&key) {
+                let expiry = expiry_for_order(&env, &data_store, &order.order_type);
+                let now = env.ledger().timestamp();
+                let age = now.saturating_sub(order.updated_at_time);
+                if age >= expiry {
+                    let cleanup_fee = cleanup_fee_from_execution_fee(order.execution_fee);
+                    order_client.cleanup_expired_order(&caller, &key);
+                    env.events().publish_event(&ExpiredOrderCancelled {
+                        key,
+                        account: order.account.clone(),
+                        caller: caller.clone(),
+                        age,
+                        expiry,
+                        cleanup_fee,
+                    });
+                    cleaned += 1;
+                }
+            }
+        }
+        cleaned
     }
 }
 
@@ -261,7 +340,8 @@ mod tests {
         assert_eq!(res.unwrap_err().unwrap(), Error::NotYetExpired.into());
 
         env.ledger().set_timestamp(114_400); // 14,400 seconds later
-        let res2 = client.try_cancel_expired_order(&data_store_id, &order_handler_id, &caller, &key);
+        let res2 =
+            client.try_cancel_expired_order(&data_store_id, &order_handler_id, &caller, &key);
         assert!(res2.is_ok());
     }
 
@@ -269,7 +349,9 @@ mod tests {
     struct MockDataStore;
     #[contractimpl]
     impl MockDataStore {
-        pub fn get_u128(_env: Env, _key: BytesN<32>) -> u128 { 0 }
+        pub fn get_u128(_env: Env, _key: BytesN<32>) -> u128 {
+            0
+        }
     }
 
     #[contract]
@@ -308,5 +390,99 @@ mod tests {
     fn order_type_codes_are_stable() {
         assert_eq!(order_type_code(&OrderType::MarketSwap), 0);
         assert_eq!(order_type_code(&OrderType::StopIncrease), 8);
+    }
+
+    #[test]
+    fn permissionless_cleanup_non_expired_fails() {
+        use soroban_sdk::testutils::Ledger;
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let data_store_id = env.register(MockDataStore, ());
+        let order_handler_id = env.register(MockOrderHandler, ());
+        let cleanup_id = env.register(OrderCleanup, ());
+        let client = OrderCleanupClient::new(&env, &cleanup_id);
+
+        let caller = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0; 32]);
+
+        env.ledger().set_timestamp(114_399);
+        let res = client.try_clean_expired_order(&data_store_id, &order_handler_id, &caller, &key);
+        assert_eq!(res.unwrap_err().unwrap(), Error::NotYetExpired.into());
+    }
+
+    #[test]
+    fn permissionless_cleanup_expired_succeeds() {
+        use soroban_sdk::testutils::Ledger;
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let data_store_id = env.register(MockDataStore, ());
+        let order_handler_id = env.register(MockOrderHandler, ());
+        let cleanup_id = env.register(OrderCleanup, ());
+        let client = OrderCleanupClient::new(&env, &cleanup_id);
+
+        let caller = Address::generate(&env);
+        let key = BytesN::from_array(&env, &[0; 32]);
+
+        env.ledger().set_timestamp(114_400);
+        let res = client.try_clean_expired_order(&data_store_id, &order_handler_id, &caller, &key);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn batch_cleanup_respects_limit() {
+        use soroban_sdk::testutils::Ledger;
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+
+        let data_store_id = env.register(MockDataStore, ());
+        let order_handler_id = env.register(MockOrderHandler, ());
+        let cleanup_id = env.register(OrderCleanup, ());
+        let client = OrderCleanupClient::new(&env, &cleanup_id);
+
+        let caller = Address::generate(&env);
+        let mut keys = soroban_sdk::vec![&env];
+        for i in 0..101 {
+            keys.push_back(BytesN::from_array(&env, &[i as u8; 32]));
+        }
+
+        env.ledger().set_timestamp(114_400);
+        let res = client.try_clean_expired_orders_batch(
+            &data_store_id,
+            &order_handler_id,
+            &caller,
+            &keys,
+        );
+        assert_eq!(res.unwrap_err().unwrap(), Error::BatchLimitExceeded.into());
+    }
+
+    #[test]
+    fn batch_cleanup_within_limit_succeeds() {
+        use soroban_sdk::testutils::Ledger;
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+
+        let data_store_id = env.register(MockDataStore, ());
+        let order_handler_id = env.register(MockOrderHandler, ());
+        let cleanup_id = env.register(OrderCleanup, ());
+        let client = OrderCleanupClient::new(&env, &cleanup_id);
+
+        let caller = Address::generate(&env);
+        let mut keys = soroban_sdk::vec![&env];
+        for i in 0..10 {
+            keys.push_back(BytesN::from_array(&env, &[i as u8; 32]));
+        }
+
+        env.ledger().set_timestamp(114_400);
+        let res = client.try_clean_expired_orders_batch(
+            &data_store_id,
+            &order_handler_id,
+            &caller,
+            &keys,
+        );
+        assert!(res.is_ok());
     }
 }

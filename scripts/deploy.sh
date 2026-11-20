@@ -294,7 +294,10 @@ invoke "$FEE_HANDLER" initialize \
   --admin "$ADMIN" \
   --role_store "$ROLE_STORE" \
   --data_store "$DATA_STORE"
-ok "fee_handler          $FEE_HANDLER"
+# Protocol fees are only ever paid to this configured recipient; claim_fees
+# reverts with FeeReceiverNotSet until it is set. Override with FEE_RECEIVER.
+invoke "$FEE_HANDLER" set_fee_receiver --receiver "${FEE_RECEIVER:-$ADMIN}"
+ok "fee_handler          $FEE_HANDLER  (fee receiver ${FEE_RECEIVER:-$ADMIN})"
 
 REFERRAL_STORAGE=$(deploy_contract "referral_storage" "$REFERRAL_HASH")
 invoke "$REFERRAL_STORAGE" initialize --admin "$ADMIN"

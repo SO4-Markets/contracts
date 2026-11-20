@@ -1,0 +1,11 @@
+[package]
+name = "clob-model"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+# Pure-Rust, no Soroban dependency — usable from std test targets.
+[lib]
+
+[dependencies]

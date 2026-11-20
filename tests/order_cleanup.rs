@@ -206,7 +206,11 @@ fn permissionless_cancel_expired_order_succeeds() {
     // vault's real balance delta, so the tokens must actually reach the vault
     // (not just the user's own wallet) before create_order is called.
     StellarAssetClient::new(env, &w.short_tk).mint(&user, &(deposit + execution_fee));
-    StellarAssetClient::new(env, &w.short_tk).transfer(&user, &w.ord_vault, &(deposit + execution_fee));
+    StellarAssetClient::new(env, &w.short_tk).transfer(
+        &user,
+        &w.ord_vault,
+        &(deposit + execution_fee),
+    );
 
     set_prices(&w, 2000);
 
@@ -236,7 +240,10 @@ fn permissionless_cancel_expired_order_succeeds() {
     );
 
     // Verify the order exists
-    assert!(hc.get_order(&key).is_some(), "order must exist before cleanup");
+    assert!(
+        hc.get_order(&key).is_some(),
+        "order must exist before cleanup"
+    );
 
     // Advance ledger past the expiry_ledger so order_handler::cleanup_expired_order
     // considers the order expired (it checks ledger sequence > expiry_ledger).
@@ -346,7 +353,11 @@ fn preview_expired_order_reports_correctly() {
     let execution_fee = 1_000_000;
 
     StellarAssetClient::new(env, &w.short_tk).mint(&user, &(deposit + execution_fee));
-    StellarAssetClient::new(env, &w.short_tk).transfer(&user, &w.ord_vault, &(deposit + execution_fee));
+    StellarAssetClient::new(env, &w.short_tk).transfer(
+        &user,
+        &w.ord_vault,
+        &(deposit + execution_fee),
+    );
     set_prices(&w, 2000);
 
     let current_seq = env.ledger().sequence();
@@ -388,7 +399,10 @@ fn preview_expired_order_reports_correctly() {
 
     let preview_after = cc.preview_expired_order(&w.ds, &w.ord_handler, &key);
     assert!(preview_after.exists, "order must still exist");
-    assert!(preview_after.is_expired, "order must be expired after advancing time");
+    assert!(
+        preview_after.is_expired,
+        "order must be expired after advancing time"
+    );
 }
 
 /// set_order_expiry configures a per-OrderType expiry window that preview_expired_order
@@ -418,7 +432,11 @@ fn set_order_expiry_overrides_default_for_configured_order_type() {
     let hc = OHClient::new(env, &w.ord_handler);
 
     // Configured order type: custom 50s expiry.
-    StellarAssetClient::new(env, &w.short_tk).transfer(&user, &w.ord_vault, &(deposit + execution_fee));
+    StellarAssetClient::new(env, &w.short_tk).transfer(
+        &user,
+        &w.ord_vault,
+        &(deposit + execution_fee),
+    );
     let configured_key = hc.create_order(
         &user,
         &CreateOrderParams {
@@ -440,7 +458,11 @@ fn set_order_expiry_overrides_default_for_configured_order_type() {
     );
 
     // Unconfigured order type: still falls back to DEFAULT_ORDER_EXPIRY (2880s).
-    StellarAssetClient::new(env, &w.short_tk).transfer(&user, &w.ord_vault, &(deposit + execution_fee));
+    StellarAssetClient::new(env, &w.short_tk).transfer(
+        &user,
+        &w.ord_vault,
+        &(deposit + execution_fee),
+    );
     let default_key = hc.create_order(
         &user,
         &CreateOrderParams {
@@ -505,7 +527,14 @@ fn record_manual_refund_emits_event_with_all_fields() {
     // compare for exact equality against the one event expected instead.
     let events = env.events().all().filter_by_contract(&w.cleanup);
     let expected_topics: Vec<Val> = (symbol_short!("man_ref"),).into_val(env);
-    let expected_data: Val = (w.admin.clone(), w.short_tk.clone(), receiver, amount, reason).into_val(env);
+    let expected_data: Val = (
+        w.admin.clone(),
+        w.short_tk.clone(),
+        receiver,
+        amount,
+        reason,
+    )
+        .into_val(env);
     assert_eq!(
         events,
         soroban_sdk::vec![env, (w.cleanup.clone(), expected_topics, expected_data)],

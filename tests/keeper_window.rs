@@ -405,9 +405,7 @@ fn flag_and_revoke_stale_keeper_lifecycle() {
     );
 
     // Advance past the default 2 880-ledger window.
-    w.env
-        .ledger()
-        .set_sequence_number(exec_ledger + 2_880 + 1);
+    w.env.ledger().set_sequence_number(exec_ledger + 2_880 + 1);
 
     // Confirm staleness before flagging.
     assert!(
@@ -476,9 +474,7 @@ fn non_admin_cannot_flag_stale_keeper() {
     let exec_ledger: u32 = 500;
     w.env.ledger().set_sequence_number(exec_ledger);
     execute_order_at_current_ledger(&w);
-    w.env
-        .ledger()
-        .set_sequence_number(exec_ledger + 2_880 + 1);
+    w.env.ledger().set_sequence_number(exec_ledger + 2_880 + 1);
 
     assert!(
         oh_c.check_keeper_heartbeat(&w.ds, &order_keeper_role)

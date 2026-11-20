@@ -427,6 +427,9 @@ impl Fill {
     /// Variant used by the contract settlement path. The new accumulator value
     /// is computed before the ledger operation and assigned only after it
     /// succeeds, so a ledger failure leaves the accumulator unchanged.
+    /// Variant used by the contract settlement path. The accumulator is
+    /// preflighted before mutating either economic state, then updated only
+    /// after the ledger operation succeeds.
     pub fn settle_with_fee_and_accumulator(
         &self,
         ledger: &mut SettlementLedger,
@@ -437,11 +440,15 @@ impl Fill {
         let fees = self.fees(config, taker_quote_before)?;
         let total = fees.total()?;
         let next_accrued = accumulator
+        accumulator
             .accrued
             .checked_add(total)
             .ok_or("fee: accumulator overflow")?;
         self.settle_with_fees(ledger, fees, accumulator.token.clone())?;
         accumulator.accrued = next_accrued;
+        // The preflight above proves this cannot fail now.
+        accumulator.accrued = accumulator.accrued.checked_add(total)
+            .ok_or("fee: accumulator overflow")?;
         Ok(fees)
     }
 

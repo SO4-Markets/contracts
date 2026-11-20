@@ -64,28 +64,53 @@ fn setup() -> World {
     // Add market to the global market list
     ds_c.add_address_to_set(&admin, &gmx_keys::market_list_key(&env), &market);
     // Map market → index token (the oracle checks index_token_key, long_token_key, short_token_key)
-    ds_c.set_address(&admin, &gmx_keys::market_index_token_key(&env, &market), &index_tk);
+    ds_c.set_address(
+        &admin,
+        &gmx_keys::market_index_token_key(&env, &market),
+        &index_tk,
+    );
 
-    World { env, admin, keeper, ds, oracle: oracle_addr, market, index_tk }
+    World {
+        env,
+        admin,
+        keeper,
+        ds,
+        oracle: oracle_addr,
+        market,
+        index_tk,
+    }
 }
 
 fn set_initial_price(w: &World, price: i128) {
     OClient::new(&w.env, &w.oracle).set_prices_simple(
         &w.keeper,
-        &Vec::from_array(&w.env, [TokenPrice { token: w.index_tk.clone(), min: price, max: price }]),
+        &Vec::from_array(
+            &w.env,
+            [TokenPrice {
+                token: w.index_tk.clone(),
+                min: price,
+                max: price,
+            }],
+        ),
     );
 }
 
 fn set_price(w: &World, price: i128) {
     OClient::new(&w.env, &w.oracle).set_prices_simple(
         &w.keeper,
-        &Vec::from_array(&w.env, [TokenPrice { token: w.index_tk.clone(), min: price, max: price }]),
+        &Vec::from_array(
+            &w.env,
+            [TokenPrice {
+                token: w.index_tk.clone(),
+                min: price,
+                max: price,
+            }],
+        ),
     );
 }
 
 fn is_paused(w: &World) -> bool {
-    DsClient::new(&w.env, &w.ds)
-        .get_bool(&gmx_keys::is_market_paused_key(&w.env, &w.market))
+    DsClient::new(&w.env, &w.ds).get_bool(&gmx_keys::is_market_paused_key(&w.env, &w.market))
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -102,7 +127,10 @@ fn no_prior_price_does_not_trip_breaker() {
     );
 
     set_price(&w, 2_000 * fp);
-    assert!(!is_paused(&w), "first submission must never trip the circuit breaker");
+    assert!(
+        !is_paused(&w),
+        "first submission must never trip the circuit breaker"
+    );
 }
 
 /// Zero deviation (same price twice): never trips regardless of threshold.
@@ -121,7 +149,10 @@ fn zero_deviation_does_not_trip_breaker() {
     w.env.ledger().set_sequence_number(10);
     set_price(&w, 2_000 * fp); // 0% deviation
 
-    assert!(!is_paused(&w), "zero deviation must not trip the circuit breaker");
+    assert!(
+        !is_paused(&w),
+        "zero deviation must not trip the circuit breaker"
+    );
 }
 
 /// Deviation exactly at the threshold (1500 bps = 15%): NOT tripped.
@@ -145,7 +176,10 @@ fn deviation_at_threshold_does_not_trip() {
     let new_price = base + (base * 1500) / 10_000;
     set_price(&w, new_price);
 
-    assert!(!is_paused(&w), "deviation equal to threshold must NOT trip the circuit breaker");
+    assert!(
+        !is_paused(&w),
+        "deviation equal to threshold must NOT trip the circuit breaker"
+    );
 }
 
 /// Deviation one bps above the threshold (1501 bps): MUST trip.
@@ -168,7 +202,10 @@ fn deviation_above_threshold_trips_breaker() {
     let new_price = base + (base * 1501) / 10_000;
     set_price(&w, new_price);
 
-    assert!(is_paused(&w), "deviation above threshold (1501 bps) must trip the circuit breaker");
+    assert!(
+        is_paused(&w),
+        "deviation above threshold (1501 bps) must trip the circuit breaker"
+    );
 }
 
 /// Price drop (negative deviation) of >15% also trips the breaker.
@@ -190,7 +227,10 @@ fn downward_deviation_above_threshold_trips_breaker() {
     let new_price = base - (base * 2000) / 10_000;
     set_price(&w, new_price);
 
-    assert!(is_paused(&w), "downward price manipulation beyond threshold must pause the market");
+    assert!(
+        is_paused(&w),
+        "downward price manipulation beyond threshold must pause the market"
+    );
 }
 
 /// When threshold is 0 (not configured), the circuit breaker is disabled.
@@ -208,7 +248,10 @@ fn zero_threshold_disables_circuit_breaker() {
     let new_price = base * 3;
     set_price(&w, new_price);
 
-    assert!(!is_paused(&w), "zero threshold must disable the circuit breaker entirely");
+    assert!(
+        !is_paused(&w),
+        "zero threshold must disable the circuit breaker entirely"
+    );
 }
 
 /// Only the market whose token matches is paused; an unrelated market is unaffected.
@@ -229,8 +272,16 @@ fn only_matching_market_is_paused() {
     );
 
     // Set threshold for both markets
-    ds_c.set_u128(&w.admin, &gmx_keys::circuit_breaker_factor_key(&w.env, &w.market), &1500u128);
-    ds_c.set_u128(&w.admin, &gmx_keys::circuit_breaker_factor_key(&w.env, &other_market), &1500u128);
+    ds_c.set_u128(
+        &w.admin,
+        &gmx_keys::circuit_breaker_factor_key(&w.env, &w.market),
+        &1500u128,
+    );
+    ds_c.set_u128(
+        &w.admin,
+        &gmx_keys::circuit_breaker_factor_key(&w.env, &other_market),
+        &1500u128,
+    );
 
     let base = 10_000 * fp;
     set_initial_price(&w, base); // sets price for w.index_tk
@@ -263,7 +314,10 @@ fn set_circuit_breaker_factor_at_threshold_does_not_trip() {
 
     let at_threshold = base + (base * 1500) / 10_000;
     set_price(&w, at_threshold);
-    assert!(!is_paused(&w), "deviation at threshold must not trip the breaker");
+    assert!(
+        !is_paused(&w),
+        "deviation at threshold must not trip the breaker"
+    );
 }
 
 /// set_circuit_breaker_factor must write the same key check_circuit_breaker
@@ -283,7 +337,10 @@ fn set_circuit_breaker_factor_over_threshold_trips() {
 
     let over_threshold = base + (base * 1501) / 10_000;
     set_price(&w, over_threshold);
-    assert!(is_paused(&w), "deviation one bps over the configured threshold must trip");
+    assert!(
+        is_paused(&w),
+        "deviation one bps over the configured threshold must trip"
+    );
 }
 
 /// set_circuit_breaker_factor must reject a non-admin caller.

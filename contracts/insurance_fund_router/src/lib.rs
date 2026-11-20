@@ -12,7 +12,6 @@ use soroban_sdk::{
     Address, Bytes, BytesN, Env,
 };
 
-
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -191,7 +190,8 @@ impl InsuranceFundRouter {
         require_controller(&env, &role_store, &source);
         let ds = DataStoreClient::new(&env, &data_store);
         let allocation_bps = ds.get_u128(&insurance_fund_allocation_bps_key(&env, &market));
-        let insurance_share = liquidation_penalty.saturating_mul(allocation_bps) / gmx_math::BPS_DIVISOR;
+        let insurance_share =
+            liquidation_penalty.saturating_mul(allocation_bps) / gmx_math::BPS_DIVISOR;
         let treasury_share = liquidation_penalty.saturating_sub(insurance_share);
 
         let token_client = token::TokenClient::new(&env, &token);
@@ -248,7 +248,11 @@ impl InsuranceFundRouter {
 
         let token_client = token::TokenClient::new(&env, &token);
         let fund_balance = token_client.balance(&fund);
-        let available = if fund_balance <= 0 { 0 } else { fund_balance as u128 };
+        let available = if fund_balance <= 0 {
+            0
+        } else {
+            fund_balance as u128
+        };
         let covered_by_fund = available.min(shortfall_amount);
         let pool_remainder = shortfall_amount.saturating_sub(covered_by_fund);
 
@@ -279,7 +283,8 @@ impl InsuranceFundRouter {
     ) -> PenaltySplit {
         let allocation_bps = DataStoreClient::new(&env, &data_store)
             .get_u128(&insurance_fund_allocation_bps_key(&env, &market));
-        let insurance_share = liquidation_penalty.saturating_mul(allocation_bps) / gmx_math::BPS_DIVISOR;
+        let insurance_share =
+            liquidation_penalty.saturating_mul(allocation_bps) / gmx_math::BPS_DIVISOR;
         PenaltySplit {
             insurance_share,
             treasury_share: liquidation_penalty.saturating_sub(insurance_share),
@@ -538,8 +543,7 @@ mod tests {
         client.configure_insurance_fund(&w.ds, &w.rs, &w.admin, &market, &fund, &5_000u32);
         client.configure_market_pool(&w.ds, &w.admin, &market, &pool);
 
-        let coverage =
-            client.cover_shortfall(&w.ds, &w.rs, &w.admin, &market, &w.token, &600u128);
+        let coverage = client.cover_shortfall(&w.ds, &w.rs, &w.admin, &market, &w.token, &600u128);
 
         assert_eq!(coverage.covered_by_fund, 600);
         assert_eq!(coverage.pool_remainder, 0);

@@ -198,9 +198,21 @@ fn exchange_router_multicall_opens_position() {
         &Vec::from_array(
             &env,
             [
-                TokenPrice { token: long_tk.clone(), min: 2_000 * ONE_USD, max: 2_000 * ONE_USD },
-                TokenPrice { token: short_tk.clone(), min: ONE_USD, max: ONE_USD },
-                TokenPrice { token: index_tk.clone(), min: 2_000 * ONE_USD, max: 2_000 * ONE_USD },
+                TokenPrice {
+                    token: long_tk.clone(),
+                    min: 2_000 * ONE_USD,
+                    max: 2_000 * ONE_USD,
+                },
+                TokenPrice {
+                    token: short_tk.clone(),
+                    min: ONE_USD,
+                    max: ONE_USD,
+                },
+                TokenPrice {
+                    token: index_tk.clone(),
+                    min: 2_000 * ONE_USD,
+                    max: 2_000 * ONE_USD,
+                },
             ],
         ),
     );
