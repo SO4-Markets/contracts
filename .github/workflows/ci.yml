@@ -39,6 +39,14 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
+      # cargo fmt --all only covers workspace members. This step extends the
+      # check to every tracked *.rs file so an orphaned source tree (a crate
+      # not yet added to Cargo.toml) cannot hide a parse error behind a
+      # green fmt job. Issue #1156.
+      - name: rustfmt --check all tracked .rs files
+        run: |
+          git ls-files '*.rs' | xargs rustfmt --check --edition 2021
+
   clippy:
     name: clippy (all targets)
     runs-on: ubuntu-latest
