@@ -424,6 +424,9 @@ impl Fill {
         Ok(fees)
     }
 
+    /// Variant used by the contract settlement path. The new accumulator value
+    /// is computed before the ledger operation and assigned only after it
+    /// succeeds, so a ledger failure leaves the accumulator unchanged.
     /// Variant used by the contract settlement path. The accumulator is
     /// preflighted before mutating either economic state, then updated only
     /// after the ledger operation succeeds.
@@ -436,11 +439,13 @@ impl Fill {
     ) -> Result<FillFees, &'static str> {
         let fees = self.fees(config, taker_quote_before)?;
         let total = fees.total()?;
+        let next_accrued = accumulator
         accumulator
             .accrued
             .checked_add(total)
             .ok_or("fee: accumulator overflow")?;
         self.settle_with_fees(ledger, fees, accumulator.token.clone())?;
+        accumulator.accrued = next_accrued;
         // The preflight above proves this cannot fail now.
         accumulator.accrued = accumulator.accrued.checked_add(total)
             .ok_or("fee: accumulator overflow")?;
@@ -1555,6 +1560,37 @@ mod fee_settlement_tests {
         }
         assert_eq!(taker_fees, config.taker_fee(3).unwrap());
     }
+    #[test]
+    fn accumulator_incremented_exactly_once_per_successful_settle_1132() {
+        // Regression guard for #1132: the old preflight pattern ran checked_add
+        // twice on success — once to test for overflow (discarded) and once to
+        // assign. The new pattern computes the value once and assigns it, so
+        // sequential calls must accumulate linearly without double-counting.
+        let env = Env::default();
+        let quote_token = Address::generate(&env);
+        let config = MarketFeeConfig::new(100_000, 50_000).unwrap();
+        let fill = Fill {
+            maker: Address::generate(&env),
+            taker: Address::generate(&env),
+            base_amount: 10,
+            quote_amount: 1_000_000,
+            maker_is_sell: true,
+        };
+        let mut ledger = empty_ledger();
+        let mut accumulator = FeeAccumulator::new(quote_token);
+
+        // First fill: fees are taker=1_000, maker=500 → total=1_500
+        fill.settle_with_fee_and_accumulator(&mut ledger, &mut accumulator, &config, 0)
+            .unwrap();
+        assert_eq!(accumulator.accrued, 1_500, "first fill: accrued should be 1_500");
+
+        // Second fill: same fees → total should be 3_000, not 4_500 (which the
+        // double-add bug would produce if the preflight mutated accrued).
+        fill.settle_with_fee_and_accumulator(&mut ledger, &mut accumulator, &config, 0)
+            .unwrap();
+        assert_eq!(accumulator.accrued, 3_000, "second fill: accrued should be 3_000");
+    }
+
     #[test]
     fn arithmetic_failure_after_fee_calculation_rolls_back_ledger_and_accumulator() {
         let env = Env::default();
