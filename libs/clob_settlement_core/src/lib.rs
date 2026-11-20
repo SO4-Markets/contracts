@@ -13,6 +13,9 @@ pub mod market_registry;
 // #014: market deployment and initialization, MarketCreated event.
 pub mod market_factory;
 
+// #880: canonical market identity derived from asset pair.
+pub mod market_id;
+
 /// Fixed-point denominator used for protocol fee rates.
 /// A rate of 100_000 (0.1%) is represented as 100_000 / FEE_RATE_SCALE.
 pub const FEE_RATE_SCALE: i128 = 100_000_000;
@@ -137,7 +140,10 @@ pub fn validate_batch_size(size: u32) -> Result<(), &'static str> {
 }
 
 /// Validates that a depth query size does not exceed MAX_DEPTH_QUERY_SIZE.
-/// Called when returning market data.
+/// This guard exists for the paginated L2 depth query specified in
+/// `docs/clob-read-api-specification.md` (CLOB-143). There is no caller yet:
+/// the reader module has not been built. Move this function next to the query
+/// function when that module is added (#1188).
 pub fn validate_depth_query_size(size: u32) -> Result<(), &'static str> {
     if size > MAX_DEPTH_QUERY_SIZE {
         return Err("depth: exceeds MAX_DEPTH_QUERY_SIZE");
@@ -162,6 +168,64 @@ pub struct Fill {
     pub base_amount: i128,
     pub quote_amount: i128,
     pub maker_is_sell: bool,
+}
+
+impl Fill {
+    /// Construct a `Fill` from price inputs, deriving `base_amount` and
+    /// `quote_amount` via `fill_quote_legs` so a `Fill` can never represent an
+    /// off-price trade (#1223).
+    ///
+    /// `remaining_before_lots` is the maker's resting quantity before this fill;
+    /// `fill_lots` is how many lots this fill consumes.  Both must be positive
+    /// and `fill_lots <= remaining_before_lots`.
+    pub fn new_from_price(
+        maker: Address,
+        taker: Address,
+        maker_is_sell: bool,
+        lot_size: i128,
+        remaining_before_lots: i128,
+        fill_lots: i128,
+        scaled_price: i128,
+    ) -> Result<Self, &'static str> {
+        if fill_lots <= 0 {
+            return Err("fill: fill_lots must be positive");
+        }
+        let base_amount = fill_lots.checked_mul(lot_size).ok_or("fill: base overflow")?;
+        let legs = fill_quote_legs(lot_size, remaining_before_lots, fill_lots, scaled_price)?;
+        Ok(Self {
+            maker,
+            taker,
+            base_amount,
+            // The taker's debit (buyer's locked quote released) is the
+            // authoritative quote amount for this fill.
+            quote_amount: legs.debit,
+            maker_is_sell,
+        })
+    }
+
+    /// Validate that `quote_amount` is consistent with the maker's resting
+    /// price.  Call this on `Fill` values constructed by callers that supply
+    /// `base_amount`/`quote_amount` directly, as an extra defence layer.
+    pub fn validate_price_consistency(
+        &self,
+        lot_size: i128,
+        remaining_before_lots: i128,
+        fill_lots: i128,
+        scaled_price: i128,
+    ) -> Result<(), &'static str> {
+        if fill_lots <= 0 {
+            return Err("fill: fill_lots must be positive");
+        }
+        let expected_base = fill_lots.checked_mul(lot_size).ok_or("fill: base overflow")?;
+        if self.base_amount != expected_base {
+            return Err("fill: base_amount inconsistent with fill_lots × lot_size");
+        }
+        let legs = fill_quote_legs(lot_size, remaining_before_lots, fill_lots, scaled_price)?;
+        if self.quote_amount != legs.debit {
+            return Err("fill: quote_amount inconsistent with resting price");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -415,6 +479,14 @@ impl FeeTier {
     }
 }
 
+/// `ceil(numerator / denominator)` with checked arithmetic.
+/// Returns `None` on overflow of the rounding adjustment or if `denominator` is zero.
+fn ceil_div(numerator: i128, denominator: i128) -> Option<i128> {
+    if denominator == 0 { return None; }
+    // Add (denominator - 1) before dividing to round up, checking for overflow.
+    numerator.checked_add(denominator - 1).map(|n| n / denominator)
+}
+
 fn validate_fee_rate(rate: i128) -> Result<(), &'static str> {
     if rate < 0 || rate > MAX_FEE_RATE {
         return Err("fee: rate out of range");
@@ -451,9 +523,7 @@ fn fee_on_quote(quote_amount: i128, rate: i128) -> Result<i128, &'static str> {
     if quote_amount < 0 { return Err("fee: negative quote amount"); }
     let numerator = quote_amount.checked_mul(rate).ok_or("fee: multiplication overflow")?;
     if numerator == 0 { return Ok(0); }
-    numerator.checked_add(FEE_RATE_SCALE - 1)
-        .ok_or("fee: rounding overflow")
-        .map(|n| n / FEE_RATE_SCALE)
+    ceil_div(numerator, FEE_RATE_SCALE).ok_or("fee: rounding overflow")
 }
 
 // ============ #958: Fee Buckets ============
@@ -531,11 +601,9 @@ pub fn quote_atoms(
         return Err("quote: negative input");
     }
     let numerator = base_atoms.checked_mul(scaled_price).ok_or("quote overflow")?;
-    let quotient = numerator / PRICE_SCALE;
     match rounding {
-        RoundingMode::Down => Ok(quotient),
-        RoundingMode::Up if numerator % PRICE_SCALE == 0 => Ok(quotient),
-        RoundingMode::Up => Ok(quotient + 1),
+        RoundingMode::Down => Ok(numerator / PRICE_SCALE),
+        RoundingMode::Up => ceil_div(numerator, PRICE_SCALE).ok_or("quote: rounding overflow"),
     }
 }
 
@@ -1542,6 +1610,112 @@ mod rounding_tests {
                 Err(_) => {} // overflow / invalid inputs are not residue violations
             }
         }
+    // ---- ceil_div unit and property tests (#1211) ----
+
+    #[test]
+    fn ceil_div_exact() {
+        assert_eq!(ceil_div(10, 5), Some(2));
+        assert_eq!(ceil_div(0, 5), Some(0));
+    }
+
+    #[test]
+    fn ceil_div_rounds_up() {
+        assert_eq!(ceil_div(11, 5), Some(3));
+        assert_eq!(ceil_div(1, PRICE_SCALE), Some(1));
+    }
+
+    #[test]
+    fn ceil_div_overflow_boundary() {
+        // i128::MAX / 1 == i128::MAX, adjustment overflows
+        assert_eq!(ceil_div(i128::MAX, 1), Some(i128::MAX));
+        // numerator + (denominator - 1) overflows i128
+        assert_eq!(ceil_div(i128::MAX, 2), None);
+    }
+
+    #[test]
+    fn ceil_div_zero_denominator() {
+        assert_eq!(ceil_div(1, 0), None);
+    }
+
+    #[test]
+    fn ceil_div_property_floor_ceiling_sandwich() {
+        // For a range of (n, d) pairs: floor(n/d) <= n/d <= ceil_div(n,d)
+        // and ceil * d >= n, (ceil - 1) * d < n (when ceil > 0)
+        let cases: &[(i128, i128)] = &[
+            (0, 1), (1, 1), (99, 100), (100, 100), (101, 100),
+            (PRICE_SCALE - 1, PRICE_SCALE), (PRICE_SCALE, PRICE_SCALE),
+            (PRICE_SCALE + 1, PRICE_SCALE), (FEE_RATE_SCALE - 1, FEE_RATE_SCALE),
+        ];
+        for &(n, d) in cases {
+            let c = ceil_div(n, d).expect("no overflow in test cases");
+            assert!(c * d >= n, "ceil_div({n},{d})={c}: c*d < n");
+            if c > 0 {
+                assert!((c - 1) * d < n, "ceil_div({n},{d})={c}: (c-1)*d >= n");
+            }
+        }
+    // ---- Fill::new_from_price / validate_price_consistency (#1223) ----
+
+    #[test]
+    fn new_from_price_derives_correct_amounts() {
+        let env = Env::default();
+        let maker = Address::generate(&env);
+        let taker = Address::generate(&env);
+        // 3-lot fill at TICK_3: base = 3, quote debit = 14 (spec example B)
+        let fill = Fill::new_from_price(
+            maker.clone(), taker.clone(), true, 1, 3, 3, TICK_3,
+        ).unwrap();
+        assert_eq!(fill.base_amount, 3);
+        assert_eq!(fill.quote_amount, 14);
+    }
+
+    #[test]
+    fn validate_price_consistency_accepts_correctly_constructed_fill() {
+        let env = Env::default();
+        let maker = Address::generate(&env);
+        let taker = Address::generate(&env);
+        let fill = Fill::new_from_price(
+            maker.clone(), taker.clone(), true, 1, 3, 3, TICK_3,
+        ).unwrap();
+        assert!(fill.validate_price_consistency(1, 3, 3, TICK_3).is_ok());
+    }
+
+    #[test]
+    fn validate_price_consistency_rejects_off_price_quote() {
+        let env = Env::default();
+        let maker = Address::generate(&env);
+        let taker = Address::generate(&env);
+        // Manually construct a Fill with quote_amount that doesn't match the price
+        let fill = Fill {
+            maker,
+            taker,
+            base_amount: 3,
+            quote_amount: 999, // wrong
+            maker_is_sell: true,
+        };
+        assert!(fill.validate_price_consistency(1, 3, 3, TICK_3).is_err());
+    }
+
+    #[test]
+    fn validate_price_consistency_rejects_off_price_base() {
+        let env = Env::default();
+        let maker = Address::generate(&env);
+        let taker = Address::generate(&env);
+        let fill = Fill {
+            maker,
+            taker,
+            base_amount: 99, // wrong
+            quote_amount: 14,
+            maker_is_sell: true,
+        };
+        assert!(fill.validate_price_consistency(1, 3, 3, TICK_3).is_err());
+    }
+
+    #[test]
+    fn new_from_price_rejects_zero_fill_lots() {
+        let env = Env::default();
+        let maker = Address::generate(&env);
+        let taker = Address::generate(&env);
+        assert!(Fill::new_from_price(maker, taker, true, 1, 3, 0, TICK_3).is_err());
     }
 }
 

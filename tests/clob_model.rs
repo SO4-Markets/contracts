@@ -15,7 +15,8 @@
 //!
 //! Published arithmetic rules (all integer, no floating point):
 //! - `notional = price * qty` (price in ticks, qty in lots), computed in `u128`.
-//! - taker fee = `ceil(notional * taker_bps / 10_000)`, maker fee = `floor(notional * maker_bps / 10_000)`.
+//! - taker fee = `ceil(notional * taker_bps / 10_000)`, maker fee = `ceil(notional * maker_bps / 10_000)`.
+//!   Both fees round UP, matching `libs/clob_settlement_core`'s `fee_on_quote` (#1175).
 //! - a fill executes at the resting (maker) price; a buying taker escrows its limit price and is
 //!   refunded `(limit - fill_price) * qty`.
 //!
@@ -26,12 +27,14 @@
 
 #![cfg(test)]
 
-use std::collections::{BTreeMap, VecDeque};
+// Arithmetic rules are now in libs/clob_model so both test files share one
+// canonical implementation (#1180).
+use clob_model::{
+    maker_fee as _maker_fee, notional as _notional, taker_fee as _taker_fee, ArithError, BPS,
+    MAX_FEE_BPS, MAX_PRICE, MAX_QTY,
+};
 
-const MAX_PRICE: u64 = 1_000_000_000_000;
-const MAX_QTY: u64 = u64::MAX / 2;
-const MAX_FEE_BPS: u32 = 10_000;
-const BPS: u128 = 10_000;
+use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Side {
@@ -108,10 +111,18 @@ impl Ledger {
 // Shared arithmetic and validation
 // ---------------------------------------------------------------------------
 
+// Map clob_model's ArithError back to this file's local Error so the rest of
+// the test file (which uses Error::Overflow etc.) compiles unchanged.
+fn arith_err(e: ArithError) -> Error {
+    match e {
+        ArithError::Overflow => Error::Overflow,
+        ArithError::OutOfRange => Error::Overflow, // treated as overflow here
+        ArithError::InvalidFeeRate => Error::InvalidFeeRate,
+    }
+}
+
 fn notional(price: u64, qty: u64) -> Result<u128, Error> {
-    (price as u128)
-        .checked_mul(qty as u128)
-        .ok_or(Error::Overflow)
+    _notional(price, qty).map_err(arith_err)
 }
 
 fn to_i128(v: u128) -> Result<i128, Error> {
@@ -119,13 +130,13 @@ fn to_i128(v: u128) -> Result<i128, Error> {
 }
 
 fn fee_ceil(n: u128, bps: u32) -> Result<u128, Error> {
-    let p = n.checked_mul(bps as u128).ok_or(Error::Overflow)?;
-    Ok(p / BPS + u128::from(p % BPS != 0))
+    _taker_fee(n, bps).map_err(arith_err)
 }
 
+// fee_floor is now also ceil — both sides round UP per #1175.
+// The name is kept so existing call sites compile; it delegates to maker_fee (ceil).
 fn fee_floor(n: u128, bps: u32) -> Result<u128, Error> {
-    let p = n.checked_mul(bps as u128).ok_or(Error::Overflow)?;
-    Ok(p / BPS)
+    _maker_fee(n, bps).map_err(arith_err)
 }
 
 fn check_params(p: &Params) -> Result<(), Error> {
@@ -885,20 +896,21 @@ fn replay_is_deterministic() {
 #[test]
 fn fee_rounding_boundary_vectors() {
     // (notional, bps, expected ceil, expected floor)
+    // Both columns are now ceil — maker_fee rounds UP per #1175.
     let vectors: [(u128, u32, u128, u128); 14] = [
         (0, 30, 0, 0),
         (1, 0, 0, 0),
-        (1, 1, 1, 0),
-        (9_999, 1, 1, 0),
+        (1, 1, 1, 1),
+        (9_999, 1, 1, 1),
         (10_000, 1, 1, 1),
-        (10_001, 1, 2, 1),
-        (3_333, 3, 1, 0),
-        (3_334, 3, 2, 1),
-        (333, 30, 1, 0),
-        (334, 30, 2, 1),
+        (10_001, 1, 2, 2),
+        (3_333, 3, 1, 1),
+        (3_334, 3, 2, 2),
+        (333, 30, 1, 1),
+        (334, 30, 2, 2),
         (1, 10_000, 1, 1),
         (9_999, 10_000, 9_999, 9_999),
-        (10_001, 9_999, 10_000, 9_999),
+        (10_001, 9_999, 10_000, 10_000),
         (u64::MAX as u128, 10_000, u64::MAX as u128, u64::MAX as u128),
     ];
     for (n, bps, ceil, floor) in vectors {
@@ -927,8 +939,10 @@ fn fragmenting_a_fee_cannot_beat_the_aggregate_by_more_than_one_atom_per_part() 
                     .sum();
                 let (agg_taker, agg_maker) =
                     (fee_ceil(agg, 30).unwrap(), fee_floor(agg, 10).unwrap());
+                // Both taker and maker now use ceil, so both are super-additive:
+                // fragmented sum >= aggregate, with at most n-1 extra atoms (#1175).
                 assert!(taker >= agg_taker && taker - agg_taker < n);
-                assert!(maker <= agg_maker && agg_maker - maker < n);
+                assert!(maker >= agg_maker && maker - agg_maker < n);
             }
         }
     }
@@ -977,11 +991,12 @@ fn price_improvement_refund_and_fees_settle_together() {
         .fills;
     assert_eq!(fills.len(), 1);
     assert_eq!(fills[0].price, 100);
-    // notional 500: taker fee ceil(1.5)=2, maker fee floor(0.5)=0, refund 25 of the 525 escrow.
-    assert_eq!(book.ledger.quote(1), -502);
-    assert_eq!(book.ledger.quote(2), 500);
+    // notional 500: taker fee ceil(1.5)=2, maker fee ceil(0.5)=1 (#1175), refund 25.
+    // buyer  quote: -(500 + 2) + 25 = -477; seller quote: 500 - 1 = 499; fees = 3.
+    assert_eq!(book.ledger.quote(1), -477);
+    assert_eq!(book.ledger.quote(2), 499);
     assert_eq!((book.ledger.base(1), book.ledger.base(2)), (5, -5));
-    assert_eq!(book.ledger.fees, 2);
+    assert_eq!(book.ledger.fees, 3);
     assert_conserved(book.ledger());
 }
 
@@ -1044,7 +1059,7 @@ fn maximum_valid_vector_settles_exactly() {
     assert_eq!(fills.len(), 1);
     let n = MAX_PRICE as u128 * MAX_QTY as u128;
     let taker_fee = (n * 30).div_ceil(10_000);
-    let maker_fee = n * 10 / 10_000;
+    let maker_fee = (n * 10).div_ceil(10_000); // ceil per #1175
     assert_eq!(b.ledger.quote(1), -((n + taker_fee) as i128));
     assert_eq!(b.ledger.quote(2), (n - maker_fee) as i128);
     assert_eq!(b.ledger.fees, (taker_fee + maker_fee) as i128);
@@ -1154,4 +1169,65 @@ fn intermediate_multiplication_overflow_is_typed_and_leaves_ledger_unchanged() {
         Err(Error::Overflow)
     );
     assert_eq!(ledger, Ledger::default());
+}
+
+// ---------------------------------------------------------------------------
+// #1175: Fee liability conservation property
+// ---------------------------------------------------------------------------
+
+/// For every fill, `maker_fee(notional, maker_bps) + taker_fee(notional, taker_bps)`
+/// must equal the fee liability recorded in the ledger after `settle()`.
+/// Both sides now use ceil, so the total is deterministic and conservation holds.
+#[test]
+fn fee_liability_equals_maker_plus_taker_for_all_fills() {
+    let cases: &[(u64, u64, u32, u32)] = &[
+        // (price, qty, taker_bps, maker_bps)
+        (1,          1,       0,  0),
+        (1,          1,      30, 10),
+        (333,        7,      30, 10),
+        (10_000,    10,      30, 10),
+        (10_001,     1,      30, 10),
+        (MAX_PRICE,  1,      30, 10),
+        (1,     MAX_QTY,     30, 10),
+        (100,       50, 10_000, 10_000),
+        // Cases where division is inexact — the key regression for #1175.
+        (1,          1,       1,  1),
+        (9_999,      1,       1,  1),
+        (3_334,      3,       3,  3),
+    ];
+
+    for &(price, qty, taker_bps, maker_bps) in cases {
+        let p = Params { taker_bps, maker_bps };
+        let taker = Order { id: 0, owner: 1, side: Side::Buy,  price: price + 1, qty, seq: 0 };
+        let maker = Order { id: 1, owner: 2, side: Side::Sell, price,            qty, seq: 1 };
+        let fill  = Fill  { maker_id: 1, taker_id: 0, price, qty };
+
+        // Skip overflow cases (too large for i128 at max params).
+        let n = match notional(price, qty) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let expected_taker_fee = match fee_ceil(n, taker_bps) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let expected_maker_fee = match fee_floor(n, maker_bps) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let expected_total = match expected_taker_fee.checked_add(expected_maker_fee) {
+            Some(v) => v,
+            None => continue,
+        };
+
+        let mut ledger = Ledger::default();
+        if let Ok(()) = settle(&mut ledger, &p, &taker, &maker, &fill) {
+            assert_eq!(
+                ledger.fees,
+                expected_total as i128,
+                "fee liability mismatch at price={price} qty={qty} taker_bps={taker_bps} maker_bps={maker_bps}"
+            );
+            assert_conserved(&ledger);
+        }
+    }
 }
