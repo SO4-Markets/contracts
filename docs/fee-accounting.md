@@ -168,3 +168,21 @@ preview must produce the same numbers.
 
 Split fills with `taker_rate = 1`: three fills of one quote atom each pay a
 total taker fee of `1`, the same as one fill of three atoms.
+
+### Anti-fragmentation property (CLOB-084)
+
+The telescoping identity behind `cumulative_taker_fee_delta`:
+
+```
+Σ [ceil((tᵢ₋₁ + fillᵢ)·r) − ceil(tᵢ₋₁·r)]  =  ceil(total·r)
+```
+
+holds for every partition of `total` into consecutive fills. This means
+splitting a fill never changes the total fee, so there is no rounding-gain
+exploit from sending many small fills instead of one large one.
+
+This property is verified by the `cumulative_fee_property_tests` module in
+`libs/clob_settlement_core/src/lib.rs` (#1136), which covers 2-way, 3-way,
+and n-way splits across a seeded corpus of `(total, rate, split-points)`
+triples, plus the degenerate cases (zero fill, zero before, rate 0,
+rate `MAX_FEE_RATE`).
