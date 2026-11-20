@@ -77,6 +77,7 @@ Before opening a review request, confirm every item below. Reviewers will use th
 - [ ] `cargo check --workspace` produces zero errors.
 - [ ] `cargo clippy --workspace -- -D warnings` produces zero warnings.
 - [ ] `stellar contract build` completes successfully (wasm artefacts are produced, not committed).
+- [ ] If you added a new crate directory, it is listed in the root `Cargo.toml` workspace members **before** opening the PR. `cargo fmt --all` only covers workspace members; an unlisted crate can contain a syntax error that passes the CI fmt gate (issue #1156). The CI workflow runs `rustfmt --check --edition 2021` over every tracked `*.rs` file as a second guard, but adding the crate to the workspace is the correct long-term fix.
 
 ### Documentation
 
