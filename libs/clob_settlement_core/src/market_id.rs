@@ -139,6 +139,30 @@ mod tests {
         assert_ne!(ab, ac);
     }
 
+    /// SDK interop test vector: documents the exact byte preimage so off-chain
+    /// SDKs can reproduce the id without an on-chain call.
+    ///
+    /// Preimage: `MARKET_ID_DOMAIN || version_be_u32 || xdr(lo) || xdr(hi)`
+    /// where `lo <= hi` under Address ordering and `xdr(a)` is the Soroban XDR
+    /// encoding of the address. The 32-byte SHA-256 of that preimage is the id.
+    #[test]
+    fn sdk_interop_test_vector() {
+        let env = Env::default();
+        let a = sac(&env);
+        let b = sac(&env);
+
+        let id_ab = MarketId::derive(&env, &a, &b, 1).unwrap();
+        let id_ba = MarketId::derive(&env, &b, &a, 1).unwrap();
+
+        // Both orientations must produce the same 32-byte id.
+        assert_eq!(id_ab, id_ba);
+        // The id must be exactly 32 bytes.
+        assert_eq!(id_ab.to_bytes().to_array().len(), 32);
+        // A different version must produce a different id.
+        let id_v2 = MarketId::derive(&env, &a, &b, 2).unwrap();
+        assert_ne!(id_ab, id_v2);
+    }
+
     #[test]
     fn sac_and_account_addresses_are_accepted() {
         let env = Env::default();

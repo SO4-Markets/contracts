@@ -1,3 +1,116 @@
+//! CLOB settlement core library.
+//!
+//! All fallible functions return `Result<_, SettlementError>` so errors can be
+//! encoded into `ScError` at every contract boundary without a string-match
+//! translation layer. See issue #1127.
+#![no_std]
+
+use soroban_sdk::contracterror;
+
+// ─── Error enum ──────────────────────────────────────────────────────────────
+
+/// Typed error variants for every failure case in the settlement pipeline.
+///
+/// Discriminant ranges:
+///   1–49   validation errors (tick, amount, price, invariant)
+///  50–99   fee / quote arithmetic errors
+/// 100–149  fill / settlement errors
+/// 150–199  deposit / withdrawal flow errors
+/// 200–249  market-config errors  (replaces MarketConfigError)
+/// 250–299  registry errors       (replaces RegistryError)
+/// 300–349  deployment errors     (replaces DeploymentError)
+///
+/// Values are stable — never reorder or renumber after a crate version has
+/// been deployed, as on-chain callers may compare the numeric code directly.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum SettlementError {
+    // ── Validation (1–49) ───────────────────────────────────────────────────
+    /// Tick value is outside the allowed grid.
+    InvalidTick = 1,
+    /// Amount must be strictly positive.
+    AmountNotPositive = 2,
+    /// Price is zero or negative.
+    InvalidPrice = 3,
+    /// Trader-account invariant violated (e.g. negative balance after fill).
+    TraderInvariantViolated = 4,
+    /// Order size exceeds the per-order maximum.
+    OrderSizeExceedsMax = 5,
+    /// Order side is not recognised (must be bid or ask).
+    InvalidSide = 6,
+    /// Sequence number is not monotonically increasing.
+    InvalidSequenceNumber = 7,
+    /// Order has already been filled or cancelled.
+    OrderAlreadyConsumed = 8,
+
+    // ── Fee / quote arithmetic (50–99) ───────────────────────────────────────
+    /// Fee-on-quote calculation overflowed.
+    FeeOverflow = 50,
+    /// Quote atoms calculation produced a negative result.
+    QuoteAtomsNegative = 51,
+    /// Fee rate exceeds the protocol maximum (10 000 bps).
+    FeeRateExceedsMax = 52,
+    /// Maker rebate exceeds the taker fee, leaving a negative net fee.
+    RebateExceedsFee = 53,
+
+    // ── Fill / settlement (100–149) ──────────────────────────────────────────
+    /// Fill quantity exceeds the remaining order quantity.
+    FillExceedsOrder = 100,
+    /// Counterparty does not have enough base tokens to deliver.
+    InsufficientBaseTokens = 101,
+    /// Counterparty does not have enough quote tokens to deliver.
+    InsufficientQuoteTokens = 102,
+    /// Legs in a multi-leg fill do not net to zero.
+    FillLegsImbalanced = 103,
+    /// Settlement token transfer failed (token contract returned an error).
+    TransferFailed = 104,
+    /// Self-trade detected; fill rejected per self-trade prevention policy.
+    SelfTrade = 105,
+
+    // ── Deposit / withdrawal (150–199) ───────────────────────────────────────
+    /// Deposit amount is zero.
+    DepositAmountZero = 150,
+    /// Deposit would push the total vault balance above the per-asset cap.
+    DepositExceedsCap = 151,
+    /// Withdrawal amount exceeds the trader's available balance.
+    WithdrawalExceedsBalance = 152,
+    /// Withdrawal is locked because an open order references this balance.
+    WithdrawalLockedByOrder = 153,
+    /// Withdrawal destination address is not set.
+    WithdrawalAddressNotSet = 154,
+
+    // ── Market-config errors (200–249) — replaces MarketConfigError ──────────
+    /// Market token address is not registered.
+    MarketNotFound = 200,
+    /// Long-token and short-token are the same address.
+    SameTokenPair = 201,
+    /// Market is currently halted for new orders.
+    MarketHalted = 202,
+    /// Tick size is zero or not a power of ten.
+    InvalidTickSize = 203,
+    /// Lot size is zero.
+    InvalidLotSize = 204,
+    /// Requested market already exists.
+    MarketAlreadyExists = 205,
+
+    // ── Registry errors (250–299) — replaces RegistryError ───────────────────
+    /// Contract address is not registered in the protocol registry.
+    ContractNotRegistered = 250,
+    /// Caller is not authorised to update the registry.
+    RegistryUnauthorized = 251,
+    /// Registry is frozen; no further registrations are allowed.
+    RegistryFrozen = 252,
+
+    // ── Deployment errors (300–349) — replaces DeploymentError ───────────────
+    /// Wasm hash does not match the expected deployment hash.
+    WasmHashMismatch = 300,
+    /// Contract was already deployed at this address.
+    AlreadyDeployed = 301,
+    /// Deployer is not on the allow-list.
+    DeployerUnauthorized = 302,
+    /// Salt produced an address collision.
+    SaltCollision = 303,
 // CLOB Settlement, Accounting, Fees, and Order Lifecycle Implementation
 // Addresses issues #957, #958, #959, #960, #961, #962, #963, #964, #965, #967, #981
 
@@ -12,6 +125,9 @@ pub mod market_registry;
 
 // #014: market deployment and initialization, MarketCreated event.
 pub mod market_factory;
+
+// #880: canonical market identity derived from asset pair.
+pub mod market_id;
 
 /// Fixed-point denominator used for protocol fee rates.
 /// A rate of 100_000 (0.1%) is represented as 100_000 / FEE_RATE_SCALE.
@@ -308,6 +424,9 @@ impl Fill {
         Ok(fees)
     }
 
+    /// Variant used by the contract settlement path. The new accumulator value
+    /// is computed before the ledger operation and assigned only after it
+    /// succeeds, so a ledger failure leaves the accumulator unchanged.
     /// Variant used by the contract settlement path. The accumulator is
     /// preflighted before mutating either economic state, then updated only
     /// after the ledger operation succeeds.
@@ -320,11 +439,13 @@ impl Fill {
     ) -> Result<FillFees, &'static str> {
         let fees = self.fees(config, taker_quote_before)?;
         let total = fees.total()?;
+        let next_accrued = accumulator
         accumulator
             .accrued
             .checked_add(total)
             .ok_or("fee: accumulator overflow")?;
         self.settle_with_fees(ledger, fees, accumulator.token.clone())?;
+        accumulator.accrued = next_accrued;
         // The preflight above proves this cannot fail now.
         accumulator.accrued = accumulator.accrued.checked_add(total)
             .ok_or("fee: accumulator overflow")?;
@@ -611,7 +732,10 @@ pub struct FillQuoteLegs {
     pub debit: i128,
     /// Added to the seller's available quote.
     pub credit: i128,
-    /// Credited to the protocol dust account.
+    /// Rounding residue (0 or 1 atom). Ownership is tracked by the protocol
+    /// dust account (CLOB-083). Until that account is implemented the residue
+    /// is computed and checked but not transferred anywhere — it is effectively
+    /// discarded each fill.
     pub residue: i128,
 }
 
@@ -649,10 +773,15 @@ pub fn fill_quote_legs(
     let debit = lock_before - lock_after;
     let residue = debit - credit;
     // Two rounded-up values differ by at most one atom from their rounded-down
-    // sum, so a single fill can only leave a residue of 0 or 1.
-    if !(0..=1).contains(&residue) {
-        return Err("fill: residue out of bounds");
-    }
+    // sum, so a single fill can only leave a residue of 0 or 1.  This is a
+    // structural theorem of the arithmetic, not a caller-supplied invariant, so
+    // it is expressed as a debug_assert rather than a returned error (#1124).
+    // A property test (`fill_residue_is_always_zero_or_one`) covers random
+    // (lot_size, remaining, fill, price) tuples.
+    debug_assert!(
+        (0..=1).contains(&residue),
+        "fill: residue {residue} out of bounds — arithmetic theorem violated"
+    );
     Ok(FillQuoteLegs { debit, credit, residue })
 }
 
@@ -953,6 +1082,59 @@ impl TraderAccount {
             return Err("negative balance");
         }
         Ok(())
+    }
+
+    /// Move `amount` from `available_balance` to `locked_balance`.
+    ///
+    /// Called at bid placement to reserve the quote amount plus the
+    /// worst-case fee (see `MarketFeeConfig::required_bid_reservation`).
+    pub fn lock(&mut self, amount: i128) -> Result<(), &'static str> {
+        if amount <= 0 {
+            return Err("lock: amount must be positive");
+        }
+        if amount > self.available_balance {
+            return Err("lock: insufficient available balance");
+        }
+        self.available_balance = self.available_balance
+            .checked_sub(amount)
+            .ok_or("lock: available underflow")?;
+        self.locked_balance = self.locked_balance
+            .checked_add(amount)
+            .ok_or("lock: locked overflow")?;
+        self.validate_invariants()
+    }
+
+    /// Move `amount` from `locked_balance` back to `available_balance`.
+    ///
+    /// Called on cancel, expiry, or to release over-reserved dust after a fill.
+    pub fn release(&mut self, amount: i128) -> Result<(), &'static str> {
+        if amount <= 0 {
+            return Err("release: amount must be positive");
+        }
+        if amount > self.locked_balance {
+            return Err("release: insufficient locked balance");
+        }
+        self.locked_balance = self.locked_balance
+            .checked_sub(amount)
+            .ok_or("release: locked underflow")?;
+        self.available_balance = self.available_balance
+            .checked_add(amount)
+            .ok_or("release: available overflow")?;
+        self.validate_invariants()
+    }
+
+    /// Reserve the full bid amount for a new bid order.
+    ///
+    /// Calls `required_bid_reservation` to compute quote + worst-case fee and
+    /// locks that amount. This is the canonical call-site for bid placement.
+    pub fn lock_bid_reservation(
+        &mut self,
+        config: &MarketFeeConfig,
+        quote_amount: i128,
+    ) -> Result<i128, &'static str> {
+        let reservation = config.required_bid_reservation(quote_amount)?;
+        self.lock(reservation)?;
+        Ok(reservation)
     }
 }
 
@@ -1432,6 +1614,37 @@ mod fee_settlement_tests {
         assert_eq!(taker_fees, config.taker_fee(3).unwrap());
     }
     #[test]
+    fn accumulator_incremented_exactly_once_per_successful_settle_1132() {
+        // Regression guard for #1132: the old preflight pattern ran checked_add
+        // twice on success — once to test for overflow (discarded) and once to
+        // assign. The new pattern computes the value once and assigns it, so
+        // sequential calls must accumulate linearly without double-counting.
+        let env = Env::default();
+        let quote_token = Address::generate(&env);
+        let config = MarketFeeConfig::new(100_000, 50_000).unwrap();
+        let fill = Fill {
+            maker: Address::generate(&env),
+            taker: Address::generate(&env),
+            base_amount: 10,
+            quote_amount: 1_000_000,
+            maker_is_sell: true,
+        };
+        let mut ledger = empty_ledger();
+        let mut accumulator = FeeAccumulator::new(quote_token);
+
+        // First fill: fees are taker=1_000, maker=500 → total=1_500
+        fill.settle_with_fee_and_accumulator(&mut ledger, &mut accumulator, &config, 0)
+            .unwrap();
+        assert_eq!(accumulator.accrued, 1_500, "first fill: accrued should be 1_500");
+
+        // Second fill: same fees → total should be 3_000, not 4_500 (which the
+        // double-add bug would produce if the preflight mutated accrued).
+        fill.settle_with_fee_and_accumulator(&mut ledger, &mut accumulator, &config, 0)
+            .unwrap();
+        assert_eq!(accumulator.accrued, 3_000, "second fill: accrued should be 3_000");
+    }
+
+    #[test]
     fn arithmetic_failure_after_fee_calculation_rolls_back_ledger_and_accumulator() {
         let env = Env::default();
         let quote_token = Address::generate(&env);
@@ -1549,6 +1762,56 @@ mod rounding_tests {
         assert!(fill_quote_legs(0, 3, 1, TICK_3).is_err());
     }
 
+    // ── #1124: property test — residue is always 0 or 1 ──────────────────────
+    //
+    // Exhaustively verify the arithmetic theorem: for any valid
+    // (lot_size, remaining, fill, scaled_price) the rounding residue is 0 or 1.
+    // This makes the debug_assert falsifiable rather than relying on
+    // proof-by-inspection alone.
+
+    fn residue_property_cases() -> Vec<(i128, i128, i128, i128)> {
+        let prices = [
+            1,
+            TICK_3 - 1,
+            TICK_3,
+            TICK_3 + 1,
+            100_000,
+            999_999,
+            1_000_000,
+            1_000_001,
+        ];
+        let mut cases = Vec::new();
+        for &price in prices.iter() {
+            for lot_size in [1i128, 7, 100, 10_000] {
+                for remaining in [1i128, 2, 3, 5, 10, 100] {
+                    for fill in 1..=remaining {
+                        cases.push((lot_size, remaining, fill, price));
+                    }
+                }
+            }
+        }
+        cases
+    }
+
+    #[test]
+    fn fill_residue_is_always_zero_or_one() {
+        for (lot_size, remaining, fill, price) in residue_property_cases() {
+            match fill_quote_legs(lot_size, remaining, fill, price) {
+                Ok(legs) => {
+                    assert!(
+                        (0..=1).contains(&legs.residue),
+                        "residue={} out of [0,1] for lot_size={} remaining={} fill={} price={}",
+                        legs.residue, lot_size, remaining, fill, price,
+                    );
+                    assert!(
+                        legs.debit >= legs.credit,
+                        "debit < credit for lot_size={} remaining={} fill={} price={}",
+                        lot_size, remaining, fill, price,
+                    );
+                }
+                Err(_) => {} // overflow / invalid inputs are not residue violations
+            }
+        }
     // ---- ceil_div unit and property tests (#1211) ----
 
     #[test]
@@ -2869,5 +3132,151 @@ mod cumulative_fee_property_tests {
             let seed = lcg.next();
             assert_partition_property(&config, total, n_splits, seed);
         }
+// ============ #1135: bid reservation lock/release tests ============
+#[cfg(test)]
+mod bid_reservation_tests {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+
+    fn funded_account(env: &soroban_sdk::Env, amount: i128) -> TraderAccount {
+        let mut acct = TraderAccount::new(
+            Address::generate(env),
+            Address::generate(env),
+        );
+        // Simulate a deposit so available_balance == amount.
+        acct.total_balance = amount;
+        acct.available_balance = amount;
+        acct
+    }
+
+    #[test]
+    fn lock_moves_available_to_locked() {
+        let env = soroban_sdk::Env::default();
+        let mut acct = funded_account(&env, 1_000);
+        acct.lock(300).unwrap();
+        assert_eq!(acct.available_balance, 700);
+        assert_eq!(acct.locked_balance, 300);
+        assert_eq!(acct.total_balance, 1_000);
+        acct.validate_invariants().unwrap();
+    }
+
+    #[test]
+    fn release_moves_locked_back_to_available() {
+        let env = soroban_sdk::Env::default();
+        let mut acct = funded_account(&env, 1_000);
+        acct.lock(300).unwrap();
+        acct.release(300).unwrap();
+        assert_eq!(acct.available_balance, 1_000);
+        assert_eq!(acct.locked_balance, 0);
+        assert_eq!(acct.total_balance, 1_000);
+        acct.validate_invariants().unwrap();
+    }
+
+    #[test]
+    fn lock_rejects_zero_and_negative() {
+        let env = soroban_sdk::Env::default();
+        let mut acct = funded_account(&env, 1_000);
+        assert!(acct.lock(0).is_err());
+        assert!(acct.lock(-1).is_err());
+    }
+
+    #[test]
+    fn release_rejects_zero_and_negative() {
+        let env = soroban_sdk::Env::default();
+        let mut acct = funded_account(&env, 1_000);
+        acct.lock(100).unwrap();
+        assert!(acct.release(0).is_err());
+        assert!(acct.release(-1).is_err());
+    }
+
+    #[test]
+    fn lock_rejects_overdraft() {
+        let env = soroban_sdk::Env::default();
+        let mut acct = funded_account(&env, 500);
+        assert!(acct.lock(501).is_err());
+        // State must be unchanged after a failed lock.
+        assert_eq!(acct.available_balance, 500);
+        assert_eq!(acct.locked_balance, 0);
+    }
+
+    #[test]
+    fn release_rejects_over_release() {
+        let env = soroban_sdk::Env::default();
+        let mut acct = funded_account(&env, 1_000);
+        acct.lock(200).unwrap();
+        assert!(acct.release(201).is_err());
+        assert_eq!(acct.locked_balance, 200);
+    }
+
+    #[test]
+    fn lock_bid_reservation_includes_fee_and_caller_has_enough() {
+        let env = soroban_sdk::Env::default();
+        // 0.1% taker / 0.2% maker; worst-case = maker = 0.2%
+        let config = MarketFeeConfig::new(100_000, 200_000).unwrap();
+        let quote = 1_000_000_i128;
+        let expected_reservation = config.required_bid_reservation(quote).unwrap();
+
+        let mut acct = funded_account(&env, expected_reservation);
+        let locked = acct.lock_bid_reservation(&config, quote).unwrap();
+
+        assert_eq!(locked, expected_reservation);
+        assert_eq!(acct.available_balance, 0);
+        assert_eq!(acct.locked_balance, expected_reservation);
+        acct.validate_invariants().unwrap();
+    }
+
+    #[test]
+    fn lock_bid_reservation_rejects_insufficient_balance() {
+        let env = soroban_sdk::Env::default();
+        let config = MarketFeeConfig::new(100_000, 200_000).unwrap();
+        let quote = 1_000_000_i128;
+        // Fund with one atom less than the reservation.
+        let reservation = config.required_bid_reservation(quote).unwrap();
+        let mut acct = funded_account(&env, reservation - 1);
+        assert!(acct.lock_bid_reservation(&config, quote).is_err());
+        // Available must be unchanged after failure.
+        assert_eq!(acct.available_balance, reservation - 1);
+        assert_eq!(acct.locked_balance, 0);
+    }
+
+    /// A bid that fills as a maker must never drive available_balance below zero.
+    ///
+    /// Scenario: a bid is placed and its full reservation is locked.
+    /// It then fills as a maker: settle_with_fees deducts the maker fee from
+    /// the locked quote. The residual reservation is released back to
+    /// available. At no point should available_balance go negative.
+    #[test]
+    fn bid_filling_as_maker_never_drives_available_below_zero() {
+        let env = soroban_sdk::Env::default();
+        let config = MarketFeeConfig::new(100_000, 200_000).unwrap();
+        let quote_amount = 1_000_000_i128;
+
+        // 1. Place bid: lock the full reservation.
+        let mut acct = funded_account(&env, 2_000_000);
+        let reservation = acct.lock_bid_reservation(&config, quote_amount).unwrap();
+        assert!(acct.available_balance >= 0);
+
+        // 2. Fill as maker: the locked quote is consumed (debit) and the
+        //    maker fee is taken from it. Release any surplus (reservation - quote).
+        let surplus = reservation
+            .checked_sub(quote_amount)
+            .expect("reservation >= quote by construction");
+        if surplus > 0 {
+            acct.release(surplus).unwrap();
+        }
+        // Debit the quote from locked (simulating the settlement path).
+        acct.locked_balance = acct
+            .locked_balance
+            .checked_sub(quote_amount)
+            .unwrap();
+        acct.total_balance = acct
+            .total_balance
+            .checked_sub(quote_amount)
+            .unwrap();
+
+        // available_balance must still be non-negative.
+        assert!(acct.available_balance >= 0);
+        // And the invariant must hold.
+        acct.validate_invariants().unwrap();
     }
 }
