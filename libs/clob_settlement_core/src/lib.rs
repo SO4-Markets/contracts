@@ -129,6 +129,15 @@ pub mod market_factory;
 // #880: canonical market identity derived from asset pair.
 pub mod market_id;
 
+// #881: typed integer units
+pub mod units;
+
+// #882: checked tick and lot to quote conversions
+pub mod conversion;
+
+// #883: protocol events
+pub mod events;
+
 /// Fixed-point denominator used for protocol fee rates.
 /// A rate of 100_000 (0.1%) is represented as 100_000 / FEE_RATE_SCALE.
 pub const FEE_RATE_SCALE: i128 = 100_000_000;
@@ -271,6 +280,11 @@ pub fn validate_order_payload_size(size: u32) -> Result<(), &'static str> {
         return Err("order: payload exceeds MAX_ORDER_PAYLOAD_BYTES");
     }
     Ok(())
+}
+
+/// Validates an Order's payload size against protocol bounds (#1116).
+pub fn validate_order_payload(order: &Order) -> Result<(), &'static str> {
+    validate_order_payload_size(order.payload_size())
 }
 
 // ============ #957: Base and Quote Balance Transfers ============
@@ -708,8 +722,26 @@ impl FeeAccumulator {
 
 // ============ #959, #960: Quote Rounding ============
 /// Only `Down` and `Up` exist: the spec names no other rounding mode (section 4.2).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RoundingMode { Down, Up }
+
+impl From<conversion::Rounding> for RoundingMode {
+    fn from(r: conversion::Rounding) -> Self {
+        match r {
+            conversion::Rounding::Down => RoundingMode::Down,
+            conversion::Rounding::Up => RoundingMode::Up,
+        }
+    }
+}
+
+impl From<RoundingMode> for conversion::Rounding {
+    fn from(r: RoundingMode) -> Self {
+        match r {
+            RoundingMode::Down => conversion::Rounding::Down,
+            RoundingMode::Up => conversion::Rounding::Up,
+        }
+    }
+}
 
 /// Quote for `base_atoms` at `scaled_price`, rounded as section 4.2 requires.
 /// Contract and SDK previews must call this function, not re-derive the math.
@@ -843,6 +875,16 @@ impl Order {
             expiry_timestamp: 0,
             remaining_lots,
         }
+    }
+
+    /// Compute estimated encoded payload size of this order (#1116).
+    pub fn payload_size(&self) -> u32 {
+        65
+    }
+
+    /// Validate that order payload size is within bounds (#1116).
+    pub fn validate_payload_size(&self) -> Result<(), &'static str> {
+        validate_order_payload_size(self.payload_size())
     }
 
     /// Create a new GTD order with specified expiry ledger.
