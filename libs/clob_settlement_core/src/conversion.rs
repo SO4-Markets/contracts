@@ -26,9 +26,8 @@
 
 use crate::{ceil_div, units::{BaseAtoms, BaseLots, QuoteAtoms, Tick}};
 
-/// Fixed-point scale of the price: a scaled price of `PRICE_SCALE` is one quote
-/// atom per base atom.
-pub const PRICE_SCALE: i128 = 100_000_000;
+/// Fixed-point scale of the price: re-exported from crate root (#1112).
+pub use crate::PRICE_SCALE;
 
 /// Scaled price increment per tick. Always positive.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

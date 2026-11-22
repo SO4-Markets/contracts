@@ -187,7 +187,7 @@ pub const MAX_ORDER_PAYLOAD_BYTES: u32 = 256;
 
 // ============ Resource-bound guards (Phase 0, #013) ============
 /// Validates that a tick is within protocol bounds.
-/// Rejects any value > MAX_TICK.
+/// Rejects tick == 0 (must be strictly positive) and any value > MAX_TICK.
 pub fn validate_tick(tick: u64) -> Result<(), &'static str> {
     if tick == 0 {
         return Err("tick: must be positive");
@@ -208,7 +208,7 @@ pub fn validate_match_steps(steps: u32) -> Result<(), &'static str> {
 }
 
 /// Validates lot size is positive (protocol spec section 3).
-/// Lot size must be > 0; zero and negative sizes are rejected at market creation.
+/// Lot size must be > 0; zero is rejected at market creation.
 pub fn validate_lot_size(lot_size: u64) -> Result<(), &'static str> {
     if lot_size == 0 {
         return Err("lot_size: must be positive");
@@ -216,8 +216,8 @@ pub fn validate_lot_size(lot_size: u64) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Validates tick size is positive and does not overflow when scaled.
-/// Tick size must be > 0. Product tick * tick_size must fit in u64 (checked at order placement).
+/// Validates tick size is positive.
+/// Tick size must be > 0. Checked at market creation.
 pub fn validate_tick_size(tick_size: u64) -> Result<(), &'static str> {
     if tick_size == 0 {
         return Err("tick_size: must be positive");
@@ -659,16 +659,19 @@ impl FeeBucket {
     }
     
     pub fn apply_execution_fee(&mut self, amount: i128) -> Result<(), &'static str> {
+        if amount < 0 { return Err("fee: negative execution fee"); }
         self.execution_fee = self.execution_fee.checked_add(amount).ok_or("fee overflow")?;
         Ok(())
     }
     
     pub fn apply_position_fee(&mut self, amount: i128) -> Result<(), &'static str> {
+        if amount < 0 { return Err("fee: negative position fee"); }
         self.position_fee = self.position_fee.checked_add(amount).ok_or("fee overflow")?;
         Ok(())
     }
     
     pub fn apply_referral_credit(&mut self, amount: i128) -> Result<(), &'static str> {
+        if amount < 0 { return Err("fee: negative referral credit"); }
         self.referral_credit = self.referral_credit.checked_add(amount).ok_or("credit overflow")?;
         Ok(())
     }
@@ -815,7 +818,7 @@ pub enum TimeInForce {
 /// This structure supports:
 /// - CLOB-918: Ledger-based order expiration (GTD)
 /// - CLOB-978: Timestamp-based order expiration (GTT)
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Order {
     pub id: u64,
     pub owner: Address,
