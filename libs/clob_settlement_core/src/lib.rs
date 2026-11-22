@@ -615,8 +615,12 @@ impl FeeTier {
 /// Returns `None` on overflow of the rounding adjustment or if `denominator` is zero.
 fn ceil_div(numerator: i128, denominator: i128) -> Option<i128> {
     if denominator == 0 { return None; }
-    // Add (denominator - 1) before dividing to round up, checking for overflow.
-    numerator.checked_add(denominator - 1).map(|n| n / denominator)
+    let quotient = numerator / denominator;
+    if numerator % denominator == 0 {
+        Some(quotient)
+    } else {
+        quotient.checked_add(1)
+    }
 }
 
 fn validate_fee_rate(rate: i128) -> Result<(), &'static str> {
@@ -789,7 +793,7 @@ pub fn fill_quote_legs(
     if fill_lots <= 0 || fill_lots > remaining_before_lots {
         return Err("fill: size out of range");
     }
-    let remaining_after_lots = remaining_before_lots - fill_lots;
+    let remaining_after_lots = remaining_before_lots.checked_sub(fill_lots).ok_or("fill: subtraction overflow")?;
     let lock_before = quote_atoms(
         remaining_before_lots.checked_mul(lot_size).ok_or("fill: atoms overflow")?,
         scaled_price,
@@ -805,8 +809,8 @@ pub fn fill_quote_legs(
         scaled_price,
         RoundingMode::Down,
     )?;
-    let debit = lock_before - lock_after;
-    let residue = debit - credit;
+    let debit = lock_before.checked_sub(lock_after).ok_or("fill: debit underflow")?;
+    let residue = debit.checked_sub(credit).ok_or("fill: residue underflow")?;
     // Two rounded-up values differ by at most one atom from their rounded-down
     // sum, so a single fill can only leave a residue of 0 or 1.  This is a
     // structural theorem of the arithmetic, not a caller-supplied invariant, so
