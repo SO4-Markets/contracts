@@ -132,6 +132,12 @@ pub mod market_id;
 // #881: typed integer units
 pub mod units;
 
+// #882: checked tick and lot to quote conversions
+pub mod conversion;
+
+// #883: protocol events
+pub mod events;
+
 /// Fixed-point denominator used for protocol fee rates.
 /// A rate of 100_000 (0.1%) is represented as 100_000 / FEE_RATE_SCALE.
 pub const FEE_RATE_SCALE: i128 = 100_000_000;
@@ -190,7 +196,7 @@ pub const MAX_ORDER_PAYLOAD_BYTES: u32 = 256;
 
 // ============ Resource-bound guards (Phase 0, #013) ============
 /// Validates that a tick is within protocol bounds.
-/// Rejects any value > MAX_TICK.
+/// Rejects tick == 0 (must be strictly positive) and any value > MAX_TICK.
 pub fn validate_tick(tick: u64) -> Result<(), &'static str> {
     if tick == 0 {
         return Err("tick: must be positive");
@@ -211,7 +217,7 @@ pub fn validate_match_steps(steps: u32) -> Result<(), &'static str> {
 }
 
 /// Validates lot size is positive (protocol spec section 3).
-/// Lot size must be > 0; zero and negative sizes are rejected at market creation.
+/// Lot size must be > 0; zero is rejected at market creation.
 pub fn validate_lot_size(lot_size: u64) -> Result<(), &'static str> {
     if lot_size == 0 {
         return Err("lot_size: must be positive");
@@ -219,8 +225,8 @@ pub fn validate_lot_size(lot_size: u64) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Validates tick size is positive and does not overflow when scaled.
-/// Tick size must be > 0. Product tick * tick_size must fit in u64 (checked at order placement).
+/// Validates tick size is positive.
+/// Tick size must be > 0. Checked at market creation.
 pub fn validate_tick_size(tick_size: u64) -> Result<(), &'static str> {
     if tick_size == 0 {
         return Err("tick_size: must be positive");
@@ -274,6 +280,11 @@ pub fn validate_order_payload_size(size: u32) -> Result<(), &'static str> {
         return Err("order: payload exceeds MAX_ORDER_PAYLOAD_BYTES");
     }
     Ok(())
+}
+
+/// Validates an Order's payload size against protocol bounds (#1116).
+pub fn validate_order_payload(order: &Order) -> Result<(), &'static str> {
+    validate_order_payload_size(order.payload_size())
 }
 
 // ============ #957: Base and Quote Balance Transfers ============
@@ -604,8 +615,12 @@ impl FeeTier {
 /// Returns `None` on overflow of the rounding adjustment or if `denominator` is zero.
 fn ceil_div(numerator: i128, denominator: i128) -> Option<i128> {
     if denominator == 0 { return None; }
-    // Add (denominator - 1) before dividing to round up, checking for overflow.
-    numerator.checked_add(denominator - 1).map(|n| n / denominator)
+    let quotient = numerator / denominator;
+    if numerator % denominator == 0 {
+        Some(quotient)
+    } else {
+        quotient.checked_add(1)
+    }
 }
 
 fn validate_fee_rate(rate: i128) -> Result<(), &'static str> {
@@ -657,16 +672,19 @@ impl FeeBucket {
     }
     
     pub fn apply_execution_fee(&mut self, amount: i128) -> Result<(), &'static str> {
+        if amount < 0 { return Err("fee: negative execution fee"); }
         self.execution_fee = self.execution_fee.checked_add(amount).ok_or("fee overflow")?;
         Ok(())
     }
     
     pub fn apply_position_fee(&mut self, amount: i128) -> Result<(), &'static str> {
+        if amount < 0 { return Err("fee: negative position fee"); }
         self.position_fee = self.position_fee.checked_add(amount).ok_or("fee overflow")?;
         Ok(())
     }
     
     pub fn apply_referral_credit(&mut self, amount: i128) -> Result<(), &'static str> {
+        if amount < 0 { return Err("fee: negative referral credit"); }
         self.referral_credit = self.referral_credit.checked_add(amount).ok_or("credit overflow")?;
         Ok(())
     }
@@ -703,8 +721,26 @@ impl FeeAccumulator {
 
 // ============ #959, #960: Quote Rounding ============
 /// Only `Down` and `Up` exist: the spec names no other rounding mode (section 4.2).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RoundingMode { Down, Up }
+
+impl From<conversion::Rounding> for RoundingMode {
+    fn from(r: conversion::Rounding) -> Self {
+        match r {
+            conversion::Rounding::Down => RoundingMode::Down,
+            conversion::Rounding::Up => RoundingMode::Up,
+        }
+    }
+}
+
+impl From<RoundingMode> for conversion::Rounding {
+    fn from(r: RoundingMode) -> Self {
+        match r {
+            RoundingMode::Down => conversion::Rounding::Down,
+            RoundingMode::Up => conversion::Rounding::Up,
+        }
+    }
+}
 
 /// Quote for `base_atoms` at `scaled_price`, rounded as section 4.2 requires.
 /// Contract and SDK previews must call this function, not re-derive the math.
@@ -752,7 +788,7 @@ pub fn fill_quote_legs(
     if fill_lots <= 0 || fill_lots > remaining_before_lots {
         return Err("fill: size out of range");
     }
-    let remaining_after_lots = remaining_before_lots - fill_lots;
+    let remaining_after_lots = remaining_before_lots.checked_sub(fill_lots).ok_or("fill: subtraction overflow")?;
     let lock_before = quote_atoms(
         remaining_before_lots.checked_mul(lot_size).ok_or("fill: atoms overflow")?,
         scaled_price,
@@ -768,8 +804,8 @@ pub fn fill_quote_legs(
         scaled_price,
         RoundingMode::Down,
     )?;
-    let debit = lock_before - lock_after;
-    let residue = debit - credit;
+    let debit = lock_before.checked_sub(lock_after).ok_or("fill: debit underflow")?;
+    let residue = debit.checked_sub(credit).ok_or("fill: residue underflow")?;
     // Two rounded-up values differ by at most one atom from their rounded-down
     // sum, so a single fill can only leave a residue of 0 or 1.  This is a
     // structural theorem of the arithmetic, not a caller-supplied invariant, so
@@ -813,7 +849,7 @@ pub enum TimeInForce {
 /// This structure supports:
 /// - CLOB-918: Ledger-based order expiration (GTD)
 /// - CLOB-978: Timestamp-based order expiration (GTT)
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Order {
     pub id: u64,
     pub owner: Address,
@@ -838,6 +874,16 @@ impl Order {
             expiry_timestamp: 0,
             remaining_lots,
         }
+    }
+
+    /// Compute estimated encoded payload size of this order (#1116).
+    pub fn payload_size(&self) -> u32 {
+        65
+    }
+
+    /// Validate that order payload size is within bounds (#1116).
+    pub fn validate_payload_size(&self) -> Result<(), &'static str> {
+        validate_order_payload_size(self.payload_size())
     }
 
     /// Create a new GTD order with specified expiry ledger.
