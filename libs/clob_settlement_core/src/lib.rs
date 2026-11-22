@@ -129,6 +129,9 @@ pub mod market_factory;
 // #880: canonical market identity derived from asset pair.
 pub mod market_id;
 
+// #881: typed integer units
+pub mod units;
+
 /// Fixed-point denominator used for protocol fee rates.
 /// A rate of 100_000 (0.1%) is represented as 100_000 / FEE_RATE_SCALE.
 pub const FEE_RATE_SCALE: i128 = 100_000_000;
@@ -622,13 +625,8 @@ fn validate_fee_rate(rate: i128) -> Result<(), &'static str> {
 /// 2. **Non-zero rate with zero amount returns zero fee**: If amount = 0, no fee can be charged.
 /// 3. **Rounding direction is always UP (ceiling)**: This ensures the protocol never under-collects
 ///    fees. A trader with a valid order can always pay the rounded-up fee.
-/// 4. **Tiny fills may round to zero**: When `quote_amount * rate < FEE_RATE_SCALE`, the fee rounds
-///    to zero. This is acceptable in v1 because:
-///    - It never causes insolvency: an order that can fill at all has locked enough quote.
-///    - It does not create fragmentation exploits: the cumulative taker fee formula (section 7.2)
-///      ensures splitting a fill never reduces the total fee below the fee of the whole.
-/// 5. **Minimum fee is ZERO**: v1 has no minimum fee per fill. Dust trades are discouraged by
-///    lot size and minimum notional rules enforced during order placement, not by fee logic.
+/// 4. **No minimum beyond the 1-atom ceiling effect**: Any non-zero quote amount at a non-zero rate
+///    rounds up to at least 1 atom (`quote * rate >= 1` yields a minimum 1 atom fee).
 ///
 /// # Examples
 /// - rate = 100_000 (0.1%), quote = 1_000_000 => fee = ceil(1_000_000 * 100_000 / 100_000_000) = 1
@@ -852,6 +850,17 @@ impl Order {
             expiry_timestamp: 0,
             remaining_lots,
         }
+    }
+
+    /// Checked constructor for GTD orders ensuring non-zero expiry and non-zero lots (#1123).
+    pub fn new_gtd_checked(id: u64, owner: Address, remaining_lots: u64, expiry_ledger: u64) -> Result<Self, &'static str> {
+        if expiry_ledger == 0 {
+            return Err("gtd: expiry_ledger must be positive");
+        }
+        if remaining_lots == 0 {
+            return Err("order: remaining_lots must be positive");
+        }
+        Ok(Self::new_gtd(id, owner, remaining_lots, expiry_ledger))
     }
 
     /// Create a new GTT order with specified expiry timestamp.
@@ -1158,6 +1167,12 @@ impl DepositRequest {
         account: &mut TraderAccount,
     ) -> Result<(), &'static str> {
         self.validate()?;
+        if self.trader != account.trader {
+            return Err("deposit: trader mismatch");
+        }
+        if self.asset != account.asset {
+            return Err("deposit: asset mismatch");
+        }
 
         let new_total = self.amount.checked_add(account.total_balance)
             .ok_or("deposit: total overflow")?;
@@ -1192,6 +1207,12 @@ impl WithdrawalRequest {
         account: &mut TraderAccount,
     ) -> Result<(), &'static str> {
         self.validate()?;
+        if self.trader != account.trader {
+            return Err("withdrawal: trader mismatch");
+        }
+        if self.asset != account.asset {
+            return Err("withdrawal: asset mismatch");
+        }
 
         if self.amount > account.available_balance {
             return Err("withdrawal: insufficient available balance");
